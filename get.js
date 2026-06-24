@@ -191,6 +191,20 @@ function handleSeed(uri, ctx) {
   //  THEN del lex.  The fan-out arrives in queue order, so SORT at the flush.
   ctx.outSort = function (rows) { return sortGetRows(rows); };
 
+  //  Resolution-at-entry: pin the root NEW + OLD tree shas (old empty on a
+  //  fresh wt) — the reconcile fan-out walks from these, branch-free.
+  const newTree = r.k.commitTree(r.tip);
+  if (!newTree) throw "be get: tip " + r.tip + " has no tree";
+  const oldTree = (r.oldTip && r.oldTip !== r.tip)
+        ? r.k.commitTree(r.oldTip) : "";
+
+  //  JSQUE-014: the dirty-overlap PRE-PASS barrier (SNIFFOVRL, GET.c:585-591)
+  //  refuses BEFORE HUNKTableOpen — native emits NO banner on GETOVRL, so run
+  //  the check ahead of any out.* push (the loop edge then flushes nothing).
+  //  Refuse if a dirty wt file overlays a NEW target path with NO baseline to
+  //  merge; a fresh clone has no baseline so it is a no-op (guards no-base only).
+  dirtyOverlapCheck(r.k, newTree, oldTree, wt, r.fresh);
+
   out.banner("get", "?" + (r.branch || "") + "#" + r.tip.slice(0, 8), ctx.T0);
 
   //  Pulled-commit rows (UPDATE only), newest-first; rendered above file rows.
@@ -200,21 +214,6 @@ function handleSeed(uri, ctx) {
       out.row("?" + c.hashlet + (c.subject ? "#" + c.subject : ""), "post",
               c.ts, { _post: true });
   }
-
-  //  Resolution-at-entry: pin the root NEW + OLD tree shas (old empty on a
-  //  fresh wt) — the reconcile fan-out walks from these, branch-free.
-  const newTree = r.k.commitTree(r.tip);
-  if (!newTree) throw "be get: tip " + r.tip + " has no tree";
-  const oldTree = (r.oldTip && r.oldTip !== r.tip)
-        ? r.k.commitTree(r.oldTip) : "";
-
-  //  Dirty-overlap PRE-PASS barrier: a whole-wt aggregate that must precede any
-  //  WRITE — refuse if a dirty wt file overlays a NEW target path with NO
-  //  baseline to merge (SNIFFOVRL, GET.c:585).  On a fresh clone (no baseline)
-  //  there is nothing to overlay, so it is a no-op; an update only refuses an
-  //  un-baselined dirty overlap.  v1 clean-overwrites otherwise (the 3-way
-  //  weave is the dirty-edit follow-up), so this guards the no-base case only.
-  dirtyOverlapCheck(r.k, newTree, oldTree, wt, r.fresh);
 
   //  ENQUEUE the root reconcile then the del-sweep fold row LAST (post-order:
   //  the fold sits after every delete leaf the reconcile fans out).

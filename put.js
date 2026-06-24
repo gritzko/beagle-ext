@@ -252,6 +252,15 @@ module.exports = function handle(row, ctx) {
       }
     }
   }
-  //  Leaf: no fan-out.  (The all-skip PUTNONE non-zero-exit + stderr diag is a
-  //  loop-edge concern, not exercised by JSQUE-010's stage-something cases.)
+  //  JSQUE-014: tally staged/skipped across the per-arg fan-out (no enqueue, so
+  //  one call per seed row).  On the LAST named row, an all-skip run is PUTNONE:
+  //  emit the diag + throw so the loop edge flushes the partial banner + skips
+  //  before the non-zero exit (native PUT.c put_stage_named, PUTNONE).
+  ctx._putStaged = (ctx._putStaged || 0) + r.ops.filter(function (o) { return o.path !== null; }).length;
+  ctx._putSkipped = (ctx._putSkipped || 0) + r.items.filter(function (it) { return it.type === "skip"; }).length;
+  ctx._putCalls = (ctx._putCalls || 0) + 1;
+  if (ctx._putCalls >= (ctx.seededRowCount || 1) && ctx._putStaged === 0) {
+    if (ctx._putSkipped > 0) io.log("be put: no eligible paths\n");
+    throw "PUTNONE";                     // non-zero exit (native PUTNONE)
+  }
 };

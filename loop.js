@@ -74,23 +74,32 @@ function run(opts) {
   const order = [];
   let dispatched = 0;
   let row;
-  while ((row = q.next())) {
-    order.push(row.verb);
-    const handle = handlers[row.verb];
-    if (handle == null) {              // unconverted verb: resolve lazily once
-      const lazy = registry.build([row.verb], req);
-      handlers[row.verb] = lazy[row.verb];
-      if (handlers[row.verb] == null)
-        throw "loop: no handler for verb '" + row.verb + "' (one-shot fallback NYI)";
+  //  JSQUE-014: ONE loop-edge catch is the single source of truth for a refusal
+  //  — a handler `throw` (DELDIRTY/PUTNONE/POSTNONE/GETOVRL) jumps past the clean
+  //  edge-flush, so FLUSH the partial banner here (same outSort the clean edge
+  //  uses) THEN re-propagate to the top (jab maps it to the non-zero exit +
+  //  stderr diag; no process.exit in handlers — JS-026).  Handlers no longer
+  //  flush-before-throw (delete.js/post.js); the loop owns it.
+  try {
+    while ((row = q.next())) {
+      order.push(row.verb);
+      const handle = handlers[row.verb];
+      if (handle == null) {            // unconverted verb: resolve lazily once
+        const lazy = registry.build([row.verb], req);
+        handlers[row.verb] = lazy[row.verb];
+        if (handlers[row.verb] == null)
+          throw "loop: no handler for verb '" + row.verb + "' (one-shot fallback NYI)";
+      }
+      const result = handlers[row.verb](row, ctx);
+      dispatched++;
+      //  Fan-out: a handler returns { enqueue: [...] } to append child rows at
+      //  the tail; the cursor re-reads the watermark so they are seen this loop.
+      if (result && result.enqueue && result.enqueue.length)
+        q.append(result.enqueue);
     }
-    //  A throw here is NOT caught — it propagates to the top so a bad row sets
-    //  the process exit code (JS-026 intent: no process.exit in handlers).
-    const result = handlers[row.verb](row, ctx);
-    dispatched++;
-    //  Fan-out: a handler returns { enqueue: [...] } to append child rows at
-    //  the tail; the cursor re-reads the watermark so they are seen this loop.
-    if (result && result.enqueue && result.enqueue.length)
-      q.append(result.enqueue);
+  } catch (e) {
+    if (ctx.out && ctx.out.flush) ctx.out.flush(ctx.outSort || null);
+    throw e;                           // re-propagate: process exit + stderr
   }
   q.markDone();
   q.close(true);                       // clean exit: trim + unlink the queue

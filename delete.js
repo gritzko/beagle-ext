@@ -308,9 +308,8 @@ module.exports = function handle(row, ctx) {
   }
   emitBanner(out, res.banner);          // always (the open `delete:` table)
   if (res.dirty) {
-    //  Flush the PARTIAL banner now: the throw below skips the loop's edge
-    //  flush, but native emits the staged rows before the non-zero exit.
-    out.flush(null);
+    //  JSQUE-014: the loop edge now flushes the partial banner before the throw
+    //  propagates (no per-handler flush); just emit the diag + throw.
     io.log("be delete: " + res.dirtyPath + " has unstamped changes — "
            + "stage with `be put` or revert before deleting\n");
     throw DELDIRTY;                      // non-zero exit (native DELDIRTY)
