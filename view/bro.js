@@ -179,6 +179,50 @@ function plainHunk(hunk) {
   return buf;
 }
 
+//  ---- TABLE-record ingest + colour sink (JAB-003 over JAB-002) ------------
+//  A TABLE hunk is the dog/HUNK 'H'-record stream the binding's feedRow writes:
+//  one record per {uri, verb, ts} row, no text/toks.  The C renderer formats
+//  each as `<date> <verb> <uri>` (an absent ts → 0 drops the date column,
+//  leaving `<verb> <uri>`).  We single-source the dog/THEME SGR through the
+//  binding's C `.plain` (mode 2) / `.color` (mode 1) — JS never re-rolls an SGR.
+
+//  Build a HUNK log from {uri, verb, ts?} rows: one feedRow per row, ts absent
+//  → 0n (the binding's banner then omits the date column).  Sized to the rows
+//  (uri + verb + the TLV framing per record, well over-provisioned) so the feed
+//  never overruns the ram log.  Returns the HUNK log object (a read cursor).
+function buildTableHunk(rows) {
+  let size = 256;                            // header + slack
+  for (const r of rows) size += r.uri.length + 64;
+  const log = abc.ram("HUNK", size);
+  for (const r of rows) {
+    const ts = r.ts === undefined || r.ts === null ? 0n : r.ts;
+    log.feedRow(r.uri, r.verb, ts);
+  }
+  return log;
+}
+
+//  Render a TABLE hunk to bytes: walk every record from the start and render it
+//  through the binding's C sink — plain (mode 2) when !color, colour (mode 1,
+//  SGR-painted via the C THEME) when color — concatenating the per-record bytes.
+//  The plain block is one `<verb> <uri>\n` line per row; colour is the same
+//  content wrapped in SGR escapes (so it carries ESC 27 and differs in length).
+function tableHunk(log, color) {
+  log.rewind();
+  const chunks = [];
+  let total = 0;
+  while (log.next()) {
+    const out = io.buf(256);
+    if (color) log.color(out); else log.plain(out);
+    const bytes = Uint8Array.from(out.data());   // copy: the view is reused
+    chunks.push(bytes);
+    total += bytes.length;
+  }
+  const all = new Uint8Array(total);
+  let off = 0;
+  for (const c of chunks) { all.set(c, off); off += c.length; }
+  return all;
+}
+
 //  ---- path ext (PATHu8sExt) ----------------------------------------------
 //  The extension after the last '.' in the basename, or "" (no dot, or a
 //  dotfile whose only dot is leading).  Drives the tok.parse language.
@@ -199,5 +243,7 @@ module.exports = {
   statusURI: statusURI,
   statusPos: statusPos,
   plainHunk: plainHunk,
+  buildTableHunk: buildTableHunk,
+  tableHunk: tableHunk,
   THEME16: THEME16,
 };
