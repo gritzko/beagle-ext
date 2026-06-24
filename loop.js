@@ -94,7 +94,9 @@ function run(opts) {
   }
   q.markDone();
   q.close(true);                       // clean exit: trim + unlink the queue
-  return { dispatched: dispatched, order: order };
+  //  A handler may set ctx.outSort (a flush comparator) to own its render
+  //  order at the edge — GET: new+upd lex, then del lex (JSQUE-009).
+  return { dispatched: dispatched, order: order, outSort: ctx.outSort };
 }
 
 //  A no-op emit sink so the loop is provable without JSQUE-005 wired in.  Same
@@ -124,19 +126,27 @@ function cli(argv) {
   const flags = [], args = [];
   for (const a of argv.slice(3)) (a[0] === "-" ? flags : args).push(a);
 
-  //  Pin the repo + ambient coordinates ONCE at entry (JSQUE-004).
-  const repo = be.find();
-  const wtl = wtlog.open(repo);
-  const k = store.open(repo.storePath, repo.project);
-  //  A read-only verb (status) needs no .gitignore FS snapshot for its seed.
-  const sctx = resolve.seedCtx(repo, wtl, k, { skipIgnore: true });
+  //  Pin the repo + ambient coordinates ONCE at entry (JSQUE-004).  A fresh
+  //  GET clone targets an EMPTY dir (no `.be` yet) — be.find throws there, so
+  //  GET runs repo-less: the seed is the raw remote URI; the handler creates
+  //  the anchor itself (JSQUE-009).  Other verbs require an existing wt.
+  let repo = null, sctx = null, seeded;
+  try {
+    repo = be.find();
+    const wtl = wtlog.open(repo);
+    const k = store.open(repo.storePath, repo.project);
+    sctx = resolve.seedCtx(repo, wtl, k, { skipIgnore: true });
+    seeded = resolve.seed(verb, args, sctx, repo);
+  } catch (e) {
+    if (verb !== "get") throw e;               // only GET may run repo-less
+    seeded = { rows: args.map(function (a) { return { path: a }; }), refs: [] };
+  }
 
   //  argv -> branch-free seed rows.  No positional args (status) -> ONE self
   //  row so the verb fires once; path/ref verbs fan to one row per arg + the
   //  pinned ref ops.  resolve.seed never re-resolves a ref per row (JSQUE-004).
   //  A ULog row needs a non-empty uri (an empty one is not materialised), so a
   //  no-arg seed carries "." (cwd) — the handler prefers ctx.repo regardless.
-  const seeded = resolve.seed(verb, args, sctx, repo);
   //  JSQUE-012: a `#msg` arg seeds an EMPTY-path row (the message rides ctx.args);
   //  filter those so a fold verb (post) fires once over its change-set, not per word.
   const realRows = seeded.rows.filter(function (r) { return r.path; });
@@ -150,7 +160,10 @@ function cli(argv) {
 
   //  Queue lives beside the wtlog: a primary `.be/` dir hosts `.be/queue`; a
   //  secondary `.be` file has no dir, so scratch under /tmp (unlinked on exit).
-  const queuePath = _queuePath(repo);
+  //  A repo-less GET (fresh clone) has no wtlog yet → keyed /tmp scratch.
+  const queuePath = repo ? _queuePath(repo)
+        : "/tmp/.bequeue." + (io.getenv("USER") || "x") + "." +
+          io.cwd().split("/").join("_");
 
   const out = emit.create();
   const res = run({
@@ -164,7 +177,7 @@ function cli(argv) {
   });
   //  ONE flush at the edge.  status pre-orders its rows (divergence then
   //  buckets), so no global sort comparator — render in push order.
-  out.flush(null);
+  out.flush(res.outSort || null);   // JSQUE-009: GET owns its edge sort order
   return res;
 }
 

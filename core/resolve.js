@@ -159,6 +159,14 @@ function seed(verb, argv, ctx, repo) {
     return { rows: rows, refs: refs, triple: triple };
   }
 
+  //  JSQUE-009: GET's arg is a whole REMOTE URI (scheme/authority/store path),
+  //  not a wt path — classifyArg would mangle it.  Ride it verbatim as the
+  //  seed row; the get handler resolves the remote at entry (its own pin).
+  if (verb === "get") {
+    for (const arg of argv) rows.push({ path: arg });
+    return { rows: rows, refs: refs, triple: triple };
+  }
+
   for (const arg of argv) {
     const c = classifyArg(arg, ctx);
     if (c.kind === "ref") {
