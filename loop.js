@@ -64,6 +64,8 @@ function run(opts) {
     //  JSQUE-013: PATCH's (ours, theirs, fork) commit-triple, pinned ONCE at
     //  seed (resolve.seed); the per-file weave leaves read it off ctx.
     triple: opts.triple || null,
+    //  JSQUE-010: real-path-arg seed count (0 ⇒ the "." row is a placeholder).
+    seededRowCount: opts.seededRowCount != null ? opts.seededRowCount : null,
   };
 
   const order = [];
@@ -133,7 +135,11 @@ function cli(argv) {
   //  no-arg seed carries "." (cwd) — the handler prefers ctx.repo regardless.
   const seeded = resolve.seed(verb, args, sctx, repo);
   const seedRows = seeded.rows.length
-        ? seeded.rows.map(function (r) { return { verb: verb, uri: r.path || "." }; })
+        ? seeded.rows.map(function (r) {
+            //  JSQUE-010: a move-form pin carries a dst (fragment) — emit the
+            //  full `path#dst` uri so the handler re-parses both slots.
+            return { verb: verb, uri: r.dst ? (r.path + "#" + r.dst) : (r.path || ".") };
+          })
         : [{ verb: verb, uri: "." }];
 
   //  Queue lives beside the wtlog: a primary `.be/` dir hosts `.be/queue`; a
@@ -145,6 +151,9 @@ function cli(argv) {
     seedRows: seedRows, queuePath: queuePath, repo: repo, require: require,
     out: out, flags: flags, refs: seeded.refs, resolved: sctx,
     triple: seeded.triple,   // JSQUE-013: forward the seed-pinned PATCH triple
+    //  JSQUE-010: count of REAL path-arg rows (vs the "." placeholder); a
+    //  ref-only run has 0, so the handler applies ctx.refs without staging ".".
+    seededRowCount: seeded.rows.length,
   });
   //  ONE flush at the edge.  status pre-orders its rows (divergence then
   //  buckets), so no global sort comparator — render in push order.
