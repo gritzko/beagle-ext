@@ -29,9 +29,9 @@ const store    = require("../../shared/store.js");
 const classify = require("../../shared/classify.js");
 const dag      = require("../../shared/dag.js");
 const subs     = require("../../shared/subs.js");
-const render   = require("../../view/render.js");
-const dateCol = render.dateCol, verbCol = render.verbCol,
-      writeStdout = render.writeStdout, shQuote = render.shQuote;
+//  JAB-004: render.js's dateCol/verbCol/writeStdout/shQuote are no longer
+//  used here — the emit sink (core/emit.js) owns all column formatting at the
+//  flush edge, and the fork machinery (shQuote) is gone.
 
 //  Render order (status_step / status_emit_summary): ok first (count
 //  only), then staged, then unstaged, then untracked.  `adv` follows
@@ -46,6 +46,18 @@ const SUMMARY_ORDER = ["ok", "put", "new", "mov", "pat", "mod", "adv", "del", "m
 //  (row.uri), seed-pinned flags ride ctx.flags, output goes through `ctx.out`
 //  (one flush at the loop edge), sibling libs via relative ./.  No process.argv
 //  read, no self-run tail.  Read-only leaf: no fan-out, no store write/barrier.
+//
+//  JAB-004 (absorbs JSQUE-015): recurse mounted subs IN-PROCESS — NO forked
+//  child `jab`, NO `/tmp` tmpfile, NO `readlink /proc`, NO `sh -c`.  The loop
+//  already emits rows in pure JS (out.row → render.js); a sub is just MORE
+//  rows on the same `out`, path-prefixed at EMIT time (a URI-aware join, not
+//  the old column-12 string surgery).  Recursion is a synchronous DEPTH-FIRST
+//  walk (emitRepo emits a hunk then immediately recurses each mounted sub),
+//  matching native bare `be --plain`'s BEDefault relay ORDER (parent hunk
+//  fully, then each sub's whole subtree in tree order, blank-line separated).
+//  Depth-first is why we recurse in-process here rather than fanning breadth-
+//  first `status <subWt>` rows onto the FIFO queue (which would interleave a
+//  grandchild AFTER a later sibling — the wrong order).
 module.exports = function handle(row, ctx) {
   //  Recursion (relaying each mounted sub's status as a path-prefixed
   //  `status:<subpath>` hunk) is OPT-IN via `--sub`, OFF by default —
@@ -54,26 +66,54 @@ module.exports = function handle(row, ctx) {
   //  with be_relay_subs).  So default output == `be status --plain`
   //  byte-for-byte; `--sub` reproduces bare `be --plain`'s recursing form.
   //  `--nosub` is accepted (and forces recursion off) for symmetry with
-  //  native's flag + the deep-recursion child call below.
+  //  native's flag.
   //  Flags are seed-pinned (resolution-at-entry, JSQUE-004) — read from ctx,
   //  not the row (the queue round-trip carries only ts/verb/uri).
   const flags = (ctx && ctx.flags) || [];
   const recurse = flags.indexOf("--sub") >= 0 && flags.indexOf("--nosub") < 0;
   const out = ctx && ctx.out;
 
-  const repo = (ctx && ctx.repo) || be.find((row && row.uri) || undefined);
-  const log  = wtlog.open(repo);
-  const k    = store.open(repo.storePath, repo.project);
+  //  The seed (top) row carries the "." cwd placeholder (loop.cli) — its wt is
+  //  the pinned ctx.repo.  Any other uri is a sub wt root (in-process recursion
+  //  passes the absolute sub dir), so re-discover that repo explicitly.
+  const repo = (row && row.uri && row.uri !== ".")
+        ? be.find(row.uri)
+        : ((ctx && ctx.repo) || be.find((row && row.uri) || undefined));
+
+  //  The display-path prefix for this hunk: "" at the top, else this sub's
+  //  path RELATIVE to the top wt (so a grandchild reads `sub/grandchild`).
+  //  Taken EXPLICITLY from the wt roots (JAB-004) — never io.cwd(), which is
+  //  the wrong origin for an in-process sub.
+  const topWt = (ctx && ctx.repo && ctx.repo.wt) || repo.wt;
+  const prefix = relUnder(topWt, repo.wt);
+
+  //  DEPTH-FIRST walk: emit this repo's hunk, then recurse each mounted sub.
+  emitRepo(repo, prefix, out, recurse);
+
+  //  Read-only leaf: no fan-out, nothing to enqueue.
+};
+
+//  Emit ONE repo's status hunk into `out` (header + divergence + bucket rows +
+//  summary), then — when recursing — walk its mounted subs DEPTH-FIRST, each
+//  as a blank-line-separated `status:<subpath>` hunk under `prefix`.  `prefix`
+//  is this repo's path relative to the top wt ("" for the top); a sub's own
+//  rows + header are joined under it via a URI-aware path join, while the sub's
+//  `?<branch>` summary token and the `?<sha>#<subject>` divergence rows are
+//  NOT prefixed (they are not real path columns).
+function emitRepo(repo, prefix, out, recurse) {
+  const log = wtlog.open(repo);
+  const k   = store.open(repo.storePath, repo.project);
 
   const res = classify.classify(repo, log, k);
 
   //  Cur tip (for the ahead/behind divergence: SNIFFAtCurTip, no patch).
   const cur = log.curTip();
-  //  Summary branch label = the BASELINE tip's RAW query (SNIFFAtBaseline
-  //  → bu.query): a named branch (`master`), a detached full sha, or empty
-  //  (trunk → `?`).  NOT the parsed branch, which drops a detached sha.
+  //  Summary branch label = the BASELINE tip's VERBATIM query (SNIFFAtBaseline
+  //  → bu.query): a named branch (`master`), a detached full sha, a mounted
+  //  sub's `/<project>[/<branch>]` anchor query (kept RAW, NOT project-
+  //  stripped — JAB-004), or empty (trunk → `?`).
   const baseTip = log.baselineTip();
-  const branch = (baseTip && baseTip.query) || "";
+  const branch = (baseTip && baseTip.rawQuery) || "";
 
   //  --- JS-033: classify base-only gitlinks (SUBSDirty 3-axis) ---------
   //  Each deferred gitlink (classify.gitlinks) is pin-vs-tip compared on
@@ -106,15 +146,17 @@ module.exports = function handle(row, ctx) {
   //  file rows.  Counts feed the trailing `(behind N, ahead M)` note.
   const diverge = computeDivergence(k, log, cur);
 
-  //  JSQUE-008: push every line through the emit sink (ctx.out) in final
-  //  render order — the loop does ONE flush at the edge.  The columnar rows
+  //  JSQUE-008: push every line through the emit sink (out) in final render
+  //  order — the loop does ONE flush at the edge.  The columnar rows
   //  (divergence + buckets) go via out.row(text, verb, ts); the `status:`
-  //  banner + the `?<branch>\t<counts>` summary + relayed sub hunks are
-  //  pre-formatted framing, pushed verbatim via out.raw.
-  out.raw("status:");
+  //  banner + the `?<branch>\t<counts>` summary are pre-formatted framing,
+  //  pushed verbatim via out.raw.  JAB-004: the header carries this hunk's
+  //  subpath (`status:` at the top, `status:<prefix>` for a sub).
+  out.raw(prefix ? "status:" + prefix : "status:");
 
   //  Commit divergence block FIRST (ahead `post` rows, then behind `miss`
-  //  rows), each `<date7> <verb3> ?<hashlet>#<subject>`.
+  //  rows), each `<date7> <verb3> ?<hashlet>#<subject>`.  These are NOT real
+  //  path columns (a `?<sha>#<subject>` ref token) — NEVER path-prefixed.
   for (const c of diverge.ahead)
     out.row("?" + c.hashlet + (c.subject ? "#" + c.subject : ""), "post", c.ts);
   for (const c of diverge.behind)
@@ -124,7 +166,9 @@ module.exports = function handle(row, ctx) {
   //  `mod` row (appended above) interleaves with file `mod` rows at its
   //  lex position — the SNIFFClassify heap-merge order.  classify already
   //  emits each bucket lex-sorted, so this only re-orders the bucket that
-  //  gained a gitlink row, and is a no-op for the rest.
+  //  gained a gitlink row, and is a no-op for the rest.  JAB-004: each row's
+  //  PATH column is joined under `prefix` at emit time (a URI-aware join,
+  //  replacing relaySub's column-12 slicing).
   for (const bucket of ROW_ORDER) {
     const inBucket = [];
     for (const r of res.rows) if (r.bucket === bucket) inBucket.push(r);
@@ -134,12 +178,15 @@ module.exports = function handle(row, ctx) {
     for (const r of inBucket) {
       let path = r.path;
       if (r.bucket === "mov" && r.dst) path = path + "#" + r.dst;
-      out.row(path, bucket, r.ts);
+      out.row(joinPrefix(prefix, path), bucket, r.ts);
     }
   }
 
-  //  Summary line: `<rel>?<branch>\t<counts>`.
-  const rel = cwdRel(repo.wt);
+  //  Summary line: `<rel>?<branch>\t<counts>`.  At the top, `rel` is the
+  //  cwd-relative prefix (status run from a subdir of the wt); for a sub the
+  //  hunk header already carries the path, so the summary `rel` is empty and
+  //  the `?<branch>` token is the sub's RAW anchor query, NOT path-prefixed.
+  const rel = prefix ? "" : cwdRel(repo.wt);
   let summary = (rel ? rel : "") + "?" + branch + "\t";
   const segs = [];
   for (const b of SUMMARY_ORDER) {
@@ -158,28 +205,80 @@ module.exports = function handle(row, ctx) {
   }
   out.raw(summary);
 
-  //  --- JS-033 recursion (--sub): relay each MOUNTED sub's status as a
-  //  SEPARATE `status:<subpath>` hunk AFTER the parent summary,
-  //  path-prefixed, with the sub's OWN summary line — matching bare
-  //  `be --plain`'s BEDefault relay (be_relay_subs → HUNKu8sRelay).  The
-  //  recursing child is run WITH --sub too (deep trees relay fully);
-  //  relaySub rebases every returned hunk under this level's subpath.
-  //  JSQUE-008: still spawn-based (the in-process sub-row fan-out is a
-  //  follow-up); each relayed line is pushed verbatim via out.raw.
+  //  Native terminates EACH relayed sub block with a blank line (the HUNK
+  //  inter-hunk separator) right after its summary, BEFORE that sub's own
+  //  children — so a deep tree reads header/summary/blank, then the
+  //  grandchild's header/summary/blank, depth-first.  The TOP hunk (prefix
+  //  "") carries NO trailing blank (the first sub follows it directly).
+  if (prefix) out.raw("");
+
+  //  --- JAB-004 recursion (--sub): relay each MOUNTED sub's status as a
+  //  SEPARATE `status:<subpath>` hunk AFTER this hunk's separator, IN-PROCESS
+  //  (no fork) — matching bare `be --plain`'s BEDefault relay (be_relay_subs).
+  //  DEPTH-FIRST in `.gitmodules` DECLARATION order (native KEEPSubsAt parses
+  //  the `.gitmodules` blob top-to-bottom; the tree is authoritative for which
+  //  declared path is a live gitlink — see keeper/SUBS.c::keep_subs_step), NOT
+  //  the lex `res.gitlinks` order.  The recursing child carries the JOINED
+  //  prefix so a grandchild reads `status:<sub>/<grandchild>`.  A sub whose
+  //  mount shard can't be opened is skipped (native's clean-sub *NONE no-op).
   if (recurse) {
-    for (const s of subList) {
-      if (!s.mounted) continue;
-      const block = relaySub(repo, s.path);
-      if (!block) continue;
-      const lines = block.split("\n");
-      //  relaySub returns a trailing-newline-terminated block; the final
-      //  split element is "" — push every line incl. the blank separator
-      //  EXCEPT that trailing empty (raw re-adds one "\n" per push).
-      for (let i = 0; i < lines.length - 1; i++) out.raw(lines[i]);
+    //  Index the tree gitlinks (subList) by path for the mount/gitlink gate;
+    //  drive the ORDER off `.gitmodules`.
+    const byPath = {};
+    for (const s of subList) byPath[s.path] = s;
+    for (const subPath of gitmodulesOrder(repo.wt)) {
+      const s = byPath[subPath];
+      if (!s || !s.mounted) continue;        // declared but not a live mount
+      const subWt = subs.mountWtDir(repo, s.path);
+      let subRepo;
+      try { subRepo = be.find(subWt); } catch (e) { continue; }
+      emitRepo(subRepo, joinPrefix(prefix, s.path), out, recurse);
     }
   }
-  //  Read-only leaf: no fan-out, nothing to enqueue.
-};
+}
+
+//  Parse `<wt>/.gitmodules` and return the declared submodule `path` values in
+//  FILE (declaration) order — the order native recurses subs (KEEPSubsAt drives
+//  SUBSu8sParse over the `.gitmodules` blob top-to-bottom).  A minimal git-
+//  config reader: `[submodule "<name>"]` opens a section, `path = <p>` records
+//  it; only sections with a path are kept, deduped first-wins.  Absent/unreadable
+//  `.gitmodules` → [] (no declared subs).  Native reads the committed blob from
+//  the baseline tree; for a checked-out mount the wt copy is the same bytes — and
+//  the per-path gitlink/mount gate above filters any stale declaration.
+function gitmodulesOrder(wtRoot) {
+  const p = (wtRoot.endsWith("/") ? wtRoot : wtRoot + "/") + ".gitmodules";
+  let text;
+  try { text = utf8.Decode(io.mmap(p, "r").data()); } catch (e) { return []; }
+  const order = [], seen = {};
+  let inSubmod = false;
+  for (let line of text.split("\n")) {
+    line = line.replace(/[#;].*$/, "").trim();      // strip comments + ws
+    if (!line) continue;
+    if (line[0] === "[") {                          // section header
+      inSubmod = /^\[\s*submodule\b/i.test(line);
+      continue;
+    }
+    if (!inSubmod) continue;
+    const eq = line.indexOf("=");
+    if (eq < 0) continue;
+    const key = line.slice(0, eq).trim().toLowerCase();
+    const val = line.slice(eq + 1).trim();
+    if (key === "path" && val && !seen[val]) { seen[val] = true; order.push(val); }
+  }
+  return order;
+}
+
+//  URI-aware join of a path column under a sub prefix (JAB-004) — replaces
+//  relaySub's column-12 string slicing.  An empty prefix is a no-op (top
+//  level); else `<prefix>/<path>`.  `uri._parse` confirms the column is a real
+//  path (it has a path component and no scheme/authority); a non-path token is
+//  returned untouched (defensive — the bucket rows are always plain paths).
+function joinPrefix(prefix, col) {
+  if (!prefix) return col;
+  const u = uri._parse(col);
+  if (u.scheme || u.authority) return col;   // not a bare path — leave as-is
+  return prefix + "/" + col;
+}
 
 //  Resolve cur tip + the local ref tip of cur's branch, compute the
 //  ahead/behind commit divergence via dag.js.  Mirrors
@@ -198,107 +297,6 @@ function computeDivergence(k, log, cur) {
   return dag.aheadBehind(k, cur.sha, tip);
 }
 
-//  Recurse this script into a mounted sub and return its FULL output
-//  rebased under `<subpath>` — a separate `status:<subpath>` hunk (header
-//  + path-prefixed rows + the sub's OWN summary), matching bare
-//  `be --plain`'s BEDefault relay (be_relay_subs → HUNKu8sRelay).  The
-//  child runs recursively (no --nosub), so a deep tree's grandchild hunks
-//  come back as `status:<grandchild>`; we rebase EACH hunk's header path
-//  and EACH row's path under `<subpath>`.  A failed/empty/clean child
-//  yields nothing (native `*NONE` clean-sub no-op).
-function relaySub(repo, subpath) {
-  const childWt = subs.mountWtDir(repo, subpath);
-  let out;
-  try { out = runStatusIn(childWt); } catch (e) { return ""; }
-  if (!out) return "";
-  const lines = out.split("\n");
-
-  //  Split the child output into hunks (each starts at a `status:` line)
-  //  and rebase each under `<subpath>`.  Native bare `be --plain` relays
-  //  EVERY mounted sub (BEDefault → be_relay_subs), including a CLEAN sub
-  //  — which comes back as a header + a pure-`ok` summary with no rows
-  //  (e.g. `status:abc\n?<sha>\t237 ok`).  So every hunk is kept; the row
-  //  set may legitimately be empty.
-  const hunks = [];
-  let cur = null;
-  for (let i = 0; i < lines.length; i++) {
-    const ln = lines[i];
-    if (ln === "") continue;
-    if (ln === "status:" || ln.indexOf("status:") === 0) {
-      cur = { header: ln, rows: [], summary: "" };
-      hunks.push(cur);
-      continue;
-    }
-    if (!cur) continue;
-    if (ln.indexOf("\t") >= 0) { cur.summary = ln; continue; }
-    cur.rows.push(ln);
-  }
-
-  let res = "";
-  let emitted = false;
-  for (const h of hunks) {
-    emitted = true;
-    //  Rebase the hunk header.
-    if (h.header === "status:") res += "status:" + subpath + "\n";
-    else res += "status:" + subpath + "/" +
-                h.header.slice("status:".length) + "\n";
-    //  Rebase each row's path column (starts at column 12).
-    for (const r of h.rows) {
-      if (r.length <= 12) { res += r + "\n"; continue; }
-      res += r.slice(0, 12) + subpath + "/" + r.slice(12) + "\n";
-    }
-    if (h.summary) res += h.summary + "\n";
-  }
-  //  Native's relay terminates the relayed block with a trailing blank
-  //  line (the HUNK inter-hunk separator); mirror it so bare `be --plain`'s
-  //  byte tail matches.
-  if (emitted) res += "\n";
-  return res;
-}
-
-//  Run the loop's STATUS handler inside `dir` via the same jab and capture
-//  stdout.  Mirrors BERelaySub's fork+chdir+exec; JSQUE-008: spawns the
-//  INTEGRATED loop entry (`jab be/loop.js status --sub`), not the now-exported
-//  status.js (which no longer self-runs).  Temp-file sink, read back.  The
-//  child recurses on its own (--sub) so deep trees relay fully; relaySub
-//  rebases every returned hunk under this level's subpath.  In-process sub-row
-//  fan-out (no spawn) is a JSQUE-008 follow-up.
-function runStatusIn(dir) {
-  const loop = __dirname + "/../../loop.js";   // JSQUE-016: be/ root loop entry
-  const tmp = "/tmp/.bestatus.sub." + Date.now() + "." +
-              Math.floor(Math.random() * 1e6);
-  let fd;
-  try { fd = io.open(tmp, "c"); } catch (e) { return ""; }
-  //  io.spawnFds has no cwd knob, so set the child's cwd via a POSIX
-  //  `sh -c 'cd <dir> && <jab> <loop> status --plain --sub'`.  process.argv[0]
-  //  is the bare `jab` name, so resolve the RUNNING jab binary's absolute path
-  //  inside the shell via `readlink /proc/$PPID/exe` — $PPID is the jab that
-  //  spawned this sh.  --plain keeps the child output text-stable for rebase.
-  let pid;
-  try {
-    const sh = shBin();
-    if (!sh) { io.close(fd); try { io.unlink(tmp); } catch (e) {} return ""; }
-    const cmd = "cd " + shQuote(dir) +
-                " && JAB=$(readlink /proc/$PPID/exe 2>/dev/null)" +
-                ' && [ -n "$JAB" ] || JAB=jab; "$JAB" ' +
-                shQuote(loop) + " status --plain --sub";
-    pid = io.spawnFds(sh, [sh, "-c", cmd], -1, fd);
-    io.close(fd);
-    io.reap(pid);
-  } catch (e) { try { io.close(fd); } catch (e2) {} try { io.unlink(tmp); } catch (e3) {} return ""; }
-  let text = "";
-  try { text = utf8.Decode(io.mmap(tmp, "r").data()); } catch (e) { text = ""; }
-  try { io.unlink(tmp); } catch (e) {}
-  return text;
-}
-
-function shBin() {
-  for (const c of ["/bin/sh", "/usr/bin/sh"]) {
-    try { if (io.stat(c).kind === "reg") return c; } catch (e) {}
-  }
-  return undefined;
-}
-
 //  YES iff `<wt>/<subpath>/.be` is a regular file (a live mount).
 //  Mirrors SNIFFSubIsMount: only a mounted sub is classified/recursed.
 function isMount(wtRoot, subpath) {
@@ -306,7 +304,21 @@ function isMount(wtRoot, subpath) {
   try { return io.stat(p).kind === "reg"; } catch (e) { return false; }
 }
 
-//  cwd-relative path under the wt root (empty when cwd == wt root).
+//  `childWt` relative to `topWt` — the sub's display-path prefix (JAB-004),
+//  taken EXPLICITLY from the two wt roots (no io.cwd()).  "" when they are the
+//  same dir (the top wt is its own origin); else the path tail under topWt
+//  (`vendor/sub`, or `vendor/sub/vendor/leaf` for a grandchild).
+function relUnder(topWt, childWt) {
+  if (childWt === topWt) return "";
+  const pfx = topWt.endsWith("/") ? topWt : topWt + "/";
+  if (childWt.indexOf(pfx) === 0) return childWt.slice(pfx.length);
+  return "";
+}
+
+//  cwd-relative path under the wt root (empty when cwd == wt root).  Used only
+//  for the TOP hunk's summary `<rel>?<branch>` token (status run from a subdir
+//  of the wt prints the cwd-relative prefix); a sub hunk passes prefix="" here
+//  since its path already rides the `status:<subpath>` header.
 function cwdRel(wtRoot) {
   let cwd;
   try { cwd = io.cwd(); } catch (e) { return ""; }

@@ -74,7 +74,7 @@ function open(be) {
   //  PARSED branch (sha chunks dropped) — empty for a detached tip.
   function tip(withPatch) {
     let sha = "", ts = null, shaLocal = true, shaIdx = -1, branch = "",
-        query = "";
+        query = "", rawQuery = "";
     for (let i = rows.length - 1; i >= 0; i--) {
       const r = rows[i];
       const isGP = (r.verb === GET || r.verb === POST);
@@ -86,7 +86,15 @@ function open(be) {
       if (!ref.sha && !r.uri.query && !r.uri.fragment) continue;
       if (ref.sha) { sha = ref.sha; ts = r.ts; shaLocal = r.local;
                      shaIdx = i; branch = ref.branch;
-                     query = stripProject(r.uri.query) || ""; break; }
+                     query = stripProject(r.uri.query) || "";
+                     //  JAB-004: the matched tip row's VERBATIM (un-stripped)
+                     //  query — the label native's status summary prints
+                     //  (`bu.query`).  For a secondary-wt sub anchor
+                     //  (`?/<project>[/<branch>]`) native keeps the WHOLE
+                     //  `/project/branch` raw (NOT project-stripped); a primary
+                     //  wt's query is empty either way.  `query` (stripped)
+                     //  stays the branch-resolution key (divergence/refOf).
+                     rawQuery = r.uri.query || ""; break; }
     }
     //  A sha-row that was a remote fetch (non-local) doesn't move cur's
     //  branch — walk further back for the latest LOCAL get/post branch.
@@ -102,7 +110,8 @@ function open(be) {
         if (branch) break;
       }
     }
-    return { branch: branch, sha: sha, ts: ts, query: query };
+    return { branch: branch, sha: sha, ts: ts, query: query,
+             rawQuery: rawQuery };
   }
 
   //  A `post` at index idx is commit-all iff no put/delete lies between
