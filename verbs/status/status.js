@@ -60,17 +60,16 @@ const SUMMARY_ORDER = ["ok", "put", "new", "mov", "pat", "mod", "adv", "del", "m
 //  grandchild AFTER a later sibling — the wrong order).
 module.exports = function handle(row, ctx) {
   //  Recursion (relaying each mounted sub's status as a path-prefixed
-  //  `status:<subpath>` hunk) is OPT-IN via `--sub`, OFF by default —
-  //  matching the dispatch: native `be status` routes to THIS extension
-  //  and does NOT recurse (only bare `be` → BEDefault wraps the producer
-  //  with be_relay_subs).  So default output == `be status --plain`
-  //  byte-for-byte; `--sub` reproduces bare `be --plain`'s recursing form.
-  //  `--nosub` is accepted (and forces recursion off) for symmetry with
-  //  native's flag.
+  //  `status:<subpath>` hunk) is now DEFAULT-ON (JAB-024): a bare `jab status`
+  //  recurses into mounted subs, byte-matching native bare `be --plain`'s
+  //  BEDefault relay (be_relay_subs) — the recursing producer.  `--nosub`
+  //  SUPPRESSES the walk → only the parent hunk, byte-matching native
+  //  `be status --plain` (the flat verb).  `--sub` is still accepted but is a
+  //  no-op now (recursion is the default); it stays for symmetry / explicitness.
   //  Flags are seed-pinned (resolution-at-entry, JSQUE-004) — read from ctx,
   //  not the row (the queue round-trip carries only ts/verb/uri).
   const flags = (ctx && ctx.flags) || [];
-  const recurse = flags.indexOf("--sub") >= 0 && flags.indexOf("--nosub") < 0;
+  const recurse = flags.indexOf("--nosub") < 0;
   const out = ctx && ctx.out;
 
   //  The seed (top) row carries the "." cwd placeholder (loop.cli) — its wt is
