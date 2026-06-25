@@ -456,6 +456,36 @@ function open(storePath, project) {
       walk(treeSha, "");
     },
 
+    //  descendPath(rootTreeSha, segments) -> { sha, mode, kind } | undefined.
+    //  The single-path descender (the KEEPTreeDescend / proj_descend twin) the
+    //  object views (tree:/sha1:/blob:/commit:/size:/type:, JAB-006..011) share:
+    //  walk `segments` from `rootTreeSha` one '/'-segment at a time, resolving
+    //  each through readTree.  A "."/""/"./" segment (the collapse rule) and an
+    //  EMPTY segment list both return the root tree itself.  Returns the LEAF
+    //  entry's { sha, mode, kind } — kind one of "tree"|"blob"|"exe"|"link"|
+    //  "commit" (the mode-class names; "blob" = 100644, "exe" = 100755, "link" =
+    //  120000, "commit" = 160000 gitlink, "tree" = 040000 dir).  undefined when a
+    //  segment is absent (PROJNONE) OR an intermediate segment is not a tree
+    //  (can't descend through a blob/gitlink — PROJFAIL at the caller).  Does NOT
+    //  itself require a DIR leaf — the caller (tree:) enforces that on the result.
+    descendPath: function (rootTreeSha, segments) {
+      let cur = { sha: rootTreeSha, mode: 0o40000, kind: "tree" };
+      const segs = (segments || []).filter(function (s) {
+        return s !== "" && s !== "." ;   // "."/""/"./"-tail collapse to no-op
+      });
+      for (let i = 0; i < segs.length; i++) {
+        //  Can only descend INTO a tree; a blob/gitlink mid-path has no entries.
+        if (cur.kind !== "tree") return undefined;
+        const ents = this.readTree(cur.sha);
+        if (!ents) return undefined;
+        let hit;
+        for (const e of ents) if (e.name === segs[i]) { hit = e; break; }
+        if (!hit) return undefined;                 // missing segment (PROJNONE)
+        cur = { sha: hit.sha, mode: hit.mode, kind: modeKind(hit.mode) };
+      }
+      return cur;
+    },
+
     //  expose for tests / verification
     _locate: locate,
     _index: index,
@@ -465,6 +495,17 @@ function open(storePath, project) {
   };
 
   return reader;
+}
+
+//  git tree-entry mode -> the mode-class name (WALKu8sModeKind twin): the
+//  octal mode bits classify a tree entry as a dir / blob / exec / symlink /
+//  gitlink.  Shared by descendPath (above) and the tree: row mode/type map.
+function modeKind(mode) {
+  if (mode === 0o40000)  return "tree";
+  if (mode === 0o160000) return "commit";
+  if (mode === 0o120000) return "link";
+  if (mode === 0o100755) return "exe";
+  return "blob";   // 0o100644 and any other regular-file mode
 }
 
 //  strip a leading `/<project>/` from a ref query → branch path.
@@ -544,4 +585,4 @@ module.exports = { open: open, frameSha: frameSha,
                    hashlet60FromBytes: hashlet60FromBytes,
                    TYPE_NAME: TYPE_NAME, NAME_TYPE: NAME_TYPE,
                    createShard: createShard, set: set, tombstone: tombstone,
-                   keyURI: keyURI, ZERO_SHA: ZERO_SHA };
+                   keyURI: keyURI, ZERO_SHA: ZERO_SHA, modeKind: modeKind };
