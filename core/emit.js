@@ -27,10 +27,10 @@ const theme = require("view/theme.js");      // JAB-025: the static pluggable th
 //  PER-COLUMN by the static view/theme.js theme — date column in the date SGR,
 //  the verb in its per-verb palette SGR, the path plain — over the SAME column
 //  layout the plain `line()` produces (so the DATE COLUMN STAYS, including for
-//  ts=0 rows; NO banner band).  The `raw` framing lines (status `status:`
-//  header, `?…` summary) are lightly themed to match native: the header gets
-//  the one pale-yellow banner band, the summary stays plain.  `opts.theme`
-//  (optional) swaps the palette — the theme object is the single SGR source.
+//  ts=0 rows; NO per-row banner band).  HEADER lines match native bare `be`:
+//  every `status:`/`status:<sub>` hunk header AND the `out.banner` verb banner
+//  (put/get) get the one pale-yellow band (text-only); the `?…` summary stays
+//  plain.  `opts.theme` (optional) swaps the palette — the single SGR source.
 function create(opts) {
   const color = !!(opts && opts.color);
   const thm = (opts && opts.theme) || theme.DEFAULT;
@@ -78,10 +78,13 @@ function create(opts) {
   //  — identical bytes to the plain `line()` once the SGR is stripped, so the
   //  date column STAYS (7 blanks for a ts==0 row) and there is NO banner band.
   //  Single-sources the SGR through `thm` — this code never spells an escape.
-  //  A `raw` framing line is lightly themed to match native `be status`: the
-  //  `status:` header is wrapped in the one pale-yellow banner band (the only
-  //  band native draws); any other raw line (the `?…` summary, relayed sub
-  //  hunks) stays verbatim PLAIN.
+  //  A `raw` framing line is themed to match native bare `be` (the recursing
+  //  relay the JAB-024 loop mirrors): EVERY hunk header — the parent `status:`
+  //  AND each relayed `status:<subpath>` sub-header — is wrapped in the one
+  //  pale-yellow banner band (text-only, no width fill — see bannerLine).  The
+  //  `out.banner` verb banner (put/get) is banded too.  Any OTHER raw line (the
+  //  `?<branch>\t<counts>` summary, which native paints per-segment) stays
+  //  verbatim PLAIN — out of scope here.
   function lineColor(verb, text, ts) {
     const date = render.dateCol(ts);
     const dp = thm.paint(thm.dateSlot);
@@ -91,24 +94,45 @@ function create(opts) {
     const verbPainted = vp ? vp + vcol + thm.verbReset(verb) : vcol;
     return datePainted + " " + verbPainted + " " + text + "\n";
   }
-  //  The header `status:` band: native pale-yellow background, space-filled by
-  //  the C drawer to the terminal width.  We band just the header text (no
-  //  width fill — the row content below it is what the band visually heads, and
-  //  a width fill would need the tty cols; the SGR wrap is the load-bearing
-  //  parity with native's banner colour).
+  //  The header band: native pale-yellow background wrapping the header TEXT,
+  //  NO width fill.  VERIFIED against the binary (`be --color` / `be put|get
+  //  --color | cat -A`): the loop's `jab status` recurses (JAB-024), so its
+  //  colour oracle is bare `be` — the relay/BEDefault path (htbl_stream_banner
+  //  / BERelaySub) — NOT the flat `be status` verb.  That relay path, and the
+  //  put/get verb banner, band the header TEXT ONLY (` 01:43  put put:` →
+  //  `^[[…230m 01:43  put put:^[[0m`, visible len 16; `status:` → len 7;
+  //  `status:html` → len 11; …).  ONLY the standalone flat `be status` verb
+  //  space-fills its band to width 200 (HUNKu8sFeedBanner.s_h1) — a path the
+  //  recursing loop never takes, so we do NOT width-fill here (that would make
+  //  `jab status --color` DIFFER from its bare-`be` oracle).  Closes with
+  //  ESC[0m (bannerClose) — the band set a bg, so a default-fg 39 won't clear.
   function bannerLine(text) {
     return thm.bannerOpen() + text + thm.bannerClose() + "\n";
   }
+  //  The verb-banner header (`out.banner`: `put put:` / `get ?#sha`) bands the
+  //  PLAIN columnar line — date + verb + text in the band, NO per-column SGR
+  //  inside (native draws the whole banner line in the one band, not painted
+  //  per cell).  We reuse the plain `line()` form (sans its trailing "\n") so
+  //  the banded text byte-matches native's ` <date>  <verb> <text>`.
+  function bannerColumnar(verb, text, ts) {
+    const plain = line(verb, text, ts);                 // ends with "\n"
+    return bannerLine(plain.slice(0, -1));
+  }
+  //  A raw framing line is a HUNK HEADER iff it starts with `status:` — the
+  //  parent `status:` AND every recursive `status:<subpath>` sub-header (the
+  //  JAB-024 in-process relay emits one per mounted sub).  Native bands EVERY
+  //  one of them (bare `be --color`), so we band them all — dropping the old
+  //  `seenHeader` first-only gate.  Any OTHER raw line (the `?<branch>\t<counts>`
+  //  summary, which native paints per-segment — out of scope) stays verbatim.
+  function isHunkHeader(raw) { return raw.slice(0, 7) === "status:"; }
   function renderColor_(sort) {
     const ordered = sort ? sort(rows.slice()) : rows;
     let body = "";
-    let seenHeader = false;                   // first raw `status:` → the band
-    if (header) body += lineColor(header.verb, header.uri, header.ts);
+    //  The `out.banner` verb-banner header is banded full-line (put/get).
+    if (header) body += bannerColumnar(header.verb, header.uri, header.ts);
     for (const r of ordered) {
       if (r.raw != null) {
-        if (!seenHeader && r.raw.slice(0, 7) === "status:") {
-          body += bannerLine(r.raw); seenHeader = true;
-        } else body += r.raw + "\n";
+        body += isHunkHeader(r.raw) ? bannerLine(r.raw) : r.raw + "\n";
       } else body += lineColor(r.verb, r.uri, r.ts);
     }
     return utf8.Encode(body);

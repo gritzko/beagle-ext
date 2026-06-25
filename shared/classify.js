@@ -5,11 +5,20 @@
 //  No C, no dog.  Mirrors sniff/CLASS.c (SNIFFClassify heap-merge) +
 //  sniff/SNIFF.exe.c (status_step bucket routing) + CLASS.c::CLASSWtState.
 //
-//  classify(be, wtlogReader, keeperReader) → { rows, counts } where
+//  classify(be, wtlogReader, keeperReader[, opts]) → { rows, counts } where
 //    rows   = [{ bucket, path, ts, dst? }]  in lex order, one per
 //             distinct path that earns a row (the `ok` bucket is a count
 //             only — clean tracked files would flood the output)
 //    counts = { ok, put, new, mov, mod, del, mis, unk }
+//
+//  opts.listing (JAB-018) — the additive LISTING divergence from status,
+//  for the `ls:`/`lsr:` views, default OFF so status byte-parity is intact:
+//    1. EMIT `eq` rows (a clean tracked file gets a row with its wt mtime),
+//       where status keeps `ok` count-only.
+//    2. Do NOT suppress a staged move's DESTINATION — show it as a `new` row
+//       (the staged-add side of the rename), splitting wt-only into `new`
+//       (a move dst) vs `unk` (genuinely untracked).
+//  Folded under the ONE opt (NOT a pure status superset).
 //
 //  Bucket semantics (status_step):
 //    del   staged `delete` row                        (takes precedence)
@@ -133,7 +142,8 @@ function wtEqBase(wtRoot, rel, baseSha) {
 }
 
 //  --- the merge --------------------------------------------------------
-function classify(be, wtlogReader, keeperReader) {
+function classify(be, wtlogReader, keeperReader, opts) {
+  opts = opts || {};
   const wtRoot = be.wt;
   const ignore = require(libDir() + "/util/ignore.js").load(wtRoot);  // JSQUE-016
 
@@ -237,8 +247,10 @@ function classify(be, wtlogReader, keeperReader) {
     //  No staged intent — classify by presence + content.
     const inBase = !!b, onDisk = !!w;
     if (onDisk && !inBase) {
-      //  wt-only: suppress a move destination; else untracked.
-      if (movDsts[path]) continue;
+      //  wt-only.  status SUPPRESSES a move destination (its row rides the
+      //  src `mov` row); a LISTING view (opts.listing) instead SHOWS it as a
+      //  `new` row — the staged-add side of the rename (JAB-018).
+      if (movDsts[path]) { if (opts.listing) push("new", path, w.ts); continue; }
       push("unk", path, w.ts);
       continue;
     }
@@ -252,8 +264,12 @@ function classify(be, wtlogReader, keeperReader) {
       //  every kind uniformly (CLASS.c CLASSWtEqBase) — a symlink hashes
       //  its readlink target, so a re-pointed link reads `mod` and an
       //  unchanged one `ok` (no more assume-clean hack).
-      if (wtEqBase(wtRoot, path, b.sha)) counts.ok++;
-      else push("mod", path, w.ts);
+      if (wtEqBase(wtRoot, path, b.sha)) {
+        counts.ok++;
+        //  opts.listing: a listing view emits the clean file as an `eq` row
+        //  (with its wt mtime); status keeps `ok` count-only (JAB-018).
+        if (opts.listing) rows.push({ bucket: "eq", path: path, ts: w.ts });
+      } else push("mod", path, w.ts);
       continue;
     }
     //  (no base, no wt — only put/del, already handled above)

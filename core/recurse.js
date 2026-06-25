@@ -1,0 +1,96 @@
+//  core/recurse.js — the generic in-process mounted-sub walk (JAB-014,
+//  factored out of status.js::emitRepo per JAB-004).  ONE depth-first sub
+//  recursion shared by EVERY recursing read view (status, diff, …): enumerate
+//  a repo's live gitlink mounts in `.gitmodules` DECLARATION order, open each
+//  sub's repo, and invoke a per-sub callback with the URI-aware emit prefix
+//  joined under the parent's.  NO fork, NO `/tmp`, NO `/proc` — a synchronous
+//  in-process walk (the JAB-004 mechanism the other 17 views inherit).
+//
+//  walk(repo, prefix, visit, opts):
+//    repo    : the parent repo handle (be.find result).
+//    prefix  : this repo's display path relative to the TOP wt ("" at top).
+//    visit   : function(subRepo, subPrefix, sub) — called per MOUNTED sub in
+//              `.gitmodules` order; `subPrefix` = joinPrefix(prefix, sub.path);
+//              `sub` carries { path, pin } when the caller passed a gitlink map.
+//    opts.gitlinks : optional { path -> {pin, mounted?} } from the parent's
+//              tree walk — drives the mount gate + carries each sub's pin sha.
+//              Absent → every `.gitmodules`-declared path with a `<sub>/.be`
+//              mount file is visited (status's clean-recursion case).
+//
+//  Mirrors status.js's old emitRepo recursion tail: `.gitmodules` order is
+//  authoritative (KEEPSubsAt parses the blob top-to-bottom), the tree/mount
+//  state gates which declared path is a live gitlink, and the joined prefix
+//  makes a grandchild read `<sub>/<grandchild>`.
+
+"use strict";
+
+const be   = require("./discover.js");
+const subs = require("../shared/subs.js");
+
+//  YES iff `<wt>/<subpath>/.be` is a regular file (a live mount).
+//  Mirrors SNIFFSubIsMount: only a mounted sub is recursed.
+function isMount(wtRoot, subpath) {
+  const p = (wtRoot.endsWith("/") ? wtRoot : wtRoot + "/") + subpath + "/.be";
+  try { return io.stat(p).kind === "reg"; } catch (e) { return false; }
+}
+
+//  Parse `<wt>/.gitmodules` → declared submodule `path` values in FILE order
+//  (the order native recurses; KEEPSubsAt drives SUBSu8sParse top-to-bottom).
+//  A minimal git-config reader; absent/unreadable → [] (no declared subs).
+function gitmodulesOrder(wtRoot) {
+  const p = (wtRoot.endsWith("/") ? wtRoot : wtRoot + "/") + ".gitmodules";
+  let text;
+  try { text = utf8.Decode(io.mmap(p, "r").data()); } catch (e) { return []; }
+  const order = [], seen = {};
+  let inSubmod = false;
+  for (let line of text.split("\n")) {
+    line = line.replace(/[#;].*$/, "").trim();
+    if (!line) continue;
+    if (line[0] === "[") { inSubmod = /^\[\s*submodule\b/i.test(line); continue; }
+    if (!inSubmod) continue;
+    const eq = line.indexOf("=");
+    if (eq < 0) continue;
+    const key = line.slice(0, eq).trim().toLowerCase();
+    const val = line.slice(eq + 1).trim();
+    if (key === "path" && val && !seen[val]) { seen[val] = true; order.push(val); }
+  }
+  return order;
+}
+
+//  URI-aware join of a path under a sub prefix (JAB-004) — empty prefix is a
+//  no-op (top level); else `<prefix>/<path>`.  A non-path token (scheme/auth)
+//  is returned untouched (defensive — sub paths are always bare paths).
+function joinPrefix(prefix, col) {
+  if (!prefix) return col;
+  const u = uri._parse(col);
+  if (u.scheme || u.authority) return col;
+  return prefix + "/" + col;
+}
+
+//  walk(repo, prefix, visit, opts) — depth-first over the parent's MOUNTED
+//  subs in `.gitmodules` order.  See the header.  The mount gate prefers an
+//  explicit gitlink map (the caller's tree walk) when given, else probes the
+//  `<sub>/.be` file directly.
+function walk(repo, prefix, visit, opts) {
+  opts = opts || {};
+  const gitlinks = opts.gitlinks || null;
+  for (const subPath of gitmodulesOrder(repo.wt)) {
+    //  Gate: a declared path is a live sub only when it is BOTH a tree gitlink
+    //  (when a map is supplied) AND a mounted `<sub>/.be`.  Absent a map, the
+    //  mount file alone gates (status's clean-recursion path).
+    if (gitlinks && !gitlinks[subPath]) continue;
+    if (!isMount(repo.wt, subPath)) continue;
+    const subWt = subs.mountWtDir(repo, subPath);
+    let subRepo;
+    try { subRepo = be.find(subWt); } catch (e) { continue; }
+    const sub = gitlinks ? gitlinks[subPath] : { path: subPath };
+    visit(subRepo, joinPrefix(prefix, subPath), sub || { path: subPath });
+  }
+}
+
+module.exports = {
+  walk: walk,
+  isMount: isMount,
+  gitmodulesOrder: gitmodulesOrder,
+  joinPrefix: joinPrefix,
+};
