@@ -168,7 +168,13 @@ function _nullSink() {
 //  args into branch-free seed rows; run() drives the loop with the REAL emit
 //  sink; ONE out.flush(sort) at the edge renders the collected rows.  Replaces
 //  the 002 `_nullSink`/`opts.seedRows` stubs.
-function cli(argv) {
+//  opts2 (optional): an in-process re-entry override (JAB-028).  bro's address
+//  bar re-enters cli() to drive a spell; opts2.queuePath gives that SUB-run its
+//  OWN /tmp queue so it never shares — and unlinks on close — the OUTER loop's
+//  PID-keyed queue (that shared-unlink was the `No such file or directory`
+//  crash).  Absent (the normal CLI entry), the per-process queue stands.
+function cli(argv, opts2) {
+  opts2 = opts2 || {};
   let verb = argv[2];
   if (!verb) throw "loop: no verb (usage: loop.js <verb> [args])";
   //  Split flags (a leading '-') from the positional args — flags are seed
@@ -240,7 +246,10 @@ function cli(argv) {
   //  process's leftover queue (the stale-dispatch / `verb '0'` bug); the path
   //  is per-process, so two concurrent runs get distinct files (no collision).
   //  A repo-less GET (fresh clone) keys off cwd; a repo run keys off its bePath.
-  const queuePath = repo ? _queuePath(repo)
+  //  JAB-028: a re-entry sub-run takes opts2.queuePath so it never shares the
+  //  outer loop's PID+bePath-keyed queue (whose close-unlink crashed the outer).
+  const queuePath = opts2.queuePath ? opts2.queuePath
+        : repo ? _queuePath(repo)
         : _tmpQueue(io.cwd());
 
   const out = emit.create({ color: color });   // JAB-025: tty/--color gate
@@ -292,7 +301,18 @@ function _queuePath(repo) {
   return _tmpQueue(repo.bePath || "");
 }
 
+//  JAB-028: a DISTINCT /tmp queue path for an in-process re-entry (driveSpell).
+//  Same PID + bePath as the outer queue would collide — a clean-exit close
+//  unlinks it out from under the still-live outer loop (the ENOENT crash).  A
+//  per-process monotonic counter makes every sub-run's queue its own file.
+let _subSeq = 0;
+function subQueuePath(key) {
+  _subSeq++;
+  return _tmpQueue((key || "") + ".sub" + _subSeq);
+}
+
 //  JSQUE-016: always required (via the be/loop.js entry shim), so export
 //  run/cli; the shim self-runs cli() when invoked directly.
-if (typeof module !== "undefined") module.exports = { run: run, cli: cli };
+if (typeof module !== "undefined")
+  module.exports = { run: run, cli: cli, subQueuePath: subQueuePath };
 else cli(process.argv);

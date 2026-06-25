@@ -28,6 +28,7 @@
 //  the upward be/-scan resolves it against the be/ root via the self-loop, the
 //  same way core/emit.js requires view/render.js.
 const bro = require("view/bro.js");
+const pager = require("views/bro/pager.js");   // JAB-028: the raw-mode TUI
 
 function writeStdout(bytes) {
   const b = io.buf(bytes.length + 8);
@@ -42,6 +43,72 @@ function writeStderr(str) {
   io.writeAll(2, b);
 }
 
+//  Build the hunk OBJECTS (the renderer's model) for the positional args — the
+//  same file/dir hunks plainHunk consumes, but kept whole for the TUI viewport.
+//  A missing/unopenable arg is skipped (the pager just shows what opened).
+function buildHunks(args) {
+  const hunks = [];
+  for (const arg of args) {
+    const u = uri._parse(arg);
+    const path = u.path || arg;
+    const fp = bro.fsPath(path);
+    let st;
+    try { st = io.stat(fp); } catch (e) { continue; }
+    let h = null;
+    try { h = st.kind === "dir" ? bro.buildDirHunk(arg, fp) : bro.buildFileHunk(arg, fp); }
+    catch (e) { continue; }
+    if (h !== null) hunks.push(h);
+  }
+  return hunks;
+}
+
+//  driveSpell(spell) -> hunks: the in-process address-bar drive (JAB-028 TODO#5).
+//  Re-enter the resident loop for the typed spell in --tlv mode, capturing its
+//  fd-1 'H'-record stream via a reversible io.writeAll hook (no dup2, no spawn,
+//  no /proc — pure JS), then reparse the tlv into hunks.  A bare `path#Lnn` (no
+//  scheme) lowers to bro's own file hunk; a `<verb>:<uri>` re-enters loop.cli.
+//  The outer loop owns argv[1]=loop.js, so the re-entrant cli's require-scan and
+//  queue path resolve correctly (sequential re-entry, JAB-004 recursion).
+function driveSpell(spell) {
+  const u = uri._parse(spell);
+  //  No scheme + a plain path → bro's OWN file/dir hunk (no loop re-entry).
+  if (!u.scheme) {
+    const h = buildHunks([spell]);
+    if (h.length) return h;
+  }
+  //  Require core/loop.js DIRECTLY, never the be/loop.js ENTRY shim: the shim's
+  //  self-run guard (`argv[1] ends /loop.js → cli(process.argv)`) re-fires on a
+  //  fresh require, re-dispatching the OUTER `bro …` argv — infinite recursion
+  //  (JAB-028).  core/loop.js as a module only exports; no self-run.
+  const loop = require("core/loop.js");
+  const orig = io.writeAll;
+  const chunks = [];
+  io.writeAll = function (fd, b) {
+    if (fd === 1) { chunks.push(b.data().slice()); return; }
+    return orig(fd, b);
+  };
+  //  JAB-028 crash fix: the re-entrant cli MUST NOT reuse the outer loop's
+  //  PID+bePath queue (its clean-exit close unlinks it → outer ENOENT).  Hand
+  //  it a DISTINCT per-call /tmp queue (subQueuePath) so only its own file is
+  //  unlinked.  (fd-1 capture stays interim; JAB-029 retires the monkey-patch.)
+  try { loop.cli(["jab", "loop.js", spell, "--tlv"],
+                 { queuePath: loop.subQueuePath(spell) }); }
+  finally { io.writeAll = orig; }
+  let total = 0; for (const c of chunks) total += c.length;
+  const tlv = new Uint8Array(total);
+  let o = 0; for (const c of chunks) { tlv.set(c, o); o += c.length; }
+  //  A hunk-stream view (cat/grep/spot/regex via renderHunkLog) emits 'H'
+  //  records → rich hunks.  An emit-sink view (ls/lsr/status/refs, columnar)
+  //  emits plain TEXT — wrap that whole output as ONE plain hunk so the pager
+  //  still shows it (no toks → no syntax paint, but it browses).  [Until the
+  //  mmap-buf sink lands so EVERY view feeds hunks directly — see JAB-029.]
+  const hunks = pager.hunksFromTlv(tlv);
+  if (hunks.length) return hunks;
+  if (total > 0) return [{ uri: spell, verb: "hunk", text: tlv,
+                           toks: new Uint32Array(0), kind: "file" }];
+  return [];
+}
+
 //  `bro` as a loop HANDLER.  Folds the WHOLE batch on its FIRST row
 //  (ctx._broDone guard) — the seed lowers each path arg to its own row, but
 //  bro's multi-banner order + the BE-002 exit class span the full arg list, so
@@ -50,10 +117,41 @@ module.exports = function handle(row, ctx) {
   if (ctx._broDone) return;
   ctx._broDone = true;
 
-  //  The raw positional file args (flags already split off in cli()).
+  //  The raw positional args (flags split off in cli()).  In the pager each arg
+  //  is a SPELL, not just a file: `jab bro ls:` runs the ls view, `jab bro f.c`
+  //  opens the file, `jab bro` (no args) opens an EMPTY viewport ready for `:`.
   const args = (ctx && ctx.args) || [];
 
-  //  No URI args → usage + non-zero exit (native bro's BE-002 usage path).
+  //  JAB-028: at a real terminal, enter the interactive raw-mode pager (a
+  //  scrollable hunk viewport + `:` address bar) instead of the plain dump.
+  //  OPEN FORK (a): explicit `jab bro` only — auto-enter for a tty view over
+  //  one screen is the unresolved product call, surfaced for the gate.  Piped/
+  //  --plain stays the byte-parity plain path below (every parity test intact).
+  const wantPager = io.isatty(1) && (ctx.flags || []).indexOf("--plain") < 0;
+  if (wantPager) {
+    //  Each arg is a spell: driveSpell runs a view → tlv hunks, a bare path →
+    //  file hunk, or an emit-sink view → its text wrapped as one hunk.  No args
+    //  → an empty viewport (NOT a usage error — type a `:` spell to fill it).
+    let hunks = [];
+    for (const arg of args) {
+      try { const h = driveSpell(arg); if (h && h.length) hunks = hunks.concat(h); }
+      catch (e) { /* a bad spell just contributes nothing */ }
+    }
+    //  Keystrokes come from the controlling terminal (so input still works when
+    //  stdin is a data pipe — API.md's /dev/tty pattern); else tty stdin, then 1.
+    let fd = null, own = false;
+    try { fd = io.open("/dev/tty", "rw"); own = true; } catch (e) { fd = null; }
+    if (fd === null && io.isatty(0)) fd = 0;
+    if (fd === null) fd = 1;
+    try {
+      const p = new pager.Pager(fd, { color: true, driveSpell: driveSpell });
+      p.setHunks(hunks);
+      p.run();
+    } finally { if (own) { try { io.close(fd); } catch (e) {} } }
+    return;
+  }
+
+  //  Non-tty (piped/--plain): the plain dump.  No args here IS a usage error.
   if (args.length === 0) {
     writeStderr("Usage: bro [URI...]\n");
     throw "BROUSAGE";
