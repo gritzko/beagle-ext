@@ -71,6 +71,9 @@ function run(opts) {
     //  JSQUE-012: the raw positional args (POST's commit message rides here,
     //  seed-pinned — a non-path arg the queue uri can't carry).
     args: opts.args || [],
+    //  the shared output mode (color|tlv|plain) — a view renders its hunk
+    //  stream through view/bro.js renderHunkLog in this mode.
+    mode: opts.mode || "plain",
   };
 
   const order = [];
@@ -130,21 +133,38 @@ function _nullSink() {
 //  sink; ONE out.flush(sort) at the edge renders the collected rows.  Replaces
 //  the 002 `_nullSink`/`opts.seedRows` stubs.
 function cli(argv) {
-  const verb = argv[2];
+  let verb = argv[2];
   if (!verb) throw "loop: no verb (usage: loop.js <verb> [args])";
   //  Split flags (a leading '-') from the positional args — flags are seed
   //  globals (pinned in ctx), positionals become seed rows.
   const flags = [], args = [];
   for (const a of argv.slice(3)) (a[0] === "-" ? flags : args).push(a);
 
+  //  One-shot projector form `jab <scheme>:<uri>` (mirrors native `be
+  //  scheme:uri`, e.g. `grep:#body`, `cat:path`): the VERB token itself carries
+  //  the whole URI.  A legal verb is a bare word, so a ':' in the verb position
+  //  marks a scheme:uri one-shot — lower it to verb=<scheme> and thread the FULL
+  //  token as the leading positional arg, so a view handler reads body/path off
+  //  ctx.args (a fragment-only URI can't survive a queue row, and the unsplit
+  //  `grep:#body` is not a legal queue verb token — it round-trips to '0').
+  const _sc = verb.indexOf(":");
+  if (verb[0] !== "-" && _sc > 0) { args.unshift(verb); verb = verb.slice(0, _sc); }
+
   //  JAB-025: the colour gate for the emit sink.  `--color` forces SGR,
   //  `--plain` forces the plain bytes; otherwise default to whether stdout
   //  (fd 1) is a terminal.  The piped/`--plain` path is byte-parity plain (the
   //  SUT=loop harnesses redirect stdout, so they land here OFF); a tty (or
   //  `--color`) renders the columnar rows through the C THEME.
-  const color = flags.indexOf("--color") >= 0 ? true
-              : flags.indexOf("--plain") >= 0 ? false
-              : io.isatty(1);
+  //  The SHARED output-mode gate — ONE source for every view.  An explicit flag
+  //  wins; with none, a tty defaults to colour.  color = dog/THEME SGR, tlv =
+  //  the raw HUNK 'H' records (on-wire), plain = HUNKu8sFeedText bytes.
+  //  --color/tty → color; --tlv → tlv; --plain/else → plain.
+  const mode = flags.indexOf("--color") >= 0 ? "color"
+             : flags.indexOf("--tlv")   >= 0 ? "tlv"
+             : flags.indexOf("--plain") >= 0 ? "plain"
+             : io.isatty(1)                  ? "color"
+             : "plain";
+  const color = mode === "color";
 
   //  Pin the repo + ambient coordinates ONCE at entry (JSQUE-004).  A fresh
   //  GET clone targets an EMPTY dir (no `.be` yet) — be.find throws there, so
@@ -191,6 +211,7 @@ function cli(argv) {
   const res = run({
     seedRows: seedRows, queuePath: queuePath, repo: repo, require: require,
     out: out, flags: flags, refs: seeded.refs, resolved: sctx,
+    mode: mode,              // the shared color/tlv/plain output mode (ctx.mode)
     triple: seeded.triple,   // JSQUE-013: forward the seed-pinned PATCH triple
     //  JSQUE-010: count of REAL path-arg rows (vs the "." placeholder); a
     //  ref-only run has 0, so the handler applies ctx.refs without staging ".".

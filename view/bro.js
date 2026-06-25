@@ -223,6 +223,37 @@ function tableHunk(log, color) {
   return all;
 }
 
+//  ---- content-hunk render in an output mode (the SHARED sink) -------------
+//  Render a CONTENT-hunk HUNK log (the binding's 'H' records: uri + text + the
+//  packed tok32) in the selected output mode, SINGLE-SOURCED through the C
+//  binding — NEVER a JS reimplementation of HUNKu8sFeedText / the SGR painter /
+//  the TLV framing:
+//    "color" → .color (mode 1, dog/THEME SGR)
+//    "plain" → .plain (mode 2, HUNKu8sFeedText — byte-identical to native)
+//    "tlv"   → the log's own raw 'H'-record bytes (the on-wire TLV stream)
+//  Per-record render + concat (like tableHunk) so a buf never overruns; tlv is
+//  the raw DATA [0, watermark).  This is the one place a view turns hunks into
+//  bytes — grep/spot/cat/bro all funnel here.
+function renderHunkLog(log, mode) {
+  if (mode === "tlv") return log.subarray(0, log.buffer.watermark | 0).slice();
+  log.rewind();
+  const chunks = [];
+  let total = 0;
+  while (log.next()) {
+    const tlen = log.text ? log.text.length : 0;
+    const cap = (tlen + log.uri.length + 64) * (mode === "color" ? 10 : 2) + 256;
+    const o = io.buf(cap);
+    if (mode === "color") log.color(o); else log.plain(o);
+    const b = o.data().slice();
+    chunks.push(b);
+    total += b.length;
+  }
+  const all = new Uint8Array(total);
+  let off = 0;
+  for (const c of chunks) { all.set(c, off); off += c.length; }
+  return all;
+}
+
 //  ---- path ext (PATHu8sExt) ----------------------------------------------
 //  The extension after the last '.' in the basename, or "" (no dot, or a
 //  dotfile whose only dot is leading).  Drives the tok.parse language.
@@ -245,5 +276,6 @@ module.exports = {
   plainHunk: plainHunk,
   buildTableHunk: buildTableHunk,
   tableHunk: tableHunk,
+  renderHunkLog: renderHunkLog,
   THEME16: THEME16,
 };
