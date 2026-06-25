@@ -286,6 +286,64 @@ function open(storePath, project) {
     return hit;
   }
 
+  //  resolveHexAny(prefix) -> "<40hex>" | undefined.  The KEEPLookup twin for the
+  //  `sha1:?<short-hex>` / `?#<short-hex>` form (JAB-006): resolve a 1..39-hex
+  //  prefix to the unique full sha of ANY stored object (blob/tree/commit/tag),
+  //  NOT only tips — so it finds a mid-history commit or a non-root subtree the
+  //  tip-only core/resolve.js::resolveHex would miss.  Ranges the SAME wh128
+  //  lane locate() uses over the hashlet60 window the prefix pins, reframes each
+  //  candidate's bytes to its full sha (frameSha), and prefix-matches.  AMBIGUOUS
+  //  (two distinct full shas share the prefix) → undefined, matching KEEPLookup
+  //  (an under-specified prefix resolves to nothing).  hashlet60 = the MS 60 bits
+  //  of the sha = the first 15 hex nibbles; the index key is hashlet60<<4|type,
+  //  so a prefix of P hex chars pins the range [hLo<<4, (hHi<<4)|0xf] where hLo/
+  //  hHi are the prefix zero-/f-filled to 15 nibbles (a prefix longer than 15 is
+  //  one hashlet, then the full-sha reframe verifies the rest).
+  function resolveHexAny(prefix) {
+    if (!/^[0-9a-f]{1,39}$/.test(prefix)) return undefined;
+    //  Derive the hashlet60 [lo,hi] window the prefix admits (15 nibbles = 60b).
+    let hLo, hHi;
+    if (prefix.length >= 15) {
+      const h = BigInt("0x" + prefix.slice(0, 15));
+      hLo = h; hHi = h;
+    } else {
+      const fill = 15 - prefix.length;
+      const base = BigInt("0x" + prefix) << BigInt(fill * 4);
+      hLo = base;
+      hHi = base | ((1n << BigInt(fill * 4)) - 1n);
+    }
+    const lo = hLo << 4n;
+    const hi = (hHi << 4n) | 0xfn;
+    const disk = diskIndex();
+    const ix = disk || index();
+    const onDisk = !!disk;
+    let hit;                                 // the unique full sha (or "" ambiguous)
+    let ambiguous = false;
+    ix.range(lo, hi + 1n, function (kv) {
+      if (ambiguous) return false;
+      const key = kv[0], val = kv[1];
+      let fileIdx, offset;
+      if (onDisk) {
+        offset = Number(val >> 24n);
+        fileIdx = fileIdToPackIdx(Number((val >> 4n) & 0xfffffn));
+        if (fileIdx < 0) return true;        // unknown file_id → keep scanning
+      } else {
+        fileIdx = Number(val >> 40n);
+        offset = Number(val & 0xffffffffffn);
+      }
+      const type = Number(key & 0xfn);
+      const rec = readRecord(fileIdx, offset);
+      if (!rec) return true;
+      const tname = TYPE_NAME[type] || rec.type;
+      const full = frameSha(tname, rec.bytes);
+      if (full.indexOf(prefix) !== 0) return true;   // hashlet collision, skip
+      if (hit && hit !== full) { ambiguous = true; return false; }
+      hit = full;
+      return true;                           // keep scanning: detect ambiguity
+    });
+    return (hit && !ambiguous) ? hit : undefined;
+  }
+
   //  Inflate + delta-chase one record at (fileIdx, offset) → Uint8Array.
   //  git.pack.resolve handles the full OFS/REF chase into a Buf; we size
   //  the out buffer to the record's declared size with slack and grow if
@@ -485,6 +543,10 @@ function open(storePath, project) {
       }
       return cur;
     },
+
+    //  resolveHexAny(prefix): the KEEPLookup short-hex twin (JAB-006) — any-object
+    //  prefix resolve over the wh128 lane; ambiguous/miss → undefined.
+    resolveHexAny: resolveHexAny,
 
     //  expose for tests / verification
     _locate: locate,
