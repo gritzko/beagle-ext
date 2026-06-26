@@ -22,6 +22,8 @@ const dag    = require("../../shared/dag.js");
 const wtlog  = require("../../shared/wtlog.js");
 const resolve = require("../../core/resolve.js");
 const shalib = require("../../shared/util/sha.js");
+const subs   = require("../../shared/subs.js");
+const be     = require("../../core/discover.js");
 const isFullSha = shalib.isFullSha;
 
 const LOG_MAX_WALK = 1 << 20;   // GRAF LOG_MAX_WALK cyclic-DAG bound
@@ -394,11 +396,39 @@ function appendRow(sha, k, textParts, spans, baseOff, nonspine) {
   return bytes.length;
 }
 
+//  --- sub-mount descent (LOG-002) ---------------------------------------
+//  If `path` IS, or descends into, a submodule MOUNT, swap the working repo to
+//  the sub's own store and strip the consumed sub prefix.  Mirrors EXACTLY how
+//  tree.js/status.js descend: a mount is `<wt>/<prefix>/.be` as a regular file
+//  (subs.mountWtDir + the SNIFFSubIsMount gate), re-discovered via be.find — NO
+//  hand-rolled gitlink/.be probe.  Loops so a nested mount (`<sub>/<subsub>`)
+//  descends fully; returns { repo, path } (the deepest sub + remaining path).
+function descendSub(repo, path) {
+  const segs = path ? path.split("/") : [];
+  let i = 0;
+  for (;;) {
+    let hit = -1, hitWt = null;
+    //  Longest mounted prefix wins: probe prefixes left-to-right and take the
+    //  last that mounts (so `a/b` descends a, then b under a's repo next loop).
+    for (let n = i + 1; n <= segs.length; n++) {
+      const sub = segs.slice(i, n).join("/");
+      const wt = subs.mountWtDir(repo, sub);
+      try { if (io.stat(wt + "/.be").kind === "reg") { hit = n; hitWt = wt; } }
+      catch (e) { /* not a mount */ }
+    }
+    if (hit < 0) break;                          // no further sub mount
+    let subRepo;
+    try { subRepo = be.find(hitWt); } catch (e) { break; }
+    repo = subRepo; i = hit;
+  }
+  return { repo: repo, path: segs.slice(i).join("/") };
+}
+
 //  --- the handler -------------------------------------------------------
 function handle(row, ctx) {
   const sink = ctx && ctx.sink;
   if (!sink) return;
-  const repo = (ctx && ctx.repo) || null;
+  let repo = (ctx && ctx.repo) || null;
   if (!repo) return;
 
   //  The full `log:<uri>` rides ctx.args[0] (the one-shot scheme:uri lowering);
@@ -407,6 +437,16 @@ function handle(row, ctx) {
   let first = String(rawArgs[0] || "");
   if (first.indexOf("log:") !== 0) first = "log:" + first;
   const parsed = parseArg(first);
+
+  //  LOG-002: `log:<sub>` / `log:<sub>/<path>` logs the SUB's own history, not
+  //  the super-repo's gitlink-bump line — descend into the mount (tree/status
+  //  precedent) and continue with the sub's repo + the stripped path.  The
+  //  banner keeps the FULL original path (C `be log:<sub>` shows `log:<sub>`).
+  const bannerPath = parsed.path;
+  if (parsed.path) {
+    const d = descendSub(repo, parsed.path);
+    repo = d.repo; parsed.path = d.path;
+  }
 
   const k = store.open(repo.storePath, repo.project);
   const cap = countFromFrag(parsed.frag);
@@ -420,8 +460,9 @@ function handle(row, ctx) {
   if (!tip || !isFullSha(tip)) return;
 
   //  The banner uri: `log:` + path + `?query` (the GRAFLog title shape).  The
-  //  fragment (#N / #hashlet) is NOT part of the title.
-  let bannerUri = "log:" + parsed.path;
+  //  fragment (#N / #hashlet) is NOT part of the title.  LOG-002: the banner
+  //  uses the FULL original path (pre-sub-strip), the walk uses the stripped one.
+  let bannerUri = "log:" + bannerPath;
   if (parsed.query) bannerUri += "?" + parsed.query;
 
   //  The history walk (newest-first, bounded by `#N`).  branchHistory now
