@@ -241,7 +241,10 @@ function renderHunkLog(log, mode) {
   let total = 0;
   while (log.next()) {
     const tlen = log.text ? log.text.length : 0;
-    const cap = (tlen + log.uri.length + 64) * (mode === "color" ? 10 : 2) + 256;
+    //  COMMIT-003: an empty-URI hunk (commit:) makes the log.uri getter throw
+    //  RangeError; guard it so a banner-less record still renders.
+    let ulen = 0; try { ulen = log.uri.length; } catch (e) { ulen = 0; }
+    const cap = (tlen + ulen + 64) * (mode === "color" ? 10 : 2) + 256;
     const o = io.buf(cap);
     if (mode === "color") log.color(o); else log.plain(o);
     const b = o.data().slice();

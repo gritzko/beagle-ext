@@ -100,7 +100,11 @@ function parseHeaders(text) {
 //  blob/tree prefix is not a commit object, so it resolves to NOTHING.
 function resolveHashlet(k, hexish) {
   if (!isHexish(hexish)) return undefined;
-  const sha = k.resolveHexAny(hexish);
+  //  JS-082 (co-landed COMMIT-004): a FULL 40-hex sha passes through verbatim
+  //  (resolveHexAny's {1,39} prefix scanner rejects 40); a short prefix goes
+  //  through the any-object resolver.  The commit/tag type gate below applies
+  //  to both, so a blob/tree sha still resolves to NOTHING.
+  const sha = isFullSha(hexish) ? hexish : k.resolveHexAny(hexish);
   if (!sha) return undefined;
   const o = k.getObject(sha);
   return (o && (o.type === "commit" || o.type === "tag")) ? sha : undefined;
@@ -120,7 +124,8 @@ function resolveHashlet(k, hexish) {
 //                        the ticket SPEC `bare = cur tip`.]
 //  Returns { sha, bannerHex } | undefined (resolve fail → no output, nonzero).
 function resolveSlot(k, repo, parsed) {
-  const q = parsed.query, frag = parsed.fragment, hasQuery = parsed.hasQuery;
+  const q = parsed.query, frag = parsed.fragment, hasQuery = parsed.hasQuery,
+        path = parsed.path;
 
   //  An explicit empty `#` (`commit:#` / `commit:?#`) → resolve fail.
   if (parsed.emptyFrag) return undefined;
@@ -141,6 +146,14 @@ function resolveSlot(k, repo, parsed) {
     }
     //  A non-hex query = a branch ref (REFSResolve); banner = resolved sha.
     const sha = k.resolveRef(q);
+    return sha ? { sha: sha, bannerHex: sha } : undefined;
+  }
+  //  COMMIT-004 (Defect, fix #2): a non-empty PATH slot (`commit:<sha>`) is a
+  //  hashlet target — resolve it, NEVER silently fall through to the cur tip
+  //  (`commit:0000…` must FAIL, not print the tip).  The cwd placeholder "." is
+  //  the bare-`commit:` lowering (see the handler), so it falls to the tip.
+  if (path && path !== ".") {
+    const sha = resolveHashlet(k, path);
     return sha ? { sha: sha, bannerHex: sha } : undefined;
   }
   //  Bare `commit:` — the cur tip (SPEC: bare = cur tip).
@@ -234,6 +247,9 @@ module.exports = function handle(row, ctx) {
   const parsed = {
     query: u.query || "",
     fragment: u.fragment || "",
+    //  COMMIT-004 (fix #2): the PATH slot (`commit:<sha>`) — read as a hashlet
+    //  target, not a silent cur-tip fall-through.
+    path: u.path || "",
     //  An explicit `#` with no value (`commit:#` / `commit:?#`) is a resolve
     //  FAIL (an empty hashlet), distinct from a bare `commit:` (= cur tip).
     emptyFrag: hasHash && (u.fragment || "") === "",
@@ -268,9 +284,14 @@ module.exports = function handle(row, ctx) {
   const ph = parseHeaders(text);
   const hunk = buildHunk(sha, ph.headers, ph.body);
 
+  //  COMMIT-003: colour spans ONLY for --color; plain feeds EMPTY toks (the
+  //  cat/blob gate) — a hand-built toks table failed the HUNK drain → 0 bytes.
+  const mode = (ctx && ctx.mode) || "plain";
+  const toks = mode === "plain" ? new Uint32Array(0) : hunk.toks;
+
   //  ONE feed: EMPTY uri (no banner line) so --plain matches the C keeper which
   //  elides the `commit:?<sha>` URI as a U-span.  The HUNK content render adds
   //  the single trailing blank-line separator (a binding-level constant shared
   //  by every content view).  verb "" → no verb word.
-  sink.feed("", hunk.bytes, hunk.toks, "", 0n);
+  sink.feed("", hunk.bytes, toks, "", 0n);
 };

@@ -34,6 +34,14 @@ function isHexish(s) {
   return !!s && s.length >= 6 && s.length <= 40 && /^[0-9a-f]+$/.test(s);
 }
 
+//  COMMIT-004 (Defect A): the read-only OBJECT/CONTENT projectors re-parse their
+//  whole `<scheme>:<uri>` (with its OWN `?`/`#` slots) off ctx.args[0], so their
+//  token must ride through as a path — NEVER be consumed as a branch ref-write by
+//  classifyArg (columnar ls/status/diff/refs keep classifyArg; they read row.uri).
+const VIEW_REPARSE = { commit:1, size:1, type:1, blob:1, sha1:1,
+                       cat:1, tree:1, log:1 };
+function isReparseView(verb) { return VIEW_REPARSE[verb] === 1; }
+
 //  KEEPResolveHex twin: a full sha passes through iff the object exists; a
 //  short hashlet scans the local tips + remotes for a unique-prefix sha.
 //  Used ONLY by the seed resolver below (never per-row).
@@ -162,7 +170,10 @@ function seed(verb, argv, ctx, repo) {
   //  JSQUE-009: GET's arg is a whole REMOTE URI (scheme/authority/store path),
   //  not a wt path — classifyArg would mangle it.  Ride it verbatim as the
   //  seed row; the get handler resolves the remote at entry (its own pin).
-  if (verb === "get") {
+  //  COMMIT-004 (Defect A): a re-parse projector is the same — its `?`/`#` are the
+  //  view's OWN slots, never a branch ref-write, so ride the token through as a
+  //  path for the view to re-parse (see isReparseView).
+  if (verb === "get" || isReparseView(verb)) {
     for (const arg of argv) rows.push({ path: arg });
     return { rows: rows, refs: refs, triple: triple };
   }
