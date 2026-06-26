@@ -21,7 +21,9 @@ module.exports = function handle(row, ctx) {
   const cur = log.curTip();
   const base = log.baselineTip();
   const bnd = log.boundaries();
-  const branch = cur.branch || "trunk";   // trunk when no `?branch` row
+  //  DIS-053: trunk/no-branch is the bare `?` sigil, never a literal
+  //  `?trunk` — byte-match C `be head` (graf/LOG.c trunk label is `?`).
+  const branch = cur.branch || "";
 
   io.log("project:  " + (repo.project || "(unnamed)") + "\n");
   io.log("wt:       " + repo.wt + "\n");
