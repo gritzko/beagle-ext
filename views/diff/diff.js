@@ -21,6 +21,31 @@ const recurse = require("../../core/recurse.js");
 const isFullSha = shalib.isFullSha;
 const frameSha  = shalib.frameSha;
 
+//  BRO-006: tok32 pack + the `U` (URI click-target) tag.  Mirrors C
+//  graf/GRAF.c:522/535 (`tok32Pack('U', u8bDataLen(out))`): a visible token
+//  followed by a `U`-tagged token whose appended TEXT bytes ARE the nav URI.
+//  tag `U` = 'U'-'A' = 20; the bytes stay hidden in plain/color (HUNK.c skips
+//  'U' spans), the pager's _uriAt reads them as the click target.
+const TAG_U = 20;
+function tok(tag, end) { return ((tag & 0x1f) << 27) | (end & 0xffffff); }
+
+//  BRO-006: append a `U` click-target to one HUNK record.  `uri` is the hunk's
+//  own navigable file URI (`diff:<path>?<navver>#L<n>`); the bytes go after the
+//  visible text and a single `U` token covers them, so a pager left-click on
+//  the diff body opens that file at the line.  An empty uri (text-only gitlink
+//  hunk) gets no target.  Returns the augmented { text, toks } pair.
+function withUTarget(uri, text, toks) {
+  if (!uri || !uri.length) return { text: text, toks: toks };
+  const uriBytes = utf8.Encode(uri);
+  const full = new Uint8Array(text.length + uriBytes.length);
+  full.set(text, 0);
+  full.set(uriBytes, text.length);
+  const out = new Uint32Array(toks.length + 1);
+  out.set(toks, 0);
+  out[toks.length] = tok(TAG_U, full.length);
+  return { text: full, toks: out };
+}
+
 //  JAB-014: plain-JS basename suffix (the weave lexer's language key) —
 //  PATHu8sExt twin: the bytes after the LAST '.' in the basename, "" if none.
 function extOf(path) {
@@ -88,9 +113,17 @@ function diffFile(name, fromBytes, toBytes, full, navver, color, out) {
 //  hunk_uri_is_diff routes a `diff:`-URI hunk to the unified line render in
 //  both `.plain` and `.color`; a text-only hunk (gitlink line, empty uri)
 //  renders verbatim.  Each rendered chunk owns its newlines (out.chunk).
+//
+//  BRO-006: each hunk also gets a `U` click-target (its own `diff:<path>#L<n>`
+//  uri) re-fed to ctx.sink, so a pager left-click opens the file at the line
+//  (mirrors C graf/GRAF.c:522/535).  The U bytes are hidden in plain/color
+//  (HUNK.c skips 'U' spans), so out.chunk's rendered text stays byte-identical.
 function emitHunks(hd, color, out) {
   hd.rewind();
   while (hd.next()) {
+    //  BRO-006: feed the raw record to the toks sink (it appends the U target);
+    //  the rendered text still goes to out.chunk for the plain/color channel.
+    if (out.feed) out.feed(utf8.Decode(hd.uri), hd.text.slice(), hd.toks.slice());
     const o = io.buf(1 << 18);
     if (color) hd.color(o); else hd.plain(o);
     out.chunk(utf8.Decode(o.data()));
@@ -252,20 +285,42 @@ function recurseSubPins(subPath, oldPin, newPin, color, ctx, parentRepo,
 //  recursion rewrites `--- a/<name>`, `+++ b/<name>`, and the `diff:<name>`
 //  color banner to `<name>` under the mount.  A plain JS string rewrite over
 //  the already-rendered chunk (the name set is the sub's own leaf paths).
+//  BRO-006: `feed` is prefixed too — the raw hunk uri `diff:<subname>#L<n>`
+//  becomes `diff:<prefix>/<subname>#L<n>` BEFORE the sink appends its U target,
+//  so the click opens the mounted path.
 function prefixingSink(out, prefix) {
   if (!prefix) return out;
-  return { chunk: function (text) {
-    let s = text;
-    s = s.split("--- a/").join("--- a/" + prefix + "/");
-    s = s.split("+++ b/").join("+++ b/" + prefix + "/");
-    s = s.split("diff:").join("diff:" + prefix + "/");
-    out.chunk(s);
-  } };
+  return {
+    chunk: function (text) {
+      let s = text;
+      s = s.split("--- a/").join("--- a/" + prefix + "/");
+      s = s.split("+++ b/").join("+++ b/" + prefix + "/");
+      s = s.split("diff:").join("diff:" + prefix + "/");
+      out.chunk(s);
+    },
+    feed: out.feed ? function (uri, text, toks) {
+      out.feed(uri.split("diff:").join("diff:" + prefix + "/"), text, toks);
+    } : undefined,
+  };
+}
+
+//  BRO-006: wrap the run's two sinks into the one `out` the diff emit chain
+//  threads.  `chunk` is the existing plain/color rendered-text channel
+//  (ctx.out); `feed` appends a `U` click-target (the hunk's own `diff:<path>
+//  #L<n>` uri) and feeds the toks sink (ctx.sink) so a pager click navigates.
+function diffOut(ctxOut, sink) {
+  return {
+    chunk: function (text) { if (ctxOut && ctxOut.chunk) ctxOut.chunk(text); },
+    feed: sink ? function (uri, text, toks) {
+      const aug = withUTarget(uri, text, toks);
+      sink.feed(uri, aug.text, aug.toks, "", 0n);
+    } : undefined,
+  };
 }
 
 //  --- the handler -------------------------------------------------------
 module.exports = function handle(row, ctx) {
-  const out = ctx && ctx.out;
+  const out = diffOut(ctx && ctx.out, ctx && ctx.sink);
   const flags = (ctx && ctx.flags) || [];
   const color = flags.indexOf("--color") >= 0;
   const spec = (ctx && ctx.views && ctx.views[row.uri]) || null;
@@ -319,3 +374,9 @@ function blobAtTree(k, treeSha, path) {
   }
   return undefined;
 }
+
+//  BRO-006: the loop dispatches the module AS the handler; the test reaches the
+//  U click-target builder via these named exports (the LOG-001 repro pattern).
+module.exports.withUTarget = withUTarget;
+module.exports.tok = tok;
+module.exports.TAG_U = TAG_U;

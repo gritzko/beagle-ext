@@ -29,6 +29,8 @@ const store    = require("../../shared/store.js");
 const classify = require("../../shared/classify.js");
 const dag      = require("../../shared/dag.js");
 const subs     = require("../../shared/subs.js");
+const render   = require("../../view/render.js");
+const theme    = require("../../view/theme.js");
 //  JAB-004: render.js's dateCol/verbCol/writeStdout/shQuote are no longer
 //  used here — the emit sink (core/emit.js) owns all column formatting at the
 //  flush edge, and the fork machinery (shQuote) is gone.
@@ -70,7 +72,16 @@ module.exports = function handle(row, ctx) {
   //  not the row (the queue round-trip carries only ts/verb/uri).
   const flags = (ctx && ctx.flags) || [];
   const recurse = flags.indexOf("--nosub") < 0;
-  const out = ctx && ctx.out;
+
+  //  BRO-006: the pager / `--tlv` read `U` click-targets from the HUNK tok32
+  //  stream (ctx.sink), which ctx.out's plain/colour columniser can't carry —
+  //  so for those, emit a real content HUNK with per-row toks + the hidden `U`
+  //  nav target via sinkOut; plain/colour-on-a-pipe keep ctx.out (parity).
+  const mode = (ctx && ctx.mode) || "plain";
+  const onTty = (typeof io !== "undefined" && io.isatty) ? !!io.isatty(1) : false;
+  const wantPager = onTty && mode !== "tlv" && flags.indexOf("--plain") < 0;
+  const useSink = (mode === "tlv" || wantPager) && ctx && ctx.sink;
+  const out = useSink ? sinkOut(ctx.sink) : (ctx && ctx.out);
 
   //  The seed (top) row carries the "." cwd placeholder (loop.cli) — its wt is
   //  the pinned ctx.repo.  Any other uri is a sub wt root (in-process recursion
@@ -89,8 +100,78 @@ module.exports = function handle(row, ctx) {
   //  DEPTH-FIRST walk: emit this repo's hunk, then recurse each mounted sub.
   emitRepo(repo, prefix, out, recurse);
 
+  //  Flush sinkOut's last buffered hunk (ctx.out flushes at the loop edge).
+  if (useSink) out.done();
+
   //  Read-only leaf: no fan-out, nothing to enqueue.
 };
+
+//  BRO-006: a HUNK-collector with emitRepo's SAME `raw`/`row` surface, but it
+//  builds a content HUNK (text + tok32) per repo and feeds ctx.sink — `raw`
+//  "status:…" opens a hunk (the URI, not in-text, per native C), "" is dropped
+//  (the sink owns separators), else a summary line; `row` packs a hidden 'U' nav
+//  tok per file row.  Column toks mirror native `be status --tlv` (BRO-006 spec).
+function tok(tag, end) { return ((tag & 0x1f) << 27) | (end & 0xffffff); }
+function tagCode(letter) { return letter.charCodeAt(0) - 65; }
+
+function sinkOut(sink) {
+  let uri = null;                 // current hunk URI (`status:` / `status:<sub>`)
+  let parts = [];                 // Uint8Array text chunks
+  let spans = [];                 // [tagLetter, byteEnd]
+  let off = 0;                    // running byte offset
+
+  function feedText(bytes) { parts.push(bytes); off += bytes.length; }
+
+  function flush() {
+    if (uri === null) return;     // nothing opened yet
+    const body = concatBytes(parts, off);
+    const toks = new Uint32Array(spans.length);
+    for (let i = 0; i < spans.length; i++) toks[i] = tok(tagCode(spans[i][0]), spans[i][1]);
+    sink.feed(uri, body, toks, "", 0n);
+    uri = null; parts = []; spans = []; off = 0;
+  }
+
+  return {
+    //  banner → new hunk; "" separator → drop; else → a summary text line.
+    raw: function (text) {
+      if (text.slice(0, 7) === "status:") { flush(); uri = text; return; }
+      if (text === "") return;
+      const b = utf8.Encode(text + "\n");
+      feedText(b);
+      spans.push(["S", off]);     // the whole summary line, default tag
+    },
+    //  One columnar row `<date7> <verb3> <path>\n`; per-file rows append a
+    //  hidden `U`-tag nav target (`nav`) after the "\n".
+    row: function (text, verb, ts, _tag, nav) {
+      const date = render.dateCol(ts == null ? 0n : ts);
+      const vcol = render.verbCol(verb);
+      const line = date + " " + vcol + " " + text + "\n";
+      const lineB = utf8.Encode(line);
+      feedText(lineB);
+      const eDate = off - lineB.length + utf8.Encode(date).length;
+      const eSep1 = eDate + 1;
+      const eVerb = eSep1 + utf8.Encode(vcol).length;
+      const eSep2 = eVerb + 1;
+      const eNL   = off;          // path incl "\n" ends the visible row
+      const vtag  = theme.VERB_SLOT[verb] || "S";
+      spans.push(["L", eDate]);   // date column
+      spans.push(["S", eSep1]);   // sep
+      spans.push([vtag, eVerb]);  // verb (palette slot)
+      spans.push(["S", eSep2]);   // sep
+      spans.push(["S", eNL]);     // path incl "\n" (status path tag = 'S')
+      if (nav) { feedText(utf8.Encode(nav)); spans.push(["U", off]); }  // hidden nav
+    },
+    done: flush,
+  };
+}
+
+//  Concatenate Uint8Array chunks into one buffer of length `total`.
+function concatBytes(chunks, total) {
+  const all = new Uint8Array(total);
+  let o = 0;
+  for (const c of chunks) { all.set(c, o); o += c.length; }
+  return all;
+}
 
 //  Emit ONE repo's status hunk into `out` (header + divergence + bucket rows +
 //  summary), then — when recursing — walk its mounted subs DEPTH-FIRST, each
@@ -177,7 +258,13 @@ function emitRepo(repo, prefix, out, recurse) {
     for (const r of inBucket) {
       let path = r.path;
       if (r.bucket === "mov" && r.dst) path = path + "#" + r.dst;
-      out.row(joinPrefix(prefix, path), bucket, r.ts);
+      //  BRO-006: a hidden `U`-tag nav target per file row — `diff:` for `mod`,
+      //  else `cat:`; a move targets its DST.  Mirrors C SNIFF.exe.c
+      //  status_dump_verb → HUNK_NAV_DIFF/CAT.  ctx.out ignores the 5th arg
+      //  (plain/colour unchanged); sinkOut packs it under a 'U' tok.
+      const navPath = r.bucket === "mov" && r.dst ? r.dst : r.path;
+      const nav = (r.bucket === "mod" ? "diff:" : "cat:") + joinPrefix(prefix, navPath);
+      out.row(joinPrefix(prefix, path), bucket, r.ts, null, nav);
     }
   }
 

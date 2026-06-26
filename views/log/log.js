@@ -33,7 +33,9 @@ const LOG_MAX_WALK = 1 << 20;   // GRAF LOG_MAX_WALK cyclic-DAG bound
 //  LOG-001: TAG_Q (unk/dir, grey in dog/THEME) tags the WHOLE non-spine
 //  (merge 2nd+ parent) row so it reads as secondary; the binding's .color
 //  paints it from dog/THEME — JS never re-rolls an SGR.
-const TAG_L = 11, TAG_G = 6, TAG_S = 18, TAG_D = 3, TAG_Q = 16;
+//  BRO-006: TAG_U ('U'-65 = 20) is the invisible click-target tag — its bytes
+//  are hidden in plain/colour; the pager `_uriAt` reads them as the nav URI.
+const TAG_L = 11, TAG_G = 6, TAG_S = 18, TAG_D = 3, TAG_Q = 16, TAG_U = 20;
 function tok(tag, end) { return ((tag & 0x1f) << 27) | (end & 0xffffff); }
 
 //  --- URI parse: pull the path / ?ref / #frag off the raw `log:<uri>` arg ---
@@ -337,6 +339,13 @@ function leafSha(k, treeSha, path) {
 //  LOG-001: a NON-SPINE (merge 2nd+ parent) row is tagged ENTIRELY grey
 //  (TAG_Q) instead of the per-column palette, so the binding's .color paints
 //  the whole secondary row grey; the plain sink is unaffected.
+//  BRO-006: after the sha8 token each row carries a HIDDEN `U` click-target —
+//  the bytes `commit:?<full-sha>` tagged TAG_U (20) — so a pager left-click on
+//  the row opens that commit.  Mirrors C graf/LOG.c:260 (GRAFPackUriCommitSha →
+//  GRAF.c:535 tok32Pack('U', …)): URI bytes sit between sha8 and the separator,
+//  the `U` token follows the sha8 span, the bytes stay hidden in plain/colour
+//  (the pager `_uriAt` reads them).  `commit:?` not `diff:?` (a pin-only commit
+//  has no parent-level diff hunk — see the C note).
 function appendRow(sha, k, textParts, spans, baseOff, nonspine) {
   const sha8 = sha.slice(0, 8);
   const date7 = ron.date(dag.commitTs(k, sha));        // 7-col; ts<=0 → "   ?   "
@@ -344,27 +353,37 @@ function appendRow(sha, k, textParts, spans, baseOff, nonspine) {
   const summary = firstLine(pc ? pc.body : "");
   const author = authorName(pc ? pc.author : "");
   const authTail = " (" + author + ")";
-  const line = sha8 + " " + date7 + " " + summary + authTail + "\n";
+  //  The hidden U-target bytes, spliced in right after sha8 (C row order).
+  const uri = "commit:?" + sha;
+  const uriBytes = utf8.Encode(uri);
+  //  Row bytes WITH the hidden URI inline: sha8 + <uri> + " " + date7 + " " +
+  //  summary + " (author)" + "\n".  The pager hides the U-tagged span, so the
+  //  visible columns are unchanged from the LOG-001 layout.
+  const line = sha8 + uri + " " + date7 + " " + summary + authTail + "\n";
   const bytes = utf8.Encode(line);
   textParts.push(bytes);
 
   //  Byte ends of each column (ASCII sha8/date7/sep; summary/author may be
-  //  multibyte — measure with utf8.Encode).  Shift every end by baseOff so the
-  //  spans address the WHOLE accumulated hunk body.
+  //  multibyte — measure with utf8.Encode).  The URI bytes shift every column
+  //  after sha8; shift every end by baseOff so the spans address the WHOLE hunk.
   const eSha8 = 8;                                      // [0,8)   sha8
-  const eSep1 = eSha8 + 1;                              // [8,9)   sep " "
-  const eDate = eSep1 + utf8.Encode(date7).length;      // [9,16)  date7 (7 cols)
-  const eSep2 = eDate + 1;                              // [16,17) sep " "
+  const eUri  = eSha8 + uriBytes.length;                // [8,…)   HIDDEN URI (U)
+  const eSep1 = eUri + 1;                               // sep " "
+  const eDate = eSep1 + utf8.Encode(date7).length;      // date7 (7 cols)
+  const eSep2 = eDate + 1;                              // sep " "
   const eSumm = eSep2 + utf8.Encode(summary).length;    // summary
   const eAuth = eSumm + utf8.Encode(authTail).length;   // " (author)"
   const eNL   = bytes.length;                           // incl the "\n"
   if (nonspine) {
-    //  Whole-row grey: ONE TAG_Q span over the visible row, then TAG_S over
-    //  the "\n" so the grey doesn't bleed onto the next row's terminator.
-    spans.push([TAG_Q, baseOff + eAuth]);               // sha8…author = grey
+    //  Whole-row grey: TAG_Q over sha8, the U-target, then TAG_Q over the rest
+    //  of the visible row, then TAG_S over the "\n" (no colour bleed).
+    spans.push([TAG_Q, baseOff + eSha8]);               // sha8 = grey
+    spans.push([TAG_U, baseOff + eUri]);                // hidden commit:?<sha>
+    spans.push([TAG_Q, baseOff + eAuth]);               // sep…author = grey
     spans.push([TAG_S, baseOff + eNL]);                 // "\n" → no colour bleed
   } else {
     spans.push([TAG_L, baseOff + eSha8]);               // sha8
+    spans.push([TAG_U, baseOff + eUri]);                // hidden commit:?<sha>
     spans.push([TAG_G, baseOff + eSep1]);               // sep
     spans.push([TAG_L, baseOff + eDate]);               // date7
     spans.push([TAG_G, baseOff + eSep2]);               // sep
@@ -447,3 +466,4 @@ module.exports.branchHistory = branchHistory;
 module.exports.appendRow = appendRow;
 module.exports.tok = tok;
 module.exports.TAG_Q = TAG_Q;
+module.exports.TAG_U = TAG_U;

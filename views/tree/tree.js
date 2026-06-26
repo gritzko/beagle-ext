@@ -36,6 +36,35 @@ const store  = require("../../shared/store.js");
 const wtlog  = require("../../shared/wtlog.js");
 const resolve = require("../../core/resolve.js");
 
+//  BRO-006: a content-HUNK row carries a hidden `U`-tagged nav URI so a bro
+//  pager left-click on the entry NAME opens it — mirroring native `be tree:
+//  --tlv` (a tree → `tree:<path>/`, a blob → `blob:<path>`).  Row layout:
+//  `<meta><name><navuri>\n`, toks D(meta) F(name) U(navuri) W(\n); the nav URI
+//  rides BEFORE the '\n' so the body ends visible.  tag 'U' = 20, hidden in
+//  plain/color (the pager's _uriAt reads the bytes).  See views/log/log.js.
+function tok(tag, end) { return ((tag & 0x1f) << 27) | (end & 0xffffff); }
+function tagCode(letter) { return letter.charCodeAt(0) - 65; }
+
+//  Append ONE entry row's bytes + tok32 spans.  `meta` = the `<mode> <type>
+//  <sha>\t` prefix, `name` the entry name (a tree keeps its trailing '/'),
+//  `navUri` the hidden click target.  Returns the bytes appended.
+function appendRow(textParts, spans, off, meta, name, navUri) {
+  const metaB = utf8.Encode(meta);
+  const nameB = utf8.Encode(name);
+  const uriB  = utf8.Encode(navUri);
+  const nlB   = utf8.Encode("\n");
+  textParts.push(metaB); textParts.push(nameB); textParts.push(uriB); textParts.push(nlB);
+  const eMeta = metaB.length;
+  const eName = eMeta + nameB.length;
+  const eUri  = eName + uriB.length;
+  const eNL   = eUri + nlB.length;
+  spans.push([tagCode("D"), off + eMeta]);   // meta (mode/type/sha) — dim
+  spans.push([tagCode("F"), off + eName]);   // the visible name (violet)
+  spans.push([tagCode("U"), off + eUri]);    // hidden nav URI (click target)
+  spans.push([tagCode("S"), off + eNL]);     // the visible '\n'
+  return metaB.length + nameB.length + uriB.length + nlB.length;
+}
+
 //  mode-class -> the row's `<mode6> <type-padded-to-6>` prefix (proj_tree_mode_
 //  type :271/:274).  The type column is 6 wide ("tree "/"blob "/"commit"), then
 //  proj :362 adds a single ' ' before the sha — folded into the constant here so
@@ -122,8 +151,13 @@ function commitOrTree(k, sha) {
 
 module.exports = function handle(row, ctx) {
   const out  = ctx && ctx.out;
+  const sink = ctx && ctx.sink;
   const mode = (ctx && ctx.mode) || "plain";
   const color = mode === "color";
+  //  BRO-006: color/tlv emit the U-target content hunk (pager + --tlv parity);
+  //  plain keeps the byte-identical hand-painted `out.raw` rows (the content
+  //  hunk's HUNKu8sFeedText render lacks tree's bespoke plain shape).
+  const wantU = sink && mode !== "plain";
   const repo = (ctx && ctx.repo) || be.find();
   if (!repo) return;
 
@@ -168,11 +202,44 @@ module.exports = function handle(row, ctx) {
   //  `?<rev>` suffix when a sha/ref was given — native promotes `#<hex>` to the
   //  `?<hex>` query form in the banner and keeps the VERBATIM (un-expanded)
   //  value (`?054a0d44`, `?heads/feat`).  No suffix for a pure-path/empty URI.
-  if (!out) return;
-  if (color) {
-    const rev = query || frag;                  // frag (#hex) shows as ?<hex>
-    out.raw(bannerLine("tree:" + segs.join("/") + (rev ? "?" + rev : "")));
+  const rev = query || frag;                    // frag (#hex) shows as ?<hex>
+  const banner = "tree:" + segs.join("/") + (rev ? "?" + rev : "");
+  const pathPfx = segs.length ? segs.join("/") + "/" : "";   // full-path nav prefix
+
+  //  BRO-006 pager/--tlv path: ONE content HUNK, a hidden `U` per entry name.
+  if (wantU) {
+    const textParts = [], spans = [];
+    let off = 0;
+    if (belowRoot) {                            // the bare `..` row — no U target
+      const dd = utf8.Encode("..\n");
+      textParts.push(dd);
+      spans.push([tagCode("F"), off + utf8.Encode("..").length]);
+      spans.push([tagCode("S"), off + dd.length]);
+      off += dd.length;
+    }
+    for (const e of entries) {
+      const kind = store.modeKind(e.mode);
+      const prefix = MODE_PREFIX[kind] || MODE_PREFIX.blob;
+      const name = kind === "tree" ? (e.name + "/") : e.name;
+      const meta = prefix + e.sha + "\t";
+      const nav = kind === "tree"
+                ? "tree:" + pathPfx + e.name + "/"
+                : "blob:" + pathPfx + e.name;
+      off += appendRow(textParts, spans, off, meta, name, nav);
+    }
+    const body = new Uint8Array(off);
+    let p = 0;
+    for (const part of textParts) { body.set(part, p); p += part.length; }
+    const toks = new Uint32Array(spans.length);
+    for (let i = 0; i < spans.length; i++) toks[i] = tok(spans[i][0], spans[i][1]);
+    sink.feed(banner, body, toks, "", 0n);
+    return;
   }
+
+  //  Plain/hand-painted path (byte-identical to native): COLOUR leads with the
+  //  banner band; PLAIN has no banner.
+  if (!out) return;
+  if (color) out.raw(bannerLine(banner));
   if (belowRoot) out.raw(dotdotRow(color));     // the bare `..`, never at root
   for (const e of entries) {
     const kind = store.modeKind(e.mode);
@@ -182,3 +249,7 @@ module.exports = function handle(row, ctx) {
   }
   //  Read-only leaf: no fan-out.
 };
+
+//  BRO-006: expose the U-target hunk builders for the repro test.
+module.exports.tok = tok;
+module.exports.appendRow = appendRow;
