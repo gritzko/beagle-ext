@@ -17,6 +17,9 @@ const be      = require("../../core/discover.js");
 const store   = require("../../shared/store.js");
 const shalib  = require("../../shared/util/sha.js");
 const recurse = require("../../core/recurse.js");
+//  DIFF-010: the shared grow-on-"out full" WEAVE/HUNK fold retry (mirrors
+//  loop.js:128-142) — a large diff fold no longer throws "out full".
+const weave   = require("../../shared/weave.js");
 
 const isFullSha = shalib.isFullSha;
 const frameSha  = shalib.frameSha;
@@ -86,25 +89,31 @@ function diffFile(name, fromBytes, toBytes, full, navver, color, out) {
   if (isBinary(f) || isBinary(t)) return;                      // binary skip
 
   const ext = extOf(name);
-  const wA = abc.ram("WEAVE", 1 << 18);
-  const wB = abc.ram("WEAVE", 1 << 18);
-  let from, to;
+  //  DIFF-010: each fold grows its own WEAVE buffer on "out full" (weave.fold),
+  //  so a large blob no longer throws.
+  let wA, wB, from, to;
   if (f.length === 0) {
     //  Addition: base layer = the to-content (ID_FROM), diff layer = empty
     //  (ID_TO); invert the scope roles so `from` is the empty side.
-    wA.fold(null, t, ext, ID_FROM);
-    wB.fold(wA, f, ext, ID_TO);
+    wA = weave.fold(null, t, ext, ID_FROM);
+    wB = weave.fold(wA, f, ext, ID_TO);
     from = wB.scope([ID_FROM, ID_TO]); to = wB.scope([ID_FROM]);
   } else {
     //  Normal / deletion: base layer = from-content, diff layer = to.
-    wA.fold(null, f, ext, ID_FROM);
-    wB.fold(wA, t, ext, ID_TO);
+    wA = weave.fold(null, f, ext, ID_FROM);
+    wB = weave.fold(wA, t, ext, ID_TO);
     from = wB.scope([ID_FROM]); to = wB.scope([ID_FROM, ID_TO]);
   }
 
-  const hd = abc.ram("HUNK", 1 << 18);
-  if (full) wB.emitFull(from, to, name, "diff:", navver, hd);
-  else      wB.emitDiff(from, to, name, navver, hd);
+  //  DIFF-010: the HUNK emit buffer also grows on "out full" (a large windowed
+  //  or whole-file diff overflows a fixed HUNK cap, like the fold above).
+  const hint = (f.length + t.length) * 2 + 1024;
+  const hd = weave.growOnFull(function (cap) { return abc.ram("HUNK", cap); },
+    function (h) {
+      if (full) wB.emitFull(from, to, name, "diff:", navver, h);
+      else      wB.emitDiff(from, to, name, navver, h);
+      return h;
+    }, 1 << 18, hint);
 
   emitHunks(hd, color, out);
 }
@@ -124,8 +133,12 @@ function emitHunks(hd, color, out) {
     //  BRO-006: feed the raw record to the toks sink (it appends the U target);
     //  the rendered text still goes to out.chunk for the plain/color channel.
     if (out.feed) out.feed(utf8.Decode(hd.uri), hd.text.slice(), hd.toks.slice());
-    const o = io.buf(1 << 18);
-    if (color) hd.color(o); else hd.plain(o);
+    //  DIFF-010: the per-record render buffer grows on "out full" — one large
+    //  hunk's plain/color bytes can exceed a fixed io.buf cap.
+    const hint = hd.text.length * 4 + 1024;
+    const o = weave.growOnFull(function (cap) { return io.buf(cap); },
+      function (b) { if (color) hd.color(b); else hd.plain(b); return b; },
+      1 << 18, hint);
     out.chunk(utf8.Decode(o.data()));
   }
 }

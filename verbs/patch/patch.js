@@ -34,6 +34,9 @@ const checkout  = require("../../shared/checkout.js");
 const conflict  = require("../../shared/conflict.js");
 const ulog      = require("../../shared/ulog.js");
 const pathlib   = require("../../shared/util/path.js");
+//  DIFF-010: the shared grow-on-"out full" WEAVE fold/merge retry (mirrors
+//  loop.js:128-142) — a large per-file weave no longer throws "out full".
+const weave     = require("../../shared/weave.js");
 const join = pathlib.join;
 
 //  A commit id for the weave is the hi64 of its sha1, a 16-char hex hashlet
@@ -166,11 +169,8 @@ function foldCommit(ctx, sha) {
     //  pairwise left-to-right (WEAVEMerge keys on identity, so order only sets
     //  the synthetic merge-commit stamp, which carries no token here).
     base = weaveCache[parents[0]];
-    for (let i = 1; i < parents.length; i++) {
-      const m = abc.ram("WEAVE", ctx.weaveCap);
-      m.merge(base, weaveCache[parents[i]], weaveId(sha));
-      base = m;
-    }
+    for (let i = 1; i < parents.length; i++)
+      base = weave.merge(base, weaveCache[parents[i]], weaveId(sha));  // DIFF-010
   }
 
   const blobSha = blobShaAt(reader, treeCache, sha, path);
@@ -180,9 +180,7 @@ function foldCommit(ctx, sha) {
     //  remover stamped by this commit.  If no parent had it either, there is
     //  no history to carry (null propagates).
     if (base === null || base.empty()) return base;   // never present → no-op
-    const w = abc.ram("WEAVE", ctx.weaveCap);
-    w.fold(base, new Uint8Array(0), ext, weaveId(sha));
-    return w;
+    return weave.fold(base, new Uint8Array(0), ext, weaveId(sha));  // DIFF-010
   }
 
   const bytes = blobBytes(reader, blobSha);
@@ -193,14 +191,14 @@ function foldCommit(ctx, sha) {
   //  did not touch the file — carry the parent weave unchanged (no spurious
   //  commit id in the scope).
   if (base !== null && parents.length === 1) {
-    const prev = ctx.aliveBuf; prev.reset();
-    base.alive(prev);
+    //  DIFF-010: the alive view grows on "out full" — the tip can exceed the
+    //  fixed scratch buffer for a large file.
+    const prev = weave.growOnFull(function (cap) { return io.buf(cap); },
+      function (b) { base.alive(b); return b; }, 1 << 20, bytes.length + 256);
     if (bytesEq(prev.data(), bytes)) return base;
   }
 
-  const w = abc.ram("WEAVE", ctx.weaveCap);
-  w.fold(base, bytes, ext, weaveId(sha));
-  return w;
+  return weave.fold(base, bytes, ext, weaveId(sha));  // DIFF-010 grow-on-full
 }
 
 //  Byte-equality of two Uint8Arrays.
@@ -278,13 +276,13 @@ function mergeApply(rc, path, oLeaf) {
   else if (!theirs.weave) merged = aliveOf(rc, ours.weave);
   else {
     //  Union ours⊕theirs (shared tokens dedup by identity), then render the
-    //  two sides' scopes with fences.
-    const wm = abc.ram("WEAVE", rc.weaveCap * 2);
-    wm.merge(ours.weave, theirs.weave, "0000000000000000");
+    //  two sides' scopes with fences.  DIFF-010: both the WEAVE union and the
+    //  merged-render buffer grow on "out full".
+    const wm = weave.merge(ours.weave, theirs.weave, "0000000000000000");
     const oScope = wm.scope(setArr(ours.ids));
     const tScope = wm.scope(setArr(theirs.ids));
-    const out = rc.outBuf; out.reset();
-    wm.merged([oScope, tScope], out);
+    const out = weave.growOnFull(function (cap) { return io.buf(cap); },
+      function (b) { wm.merged([oScope, tScope], b); return b; }, 1 << 20, 0);
     merged = out.data();
   }
 
@@ -298,8 +296,10 @@ function mergeApply(rc, path, oLeaf) {
 //  alive (tip) bytes of a weave, as a fresh Uint8Array (copied off the shared
 //  scratch buffer so the caller can hold it past the next merge).
 function aliveOf(rc, w) {
-  const b = rc.outBuf; b.reset();
-  w.alive(b);
+  //  DIFF-010: the alive (tip) render grows on "out full" — a large file tip
+  //  can exceed the fixed scratch buffer.
+  const b = weave.growOnFull(function (cap) { return io.buf(cap); },
+    function (buf) { w.alive(buf); return buf; }, 1 << 20, 0);
   return b.data().slice();
 }
 
