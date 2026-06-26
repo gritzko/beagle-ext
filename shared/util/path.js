@@ -38,4 +38,19 @@ function basename(p) {
   return i < 0 ? p : p.slice(i + 1);
 }
 
-module.exports = { join: join, dirname: dirname, basename: basename };
+//  safeRel(rel) — the ONE worktree-confinement guard (JS-065).  YES iff `rel`
+//  is a relative in-tree path: no absolute leading `/`, no NUL, and every
+//  `/`-split segment is a real name (not ""/"."/".."/".git"/".be"/"..be.idx").
+//  Parity with keeper/WALK name validation; rejects the path-traversal escape.
+function safeRel(rel) {
+  if (typeof rel !== "string" || rel === "" || rel[0] === "/") return false;
+  if (rel.indexOf("\0") >= 0) return false;
+  for (const seg of rel.split("/")) {
+    if (seg === "" || seg === "." || seg === "..") return false;
+    if (seg === ".git" || seg === ".be" || seg === "..be.idx") return false;
+  }
+  return true;
+}
+
+module.exports = { join: join, dirname: dirname, basename: basename,
+                   safeRel: safeRel };

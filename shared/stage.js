@@ -51,7 +51,8 @@ const PUTMVMETA = "PUTMVMETA";
 function isMeta(rel) {
   if (!rel) return true;
   for (const seg of rel.split("/"))
-    if (seg === ".git" || seg === ".be" || seg === "..be.idx") return true;
+    if (seg === ".git" || seg === ".be" || seg === "..be.idx" ||
+        seg === "..") return true;                      // JS-065: reject `..`
   return false;
 }
 

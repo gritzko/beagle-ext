@@ -41,6 +41,7 @@
 "use strict";
 
 const pathlib = require("./util/path.js");   // JSQUE-016: util libs -> shared/util/
+const safeRel = pathlib.safeRel;             // JS-065: worktree-confinement guard
 const shalib = require("./util/sha.js");
 const ulog = require("./ulog.js");
 const join = pathlib.join;
@@ -505,6 +506,7 @@ function open(storePath, project) {
           const path = prefix ? (prefix + "/" + e.name) : e.name;
           const m = e.mode;
           if (m === 0o40000) { walk(e.sha, path); continue; }      // dir
+          if (!safeRel(path)) throw "store: unsafe tree path " + path;  // JS-065
           if (m === 0o160000) { cb({ path: path, mode: m, sha: e.sha, kind: "s" }); continue; }
           if (m === 0o120000) { cb({ path: path, mode: m, sha: e.sha, kind: "l" }); continue; }
           if (m === 0o100755) { cb({ path: path, mode: m, sha: e.sha, kind: "x" }); continue; }

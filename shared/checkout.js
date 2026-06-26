@@ -19,7 +19,7 @@
 "use strict";
 
 const pathlib = require("./util/path.js");   // JSQUE-016: path.js -> shared/util/
-const join = pathlib.join, dirname = pathlib.dirname;
+const join = pathlib.join, dirname = pathlib.dirname, safeRel = pathlib.safeRel;
 
 function statKind(p) { try { return io.stat(p).kind; } catch (e) { return undefined; } }
 
@@ -93,6 +93,7 @@ function writeSymlink(wtRoot, rel, target) {
 //  a regular/exec file → write bytes, then chmod 0755 for an exec ("x")
 //  blob.  Mirrors sniff/GET.c get_write_one (FILESymLink / FILEChmod 0755).
 function materialise(wtRoot, rel, leaf, bytes) {
+  if (!safeRel(rel)) throw "checkout: unsafe path " + rel;   // JS-065 guard
   if (leaf.kind === "l") {
     writeSymlink(wtRoot, rel, utf8.Decode(bytes));   // blob bytes = link target
     return;
