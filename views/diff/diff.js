@@ -6,15 +6,20 @@
 //  graf/DIFFREF.c (GRAFDiff2Layer / GRAFDiffWtTree / GRAFDiffTreeRefs) +
 //  GRAF.exe.c's URI shape table + be bediff sub pin-range relay.
 //
-//  handle(row, ctx): the seed (resolve.js classifyView) pinned this arg's
-//  from/to shas + navver + scope into ctx.views[row.uri]; the handler does
-//  ZERO ref resolution.  Output is HUNK bytes via ctx.out.chunk (the HUNK
-//  `.plain`/`.color` cursor's diff:-scheme line render — NOT bro's pager).
+//  handle(row, ctx): JS-071 — the loop NEVER sets ctx.views, so the handler
+//  RE-PARSES the whole `diff:<uri>` off ctx.args[0] (the loop's one-shot
+//  scheme:uri form), exactly like log.js/commit.js/tree.js.  parseDiffArg
+//  builds the spec (mode range|wt, from/to/baseline shas, navver, path) in
+//  the SAME shape :278-302 consume.  A caller (commit.js, COMMIT-006) that
+//  pins ctx.views[row.uri] still wins — pinned spec ?? reparse.  Output is
+//  HUNK bytes via ctx.out.chunk (the HUNK `.plain`/`.color` cursor's diff:-
+//  scheme line render — NOT bro's pager).
 
 "use strict";
 
 const be      = require("../../core/discover.js");
 const store   = require("../../shared/store.js");
+const wtlog   = require("../../shared/wtlog.js");
 const shalib  = require("../../shared/util/sha.js");
 const recurse = require("../../core/recurse.js");
 //  DIFF-010: the shared grow-on-"out full" WEAVE/HUNK fold retry (mirrors
@@ -318,29 +323,111 @@ function prefixingSink(out, prefix) {
 }
 
 //  BRO-006: wrap the run's two sinks into the one `out` the diff emit chain
-//  threads.  `chunk` is the existing plain/color rendered-text channel
-//  (ctx.out); `feed` appends a `U` click-target (the hunk's own `diff:<path>
-//  #L<n>` uri) and feeds the toks sink (ctx.sink) so a pager click navigates.
-function diffOut(ctxOut, sink) {
+//  threads.  `chunk` is the plain/color rendered-text channel (ctx.out); `feed`
+//  carries the toks sink (ctx.sink) for the pager.  JS-071: the per-hunk `U`
+//  click-target rides the body bytes ONLY in --tlv (the bro pager's per-line
+//  nav, hunksFromTlv reads text+toks).  In plain/color the body U-target leaks
+//  a phantom trailing line in the HUNK line-walk (C graf has no body U-target;
+//  it navigates via the hunk's own `uri`), so we feed the bare record there —
+//  byte-parity with native, click still follows hunk.uri (pager.js _followRow).
+function diffOut(ctxOut, sink, mode) {
+  const wantU = mode === "tlv";
   return {
     chunk: function (text) { if (ctxOut && ctxOut.chunk) ctxOut.chunk(text); },
     feed: sink ? function (uri, text, toks) {
-      const aug = withUTarget(uri, text, toks);
+      const aug = wantU ? withUTarget(uri, text, toks) : { text: text, toks: toks };
       sink.feed(uri, aug.text, aug.toks, "", 0n);
     } : undefined,
   };
 }
 
+//  --- JS-071: re-parse the `diff:` URI off ctx.args[0] -------------------
+//  The loop NEVER sets ctx.views; re-parse the one-shot `diff:<uri>` like
+//  log/commit/tree.  Resolve a ref (branch-FIRST, then full-sha / hashlet) to
+//  a commit sha via the store reader.  Returns undefined for a bare sha that
+//  is no commit (the caller treats a null tree as the empty side).
+function resolveCommit(k, ref) {
+  if (!ref) return undefined;
+  const byRef = k.resolveRef(ref);                    // branch / tag FIRST
+  if (byRef && isFullSha(byRef)) return byRef;
+  if (isFullSha(ref)) return k.getObject(ref) ? ref : undefined;
+  if (/^[0-9a-f]{1,39}$/.test(ref)) return k.resolveHexAny(ref);
+  return undefined;
+}
+
+//  Build the diff spec from `diff:<path>?<query>#<frag>` (the C GRAF.exe.c URI
+//  shape table, :352-358).  Range forms (`?from..to`, legacy `?from#to`) need
+//  no baseline; the no-range forms (`diff:`, `diff:file`, `diff:?branch`) take
+//  the wt baseline.  A no-path `diff:?<hashlet>` is a commit-show (rev vs its
+//  first parent), matching `git show`.  Returns { mode, fromSha, toSha,
+//  baselineSha, navver, path } in the existing spec shape, or null when a ref
+//  is unresolvable.
+function parseDiffArg(k, repo, raw) {
+  let first = String(raw || "");
+  if (first.indexOf("diff:") !== 0) first = "diff:" + first;
+  const u = new URI(first);
+  const path = u.path || "";
+  const query = u.query || "";
+  const frag = u.fragment || "";
+
+  //  RANGE: `?from..to` canonical (navver = the verbatim query) or legacy
+  //  `?from#to` (frag = the range `to`, no navver / no #L anchor).
+  const dots = query.indexOf("..");
+  let fromRef, toRef, navver = "";
+  if (dots > 0 && dots < query.length - 2) {
+    fromRef = query.slice(0, dots); toRef = query.slice(dots + 2); navver = query;
+  } else if (query && frag) {
+    fromRef = query; toRef = frag;
+  }
+  if (fromRef !== undefined) {
+    const fromSha = resolveCommit(k, fromRef);
+    const toSha   = resolveCommit(k, toRef);
+    if (!fromSha || !toSha) return null;              // unresolvable ref → nothing
+    return { mode: "range", fromSha: fromSha, toSha: toSha,
+             baselineSha: "", navver: navver, path: path };
+  }
+
+  const baseSha = (wtlog.open(repo).baselineTip() || {}).sha || "";
+  if (query) {
+    //  `?branch` (no range): commit-show when no path AND a hashlet that is NOT
+    //  a branch name (rev vs first parent, `git show`); else branch-vs-base.
+    const isName = !!k.resolveRef(query);
+    if (!path && !isName && /^[0-9a-f]{6,40}$/.test(query)) {
+      const sha = resolveCommit(k, query);
+      const parents = sha ? (k.commitParents(sha) || []) : [];
+      if (sha && parents.length) {
+        return { mode: "range", fromSha: parents[0], toSha: sha,
+                 baselineSha: "", navver: parents[0] + ".." + sha, path: "" };
+      }
+    }
+    const branchSha = resolveCommit(k, query);
+    if (!branchSha || !baseSha) return null;
+    return { mode: "range", fromSha: branchSha, toSha: baseSha,
+             baselineSha: "", navver: "", path: path };
+  }
+  //  No query → wt vs base (the loop's `diff:` / `diff:<file>`).
+  return { mode: "wt", fromSha: "", toSha: "",
+           baselineSha: baseSha, navver: "", path: path };
+}
+
 //  --- the handler -------------------------------------------------------
 module.exports = function handle(row, ctx) {
-  const out = diffOut(ctx && ctx.out, ctx && ctx.sink);
+  const out = diffOut(ctx && ctx.out, ctx && ctx.sink, (ctx && ctx.mode) || "plain");
   const flags = (ctx && ctx.flags) || [];
   const color = flags.indexOf("--color") >= 0;
-  const spec = (ctx && ctx.views && ctx.views[row.uri]) || null;
-  if (!spec) return;                                  // no pinned view spec
 
   const repo = (ctx && ctx.repo) || be.find();
   const k = store.open(repo.storePath, repo.project);
+
+  //  JS-071: a pinned ctx.views spec (commit.js / COMMIT-006) wins; else
+  //  re-parse the one-shot `diff:<uri>` off ctx.args[0] (never row.uri).
+  let spec = (ctx && ctx.views && ctx.views[row.uri]) || null;
+  if (!spec) {
+    const rawArgs = (ctx && ctx.args && ctx.args.length) ? ctx.args : [row.uri];
+    spec = parseDiffArg(k, repo, rawArgs[0]);
+  }
+  if (!spec) return;                                  // unresolvable / no spec
+
   const navver = spec.navver || "";
 
   if (spec.mode === "range") {
