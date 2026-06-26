@@ -15,6 +15,22 @@ const bro = require("view/bro.js");
 //  theme (view/theme.js BANNER_SGR), the SAME band core/emit.js / C bro draw.
 const theme = require("view/theme.js");
 
+//  BRO-007: the ONE source of truth for the scroll-mode key bindings — the
+//  `help:` view (views/help/help.js) imports this so its SHORTCUTS section can
+//  never silently drift from `_keyScroll`.  KEEP IN SYNC with `_keyScroll`.
+const SHORTCUTS = [
+  ["q", "quit the pager"],
+  ["j / k", "scroll down / up one line"],
+  ["space / b", "page down / up"],
+  ["g / G", "jump to top / bottom"],
+  ["m", "toggle mouse tracking (wheel + click-to-follow)"],
+  [": ", "open the address bar (type any URI spell)"],
+  [". # ? /", "open the address bar pre-filled with that char"],
+  ["Enter", "follow the URI of the row at the cursor"],
+  ["- / BS", "back — pop to the previous view"],
+  ["h", "this help screen"],
+];
+
 //  ---- terminal write helpers (raw escapes; no OPOST, so we emit CRLF) -------
 const ESC = "\x1b";
 const CLEAR = ESC + "[2J" + ESC + "[H";       // clear + home
@@ -211,8 +227,10 @@ Pager.prototype._statusLine = function (rows, scroll, viewRows, cols) {
     left = bro.statusURI(r.hunk, line);
   }
   const pos = bro.statusPos(scroll, rows.length, viewRows);
+  //  BRO-007: the per-key hint blob collapsed to a single `h: help` pointer —
+  //  `h` pushes the help: view listing every shortcut + URI scheme.
   let line = (this.message ? this.message + "  " : "") + left + "  " + pos +
-             "   (j/k space g/G : q)";
+             "   h: help";
   return (this.color ? ESC + "[7m" : "") + this._fit(line, cols) +
          (this.color ? ESC + "[0m" : "");
 };
@@ -271,6 +289,10 @@ Pager.prototype._keyScroll = function (b) {
     case 0x0d: case 0x0a: this._followRow(v.scroll); break;          // Enter
     //  JAB-030: the BACK key POPS the view stack (a spell/follow pushed it).
     case 0x2d: case 0x7f: case 0x08: this.popView(); break;          // - / BS
+    //  BRO-007: `h` runs the `help:` spell — pushes views/help/help.js as a
+    //  normal view (scrollable, `-`/BS backs out).  SHORTCUTS (above) is the
+    //  single source the help: view mirrors; keep both in sync.
+    case 0x68: this._runSpell("help:"); break;                       // h  help
     default: break;
   }
 };
@@ -527,4 +549,5 @@ module.exports = {
   paintRow: paintRow,
   hunksFromTlv: hunksFromTlv,
   hunksFromLog: hunksFromLog,
+  SHORTCUTS: SHORTCUTS,        // BRO-007: single-sourced for views/help/help.js
 };
