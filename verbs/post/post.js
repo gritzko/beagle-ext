@@ -82,10 +82,72 @@ function epochSecOf(stamp) {
   return Math.floor(dt.getTime() / 1000);
 }
 
+//  --- POST.mkd URI-slot parse (DIS-054) ----------------------------------
+//  POST.mkd's 5 URI slots ride the positional args; `new URI(arg)` splits each
+//  (CLAUDE.md: never bypass the URI parser).  parseSlots scans the args and
+//  returns the populated slots:
+//    host       a Host slot is present (push — STILL refuse-loud POSTPUSH; a
+//               correct JS receive-pack send-pack client is a separate
+//               subsystem, its own ticket — see the DIS-054 design fork).
+//    hasQuery   a Query slot (`?branch`/`?..`/`?`/`?other`) is present.
+//    query      the Query slot's target-branch token (raw, may be ""/".."/name).
+//    narrow     the Path slot's narrow target (a `./path`/`dir/file`), or "".
+//    fragment   a `#msg` riding the slot URI itself (`?other#msg`, `./p#msg`).
+//  Precedence Host>Query>Path matches POST.mkd.  A bare-word message
+//  (`fix the bug`) or a plain `#msg`/`-m` carries no slot, so the local-FF
+//  commit path is untouched.
+//
+//  The bare `?` (trunk target) is special: its URI has an EMPTY query AND an
+//  empty fragment, so it is detected by the raw `?`-prefixed form, not u.query.
+function parseSlots(args) {
+  const slots = { host: false, hasQuery: false, query: "", narrow: "",
+                  fragment: undefined };
+  for (const a of args || []) {
+    if (!a || a[0] === "#" || a[0] === "-") continue;   // #msg / -flag
+    const u = new URI(a);
+    if (u.host) {
+      slots.host = true;
+      throw "POSTPUSH: remote push not yet in JS post — use native " +
+            "`be post //host` (a JS wire push is its own ticket)";
+    }
+    //  Query slot: a non-empty query (`?branch`/`?..`/`?other`) OR the bare
+    //  `?` trunk form (data is `?`, every slot empty — POST.mkd `?` row).
+    if (u.query) {
+      slots.hasQuery = true;
+      slots.query = u.query;
+      if (u.fragment) slots.fragment = u.fragment;
+      continue;
+    }
+    if (isBareTrunkQuery(a, u)) {
+      slots.hasQuery = true;
+      slots.query = "";                     // trunk
+      continue;
+    }
+    //  Path slot: a `./path`/`/abs`/`dir/file` narrow target — NOT a
+    //  bare-word commit message (`fix`, `base`).
+    if (isPathSlot(u.path)) {
+      slots.narrow = u.path;
+      if (u.fragment) slots.fragment = u.fragment;
+    }
+  }
+  return slots;
+}
+
+//  The bare `?` (trunk) Query form: the whole arg is exactly `?` (so the URI
+//  has empty query AND empty fragment, no path/host) — POST.mkd `?` row
+//  ("advance trunk to the wt hash").
+function isBareTrunkQuery(arg, u) {
+  return arg === "?" && !u.query && !u.fragment && !u.path && !u.host;
+}
+
 //  --- message (from the seed-pinned positional args, JSQUE-004) ----------
-//  A `#msg` arg (leading `#` shed), `-m msg`, or bare trailing words joined.
-//  Empty -> POSTNOMSG.  A single trailing `!` (forget) is shed; `!!` -> BANG.
-function parseMessage(args, flags) {
+//  A `#msg` arg (leading `#` shed), `-m msg`, a slot-URI fragment
+//  (`?other#msg`/`./p#msg`, passed as `slotFrag`), or bare trailing words
+//  joined.  Empty -> POSTNOMSG.  A single trailing `!` (forget) is shed; `!!`
+//  -> BANG.  A bare word that is itself a URI slot (`?br`, `./p`) is NOT a
+//  message word — parseSlots owns it — so skip any arg the URI parser splits
+//  into a non-empty query / host / path-slot.
+function parseMessage(args, flags, slotFrag) {
   let msg, sawFrag = false;
   const words = [];
   const all = (flags || []).concat(args || []);
@@ -94,8 +156,10 @@ function parseMessage(args, flags) {
     if (a === "-m") { msg = all[++i]; sawFrag = true; continue; }
     if (a[0] === "-") continue;             // other flags
     if (a[0] === "#") { msg = a.slice(1); sawFrag = true; continue; }
+    if (isSlotArg(a)) continue;             // a ?br/.//host/dir-path slot arg
     words.push(a);
   }
+  if (msg == null && slotFrag != null) { msg = slotFrag; sawFrag = true; }
   if (msg == null && words.length) { msg = words.join(" "); sawFrag = true; }
   if (msg == null) return { msg: undefined };
   if (msg.length && msg[msg.length - 1] === "!") {
@@ -104,6 +168,25 @@ function parseMessage(args, flags) {
       throw "POSTBANG: commit message may not end in `!`";
   }
   return { msg: msg, sawFrag: sawFrag };
+}
+
+//  Is `a` a URI-slot arg (Query / Host / Path) rather than a message word?
+function isSlotArg(a) {
+  if (!a || a[0] === "#" || a[0] === "-") return false;
+  const u = new URI(a);
+  if (u.host || u.query) return true;
+  if (a === "?") return true;               // bare trunk
+  return isPathSlot(u.path);
+}
+
+//  A path arg is the POST.mkd Path slot (a `./path`/`/abs`/`dir/file`
+//  narrow target) — NOT a bare-word commit message (`fix`, `base`).  The
+//  slot marker is a path separator: a leading `./`/`../`/`/` or an embedded
+//  `/`.  A separator-free word is a message and never narrows.
+function isPathSlot(path) {
+  if (!path) return false;
+  return path[0] === "/" || path.indexOf("./") === 0 ||
+         path.indexOf("../") === 0 || path.indexOf("/") >= 0;
 }
 
 //  --- ref advance CAS ----------------------------------------------------
@@ -117,6 +200,63 @@ function advanceRef(reader, shard, branchKey, expectedOld, newSha) {
   store.set(shard, branchKey || "", newSha);
 }
 
+//  --- DIS-054 Query slot: target-branch resolution -----------------------
+//  POST.mkd Query row: `?branch`/`?..`/`?`/`?.` selects the branch the post
+//  advances.  `` (`?`) is trunk; `..` is cur's PARENT (dirname of cur's
+//  branch); `.` is cur's own branch; anything else is the named branch.  A
+//  relative `..` on trunk has no parent → POSTQRY (the spec's `?..` needs a
+//  child to climb from).
+function resolveTarget(query, curBranch) {
+  if (query === "" || query === "/") return "";        // trunk
+  if (query === ".") return curBranch;                 // cur's own branch
+  if (query === "..") {
+    if (!curBranch) throw "POSTQRY: `?..` (parent branch) but cur is trunk — " +
+                          "no parent to advance";
+    const i = curBranch.lastIndexOf("/");
+    return i < 0 ? "" : curBranch.slice(0, i);         // parent (trunk if top)
+  }
+  return query;                                        // a named branch
+}
+
+//  --- DIS-054 Query bare-advance (`?branch`/`?..`/`?`, no commit) ---------
+//  POST.mkd: "advance ?branch / parent / trunk to the wt (cur) hash".  No new
+//  commit — just FF-move the target branch's REFS tip to cur's tip.  Cur is
+//  UNTOUCHED (its REFS row + the wtlog cur-tracking stay).  Refuses:
+//    * POSTNONE  — no cur tip to advance to (a fresh, never-committed wt);
+//    * POSTNONE  — target already AT (or ahead containing) cur's tip;
+//    * POSTNOFF  — target's tip is not an ancestor of cur (a non-FF advance).
+//  An ABSENT target branch is CREATED at cur's tip (the FF-from-nothing case).
+function advanceBranch(reader, wtl, info, out, target, curBranch, parent,
+                       haveBaseline) {
+  if (!haveBaseline || !parent)
+    throw "POSTNONE: no cur tip to advance `?" + target + "` to";
+  if (target === curBranch)
+    throw "POSTNONE: `?" + target + "` is cur's own branch — nothing to advance";
+
+  const tip = reader.resolveRef(target);
+  const expectedOld = (tip && isFullSha(tip)) ? tip : "";
+  if (expectedOld) {
+    if (expectedOld === parent)
+      throw "POSTNONE: `?" + target + "` already at cur's tip";
+    //  FF only: cur must descend the target's tip.
+    if (!dag.isAncestor(reader, expectedOld, parent))
+      throw "POSTNOFF: `?" + target + "` is not an ancestor of cur — " +
+            "non-FF advance refused";
+    //  Already contains cur (cur is an ancestor of target) → nothing to do.
+    if (dag.isAncestor(reader, parent, expectedOld))
+      throw "POSTNONE: `?" + target + "` already contains cur's tip";
+  }
+  //  Move ONLY the target branch's REFS row; cur's REFS + wtlog cur-tracking
+  //  are left untouched (a bare advance makes no commit and does not retie).
+  advanceRef(reader, reader.shard, target, expectedOld, parent);
+  //  Banner: a `post` row naming the advanced branch at cur's hashlet.
+  if (out) {
+    const stamp = ulog.nowAfter(wtlogTail(wtl));
+    out.raw(render0(out, "post", "post:", stamp));
+    out.row("?" + target + "#" + parent.slice(0, 8), "post", stamp);
+  }
+}
+
 //  JSQUE-012: `be post` as a loop HANDLER.  The wt path rides the ROW; the
 //  message + flags are seed-pinned and ride ctx (ctx.args/ctx.flags — the
 //  queue round-trip carries only ts/verb/uri); output goes through ctx.out
@@ -125,7 +265,6 @@ module.exports = function handle(row, ctx) {
   const args  = (ctx && ctx.args)  || [];
   const flags = (ctx && ctx.flags) || [];
   const out   = ctx && ctx.out;
-  const m = parseMessage(args, flags);
   const force = flags.indexOf("--force") >= 0;
 
   const info = (ctx && ctx.repo) || be.find((row && row.uri) || undefined);
@@ -136,6 +275,13 @@ module.exports = function handle(row, ctx) {
   //  All refuse-capable checks run here, BEFORE the commit barrier opens —
   //  a refusal leaves the store byte-identical (POST-017 all-or-nothing).
 
+  //  0. URI-slot parse (DIS-054): the POST.mkd Host/Query/Path slots ride the
+  //  args.  Host (push) still refuse-loud POSTPUSH (the JS wire push is a
+  //  separate subsystem/ticket — the DIS-054 design fork).  Query (?branch)
+  //  retargets the advance; Path (./path) narrows the commit — both REAL below.
+  const slots = parseSlots(args);            // throws POSTPUSH on a Host slot
+  const m = parseMessage(args, flags, slots.fragment);
+
   //  1. Detached guard (DIS-009): a `?<sha>` cur-tip has no branch.
   const cur = wtl.curTip();
   if (cur && cur.query && cur.query.length === 40 && isFullSha(cur.query) &&
@@ -143,13 +289,37 @@ module.exports = function handle(row, ctx) {
     throw "POSTDET: refusing on detached wt — re-attach (be get ?<branch>)";
   }
 
-  //  2. Parent / branch resolve (cur's branch is the commit's branch).
-  const branchKey = (cur && cur.branch) || "";
+  //  2. Parent / branch resolve.  The COMMIT's branch is normally cur's; a
+  //  Query slot retargets it (`?other` → the commit lands on `other`).  The
+  //  parent of the new commit stays cur's tip (a FF commit on top of cur),
+  //  whichever branch it is published to.
+  const curBranch = (cur && cur.branch) || "";
   const parent = (cur && cur.sha && isFullSha(cur.sha)) ? cur.sha : undefined;
   const haveBaseline = !!(cur && cur.sha);
 
-  //  3. Classify the change-set into keep/unlink/add decisions.
-  const dres = decideM.decide(info, wtl, reader);
+  //  DIS-054 Query slot: resolve the target branch the post advances.  No
+  //  Query → cur's branch (the unchanged local-FF path).  A Query target is
+  //  `` (trunk, `?`), the parent (`?..`), cur's own (`?.`), or a named branch.
+  const target = slots.hasQuery
+        ? resolveTarget(slots.query, curBranch) : curBranch;
+
+  //  DIS-054 Query bare-advance (`?branch`/`?..`/`?` with NO commit content):
+  //  FF-advance the target branch's REFS tip to cur's tip — no new commit, cur
+  //  untouched.  A message present makes it a cross-branch COMMIT instead (the
+  //  barrier path below).  Fires before the change-set classify (it commits
+  //  nothing) and before the no-msg guard (a bare advance needs no message).
+  if (slots.hasQuery && (m.msg == null || m.msg === "") && !slots.narrow) {
+    advanceBranch(reader, wtl, info, out, target, curBranch, parent,
+                  haveBaseline);
+    return;                                  // no commit, no fan-out
+  }
+
+  const branchKey = target;
+
+  //  3. Classify the change-set into keep/unlink/add decisions.  A Path slot
+  //  (DIS-054) narrows the classify to that path — out-of-scope paths keep
+  //  baseline, so only the named path's change lands in the commit.
+  const dres = decideM.decide(info, wtl, reader, slots.narrow || undefined);
   if (dres.hasPatch)
     throw "POSTSCOPE: a `patch` row is in scope — absorbed-patch trees are " +
           "out of scope for the JS FF post (use native `be post`)";
