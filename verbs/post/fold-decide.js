@@ -76,8 +76,27 @@ function hashWtPath(wtRoot, rel, kind) {
   return frameSha("blob", content);
 }
 
-function decide(be, wtlogReader, storeReader) {
+//  DIS-054 Path slot: `narrow` (a file path or `dir/` subtree prefix) restricts
+//  the commit to that path.  A path OUTSIDE the narrow scope keeps its BASELINE
+//  state in the new tree (its dirty/staged change is NOT committed); a path
+//  INSIDE is classified normally.  underNarrow(p) → is p in scope.  Mirrors
+//  POST.mkd Path slot 1 ("narrow the commit to that path"); submodules out of
+//  scope (DIS-054).  An exact file match (p === narrow) or a subtree prefix
+//  (p startswith narrow + "/") is in scope; narrow may itself name a dir.
+function makeNarrow(narrow) {
+  if (!narrow) return null;
+  //  Canonicalise: shed a leading `./`, a trailing `/`.
+  let n = narrow;
+  if (n.indexOf("./") === 0) n = n.slice(2);
+  while (n.length && n[n.length - 1] === "/") n = n.slice(0, -1);
+  if (!n) return null;
+  const pfx = n + "/";
+  return function underNarrow(p) { return p === n || p.indexOf(pfx) === 0; };
+}
+
+function decide(be, wtlogReader, storeReader, narrow) {
   const wtRoot = be.wt;
+  const underNarrow = makeNarrow(narrow);
   const ignore = require(libDir() + "/../../shared/util/ignore.js").load(wtRoot);  // JSQUE-016
 
   //  1. baseline tree leaves: rel → { sha, mode } (git modes, not kinds).
@@ -147,6 +166,13 @@ function decide(be, wtlogReader, storeReader) {
 
   for (const path of paths) {
     if (underSub(path)) continue;
+    //  DIS-054 Path slot: out-of-scope paths keep BASELINE (no change lands).
+    //  A baselined path is kept verbatim; an untracked path is dropped.
+    if (underNarrow && !underNarrow(path)) {
+      const bb = base[path];
+      if (bb) keep(path, bb.mode, bb.sha);
+      continue;
+    }
     const b = base[path], w = wt[path], p = puts[path], d = dels[path];
 
     //  --- Gitlink bump (`put <sub>#<40-hex>`): the put fragment is a pin,
