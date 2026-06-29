@@ -116,20 +116,60 @@ function oldTipOf(bePath) {
   return tip;
 }
 
+//  GET-038: a local `file:` source may name a STORE (`<store>/.be`) OR a
+//  WORKTREE (`<wt>` whose `.be` is a wtlog FILE redirecting to the real store).
+//  A worktree is NOT a store: recording its path as the new wt's row-0 anchor
+//  leaves `status`/`get` unable to read the baseline tree (the store has no
+//  objects there) — every file then reads `unk`.  So resolve the source down to
+//  the REAL store: when `<srcRoot>/.be` (or `<srcBe>` itself) is a FILE, follow
+//  its row-0 `repo` redirect (be.repoFromBe / be.projectFromQuery, the same
+//  DOGRepoFromBe split be.find uses) to the store dir + project, and record THAT
+//  — never the worktree path.  A plain store source resolves to itself unchanged.
+//  Returns { storeRoot, storeBe, proj } where storeBe is the real `<store>/.be`.
+function resolveLocalSource(rem) {
+  //  The source `.be` to probe: the path itself when it ends `.be`, else
+  //  `<path>/.be`.  A worktree anchor is a regular FILE; a store `.be` is a dir.
+  const srcBe = rem.srcBe;                       // path with trailing `.be` shed
+  const beFile = (srcBe.slice(-3) === ".be") ? srcBe : join(srcBe, ".be");
+  let kind; try { kind = io.stat(beFile).kind; } catch (e) { kind = undefined; }
+  if (kind !== "reg")                            // a store (dir) or absent → as-is
+    return { storeRoot: rem.srcRoot, storeBe: rem.srcBe, proj: rem.proj };
+
+  //  Worktree source: read row 0 (the `repo|<storepath>` redirect) and split it
+  //  to the real store dir + project — the same resolution be.find performs on a
+  //  secondary wt anchor.
+  let u0;
+  ulog.each(beFile, function (log) { if (u0 === undefined) u0 = log.uri; });
+  if (!u0)
+    throw "be get: GETWTSRC worktree source " + srcBe +
+          " has no store redirect — cannot resolve its store";
+  const p = new URI(u0);
+  const storeRoot = be.repoFromBe(p.path || "");
+  const proj = rem.proj || be.projectFromQuery(p.query || "") ||
+               be.projectFromPath(p.path || "");
+  if (!storeRoot)
+    throw "be get: GETWTSRC cannot resolve the store of worktree source " + srcBe;
+  return { storeRoot: storeRoot, storeBe: join(storeRoot, ".be"), proj: proj };
+}
+
 //  --- the GET SEED: resolve the remote ONCE, anchor, return pinned coords --
 //  D1: a Fragment pin (`?branch#<sha>`) resolves the EXACT commit, not the
 //  branch tip — `rem.pin` (full or short hex) wins over resolveRef.
 function seedLocal(rem, wt) {
-  const k = store.open(rem.srcRoot, rem.proj);
+  //  GET-038: resolve a worktree source down to its REAL store (the redirect
+  //  target) before anchoring — anything else records a non-store path that
+  //  status/get can't read the baseline from.
+  const src = resolveLocalSource(rem);
+  const k = store.open(src.storeRoot, src.proj);
   const tip = resolvePin(k, rem.pin) || k.resolveRef(rem.branch || "");
   if (!tip || !isFullSha(tip))
     throw "be get: cannot resolve " +
           (rem.pin ? "#" + rem.pin : (rem.branch || "trunk")) +
-          " in " + rem.srcBe;
+          " in " + src.storeBe;
   const bePath = join(wt, ".be");
   const fresh = !exists(bePath);
   const oldTip = fresh ? "" : oldTipOf(bePath);
-  const redirect = "file:" + rem.srcBe + "/?/" + rem.proj;
+  const redirect = "file:" + src.storeBe + "/?/" + src.proj;
   const tipRow = { verb: "get", uri: "?" + (rem.branch || "") + "#" + tip };
   if (fresh) writeWtlog(bePath, [{ verb: "get", uri: redirect }, tipRow]);
   else appendWtlog(bePath, [tipRow]);

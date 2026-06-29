@@ -37,6 +37,11 @@ const pathlib   = require("../../shared/util/path.js");
 //  DIFF-010: the shared grow-on-"out full" WEAVE fold/merge retry (mirrors
 //  loop.js:128-142) — a large per-file weave no longer throws "out full".
 const weave     = require("../../shared/weave.js");
+//  DIS-058 D17: descend `be patch` into MOUNTED subs (post-order, mirroring
+//  post.js postSubs).  recurse = the read-side `.gitmodules`-order/mount-gate
+//  spine; submount = fetch the theirs sub-pin when the sub shard lacks it.
+const recurse   = require("../../core/recurse.js");
+const submount  = require("../../shared/submount.js");
 const join = pathlib.join;
 
 //  A commit id for the weave is the hi64 of its sha1, a 16-char hex hashlet
@@ -219,10 +224,15 @@ function classifyAndApply(rc, path, f, o, t) {
   const tEqF = !!(f && t && tSha === fSha);
   const oEqT = !!(o && t && oSha === tSha);
 
-  //  gitlinks never go through the blob merge — out of scope (parent recursion
-  //  re-gets the pin in native).  Skip; report nothing.
-  if ((o && o.kind === "s") || (t && t.kind === "s") || (f && f.kind === "s"))
-    { st.noop++; return; }
+  //  DIS-058 D17: a gitlink never goes through the BLOB merge, but an absorbed
+  //  commit that ADVANCED the sub (theirs pin ≠ ours pin) must DESCEND — record
+  //  a sub-patch job (post-order, run after the parent merge); the descent
+  //  merges the sub files + bumps the parent gitlink (mirrors post.js postSubs).
+  if ((o && o.kind === "s") || (t && t.kind === "s") || (f && f.kind === "s")) {
+    if (oSha !== tSha && tSha)
+      rc.subJobs.push({ path: path, fork: fSha, ours: oSha, theirs: tSha });
+    st.noop++; return;
+  }
 
   if (f && o && t && oEqF && tEqF) { st.noop++; return; }       // unchanged both
   if (f && o && t && oEqF && !tEqF) {                            // only theirs
@@ -369,12 +379,19 @@ module.exports = function handle(row, ctx) {
                ours: sc.ours, theirs: sc.theirs,
                treeCache: treeCache, weaveCap: 1 << 16,
                outBuf: io.buf(1 << 20), aliveBuf: io.buf(1 << 20),
-               wrote: [], rows: [] };
+               wrote: [], rows: [], subJobs: [] };
 
   //  FAN-OUT: each path is an independent per-file weave LEAF (classifyAndApply)
   //  given the pinned triple; the verdicts fold into the shared counters below.
   for (const p of all)
     classifyAndApply(rc, p, fMap[p] || null, oMap[p] || null, tMap[p] || null);
+
+  //  DIS-058 D17: descend `be patch` into MOUNTED subs whose pin advanced
+  //  (post-order), then bump the parent gitlink for each — BEFORE the parent's
+  //  own patch row, so a sub merge that fails refuses before any parent stamp.
+  const flags = (ctx && ctx.flags) || [];
+  if (flags.indexOf("--nosub") < 0)
+    patchSubs(info, ctx, reader, rc, fMap, oMap, tMap);
 
   //  POST-011 noop gate: nothing absorbed → no row, no restamp.
   const absorbed = st.takeTheirs + st.merged + st.mergedConflict +
@@ -415,6 +432,67 @@ module.exports = function handle(row, ctx) {
 
   emitBanner(out, sc, rc.rows, ts);
 };
+
+//  DIS-058 D17 (POST-ORDER sub descent, mirrors post.js postSubs): for each
+//  MOUNTED sub whose gitlink pin advanced (theirs ≠ ours), recurse `be patch`
+//  into the sub wt — the sub's own classifyAndApply weave-merges its changed/
+//  added files — then synthesise a `put <sub>#<theirsPin>` bump in the PARENT
+//  wtlog so the parent records the advance (the SUBS-019 / D7 primitive, the
+//  same gitlink-add path post.js uses).  Reuses the read-side recurse spine
+//  (`.gitmodules` order + the `<sub>/.be` mount gate) to walk the live subs.
+function patchSubs(info, ctx, reader, rc, fMap, oMap, tMap) {
+  if (!rc.subJobs.length) return;
+  //  Index the advance jobs by gitlink path (the walk visits `.gitmodules`-
+  //  declared mounts; only the advanced ones carry a job).
+  const jobs = Object.create(null);
+  for (const j of rc.subJobs) jobs[j.path] = j;
+
+  recurse.walk(info, "", function (subRepo, subPrefix, sub) {
+    const job = jobs[sub.path];
+    if (!job) return;                      // mounted but pin unchanged → skip
+    runSubPatch(info, ctx, subRepo, job);
+    //  Record the advance into the PARENT gitlink (D7): a `put <sub>#<newpin>`
+    //  wtlog row — fold-decide turns it into a `160000` add on the parent tree
+    //  at the next `be post`.  `ulog.append` stamps strictly past the live tail,
+    //  so a second sub's bump never collides with the first's.
+    ulog.append(info.bePath,
+                [{ verb: "put", uri: job.path + "#" + job.theirs }]);
+  }, { gitlinks: subGitlinkMap(rc.subJobs) });
+}
+
+//  The mount-gate map recurse.walk wants: { <subpath> -> { path, pin } } for
+//  each advanced sub (only these paths are visited + recursed).
+function subGitlinkMap(subJobs) {
+  const m = Object.create(null);
+  for (const j of subJobs) m[j.path] = { path: j.path, pin: j.theirs };
+  return m;
+}
+
+//  Recurse `be patch` into ONE mounted sub at the advanced triple {ours=the
+//  parent's ours-pin, theirs=the parent's theirs-pin, fork=the parent's
+//  fork-pin}.  If the sub shard lacks the theirs commit, mount-fetch it (the
+//  `.gitmodules`-URL fallback in submount.mount also checks it out — a clean
+//  forward absorb has no local edit to preserve).  Then re-invoke this handler
+//  on the sub with a child ctx carrying the sub triple; the sub's rows ride the
+//  SAME ctx.out so they aggregate into the parent banner ([Submodules] §"sub
+//  reports aggregated").  A real sub conflict/refusal BUBBLES UP (never dropped).
+function runSubPatch(info, ctx, subRepo, job) {
+  const subReader = store.open(subRepo.storePath, subRepo.project);
+  //  Ensure the theirs sub-commit is locally resolvable; fetch + checkout via
+  //  submount.mount otherwise (same-source unavailable here → `.gitmodules` URL).
+  if (!subReader.getObject(job.theirs)) {
+    submount.mount({ wt: info.wt, beDir: info.storePath, subpath: job.path,
+                     pin: job.theirs, source: null,
+                     parentTitle: info.project, parentBranch: "" });
+  }
+  //  The sub triple mirrors the parent's: ours/theirs/fork gitlink pins.  An
+  //  empty fork (root-pinned sub) drops to the no-base degenerate merge.
+  const subTriple = { scope: "NAMED", branch: "", ours: job.ours,
+                      theirs: job.theirs, fork: job.fork };
+  const subCtx = { repo: subRepo, out: ctx && ctx.out, triple: subTriple,
+                   flags: (ctx && ctx.flags) || [] };
+  module.exports({ uri: subRepo.wt }, subCtx);
+}
 
 //  Banner via ctx.out: a `patch:` header (raw framing) then the per-file status
 //  rows (applied / merged / cnf / del / modl) at ts=0n (blank-date column).

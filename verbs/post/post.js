@@ -421,7 +421,9 @@ function postOne(info, ctx, row) {
     const tip = reader.resolveRef(branchKey || "");
     if (tip && isFullSha(tip)) {
       expectedOld = tip;
-      if (tip !== parent && !dag.isAncestor(reader, tip, parent))
+      const reconciled = theirsParents.indexOf(tip) >= 0 || 
+          theirsParents.some(tp => dag.isAncestor(reader,tip, tp));
+      if (tip !== parent && !dag.isAncestor(reader, tip, parent) && !reconciled)
         throw "POSTNOFF: branch `?" + (branchKey || "") + "` advanced — " +
               "non-FF post refused (reconcile with native `be patch`)";
     }
