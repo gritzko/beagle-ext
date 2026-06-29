@@ -65,9 +65,13 @@ function indexAll(hunks, cols) {
 }
 
 //  Codepoint-decode one display row's visible cells, painting each by its tok
-//  tag via cellSGR (color) or leaving it plain.  'U'-tagged bytes are hidden
-//  (click-targets), matching rowEnd's column accounting.  Mirrors the C
-//  bro_cell_ansi loop: walk bytes, look up the covering tok, emit the cell.
+//  tag through the SHARED view/bro.js THEME (cellAnsi → deltaSGR), the SAME
+//  source the DIRECT path (renderHunkLog → the C THEME .color() sink) and the
+//  diff renderer use — so the pager's per-cell colour can never drift from `be`
+//  / `jab status --color | cat` (BRO-010: the legacy cellSGR/THEME16 table the
+//  pager used had no status-verb slots, so the verb token rendered PLAIN).
+//  'U'-tagged bytes are hidden (click-targets), matching rowEnd's column
+//  accounting.  A non-diff (syntax/columnar) row is PASS_NORMAL / side EQ.
 function paintRow(hunk, off, end, color, pass) {
   //  A diff hunk row carries a render pass (rm/in/normal): paint via the shared
   //  two-pass side→bg renderer so the pager shows the same word-diff wash as the
@@ -77,8 +81,10 @@ function paintRow(hunk, off, end, color, pass) {
   const text = hunk.text, toks = hunk.toks;
   let ti = 0;
   while (ti < toks.length && (toks[ti] & 0xffffff) <= off) ti++;
-  let out = "", curSGR = "";
-  let pos = off;
+  //  Non-diff (syntax/columnar) row → PASS_NORMAL, side EQ: a single THEME-fg
+  //  pass.  `cur` carries the ansi64 state so a run of same-colour cells shares
+  //  one open SGR and the row closes with the matching reset (the C speller).
+  let out = "", cur = bro.A0, pos = off;
   while (pos < end) {
     while (ti < toks.length && (toks[ti] & 0xffffff) <= pos) ti++;
     const w = ti < toks.length ? toks[ti] : 0;
@@ -87,13 +93,13 @@ function paintRow(hunk, off, end, color, pass) {
     if (clen === 0 || pos + clen > end) clen = 1;
     if (tag === "U") { pos += clen; continue; }   // hidden cell, no column
     if (color) {
-      const sgr = bro.cellSGR(tag);
-      if (sgr !== curSGR) { out += ESC + "[0m" + (sgr ? ESC + "[" + sgr + "m" : ""); curSGR = sgr; }
+      const want = bro.cellAnsi(tag, 0, 0);       // PASS_NORMAL, SIDE_EQ
+      if (!bro.aEq(want, cur)) { out += bro.deltaSGR(want, cur); cur = want; }
     }
     for (let i = 0; i < clen; i++) out += String.fromCharCode(text[pos + i]);
     pos += clen;
   }
-  if (color && curSGR) out += ESC + "[0m";
+  if (color) out += bro.resetSGR(cur);
   return out;
 }
 

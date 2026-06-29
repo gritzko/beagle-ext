@@ -656,6 +656,11 @@ module.exports = {
   cellAnsi: cellAnsi,
   deltaSGR: deltaSGR,
   resetSGR: resetSGR,
+  //  BRO-010: the pager paints non-diff (syntax/columnar) cells through the SAME
+  //  THEME machinery (cellAnsi → deltaSGR), so it needs the ansi64 identity (A0)
+  //  + equality (aEq) the speller carries state with.
+  A0: A0,
+  aEq: aEq,
   walkHunk: walkHunk,
   rowEndPass: rowEndPass,
   paintDiffRow: paintDiffRow,
