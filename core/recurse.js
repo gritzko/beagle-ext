@@ -29,8 +29,13 @@ const subs = require("../shared/subs.js");
 
 //  YES iff `<wt>/<subpath>/.be` is a regular file (a live mount).
 //  Mirrors SNIFFSubIsMount: only a mounted sub is recursed.
+//  GET-036: a SYMLINK at `<wt>/<subpath>` is never a mount — the `be/`
+//  self-locator `be -> .` follows to the wt's OWN `.be` anchor and would
+//  otherwise read as a phantom mount.  A real mount point is a real dir.
 function isMount(wtRoot, subpath) {
-  const p = (wtRoot.endsWith("/") ? wtRoot : wtRoot + "/") + subpath + "/.be";
+  const base = (wtRoot.endsWith("/") ? wtRoot : wtRoot + "/") + subpath;
+  try { if (io.lstat(base).kind === "lnk") return false; } catch (e) {}
+  const p = base + "/.be";
   try { return io.stat(p).kind === "reg"; } catch (e) { return false; }
 }
 

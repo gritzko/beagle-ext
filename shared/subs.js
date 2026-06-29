@@ -40,6 +40,14 @@ const isFullSha = require("./util/sha.js").isFullSha;
 
 function statKind(p) { try { return io.stat(p).kind; } catch (e) { return undefined; } }
 function isFile(p) { return statKind(p) === "reg"; }
+function lstatKind(p) { try { return io.lstat(p).kind; } catch (e) { return undefined; } }
+//  GET-036: a sub mount point is a REAL directory; a SYMLINK there (the
+//  `be/` self-locator `be -> .`, which follows to the wt's own `.be`)
+//  is never a mount.  Mirror SNIFFSubIsMount's NOFOLLOW guard.
+function isMountAt(subWt) {
+  if (lstatKind(subWt) === "lnk") return false;
+  return isFile(join(subWt, ".be"));
+}
 
 function libDir() {
   return (typeof __dirname !== "undefined" && __dirname) ? __dirname : ".";
@@ -126,7 +134,7 @@ function enumerate(repo, keeperReader, baselineTreeSha) {
   });
   for (const l of links) {
     const subWt = join(repo.wt, l.path);
-    const mounted = isFile(join(subWt, ".be"));
+    const mounted = isMountAt(subWt);
     let cls = { bucket: "ok", stale: "", r4: "", title: "", ts: 0n };
     if (mounted) cls = classifyMount(repo, l.path, l.pin);
     subs.push({
