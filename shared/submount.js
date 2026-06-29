@@ -38,6 +38,16 @@ const isFullSha = sha.isFullSha;
 
 function exists(p) { try { io.stat(p); return true; } catch (e) { return false; } }
 
+//  GET-037: YES iff the gitlink at `subpath` is the `be` SELF-LOCATOR — a leaf
+//  named `be` ([GET-036]'s fixed shard/locator name) with NO `.gitmodules`
+//  entry.  It pins the project's OWN commit so `jab`'s upward `be`-scan resolves
+//  the extension; it is NOT a submodule (no child shard to fetch), so it must be
+//  materialised as `be -> .`, never sub-mounted.  A REAL sub named `be` would
+//  carry a `.gitmodules` url; the url-absence + fixed name pin it unambiguously.
+function isSelfLocator(wt, subpath) {
+  return basename(subpath) === "be" && !gitmodulesUrl(wt, subpath);
+}
+
 //  Parse `<wt>/.gitmodules` for the [submodule] block whose `path` == subpath;
 //  return its `url` (or "" when absent).  A minimal git-config reader (the
 //  same shape core/recurse.js::gitmodulesOrder uses), keyed on path→url.
@@ -67,15 +77,23 @@ function gitmodulesUrl(wt, subpath) {
 //  [Title] from a `.gitmodules` URL basename — `.git` + trailing `/` stripped
 //  (`…/libabc.git` → `libabc`, `be:/s/.be?/sub` → `sub`).  A `?/<proj>`
 //  selector wins (its last segment IS the title); else the path basename.
+//  GET-037: a scp-style git url (`git@host:owner/repo.git`) is NOT a parseable
+//  URI (`new URI` throws `uri.parse: malformed`) — fall back to the raw-string
+//  basename so a github-style `.gitmodules` url yields a title instead of an
+//  uncaught crash.
 function titleFromUrl(url) {
   if (!url) return "";
-  const u = new URI(url);
-  const q = u.query || "";
-  if (q && q[0] === "/") {
-    const segs = q.slice(1).split("/");
-    if (segs[0]) return segs[0];
-  }
-  let p = (u.path || url).replace(/\/+$/, "");
+  let path = url;
+  try {
+    const u = new URI(url);
+    const q = u.query || "";
+    if (q && q[0] === "/") {
+      const segs = q.slice(1).split("/");
+      if (segs[0]) return segs[0];
+    }
+    path = u.path || url;
+  } catch (e) { path = url; }       // unparseable (scp git url) → raw basename
+  let p = path.replace(/[?#].*$/, "").replace(/\/+$/, "");
   let b = basename(p);
   if (b.slice(-4) === ".git") b = b.slice(0, -4);
   return b;
@@ -123,6 +141,16 @@ function tryFetch(uri, wantSha) {
 //  the mounted sub's coords so the caller can recurse into IT (a sub of a sub).
 function mount(opts) {
   const wt = opts.wt, beDir = opts.beDir, subpath = opts.subpath, pin = opts.pin;
+
+  //  GET-037: NEVER sub-mount the `be` self-locator (no child shard exists).
+  //  The get.js caller materialises `be -> .` ([GET-036]) before reaching here;
+  //  this is a defensive refusal for any other entry (e.g. grandchild recursion
+  //  over a sub that itself carries a `be` self-locator) — a friendly throw, no
+  //  half-written wt (nothing has been touched yet at this point).
+  if (isSelfLocator(wt, subpath))
+    throw "be get: refusing to sub-mount the `be` self-locator " + subpath +
+          " (materialise `be -> .`, do not sub-mount — see GET-036)";
+
   if (!isFullSha(pin))
     throw "be get: sub " + subpath + " has no resolvable gitlink pin";
 
@@ -137,53 +165,82 @@ function mount(opts) {
   const anchorPath = join(subWt, ".be");
   const branch = syntheticBranch(title, opts.parentTitle, opts.parentBranch);
 
-  //  Already-local pin?  An idempotent re-mount (a re-get over an existing
-  //  mount, or an in-repo FF `be get` with no remote) must NOT re-fetch: if the
-  //  sibling shard already RESOLVES the pin commit, reuse it (anchor + checkout
-  //  only).  This is also what makes a bumped sub re-checkout-able after a local
-  //  post (the new commit already lives in the local sub shard).
-  let havePin = false;
-  if (exists(join(shard, "0000000001.keeper"))) {
-    try { havePin = !!store.open(wt, title).getObject(pin); } catch (e) {}
+  //  GET-037: ATOMICITY — a sub-mount that fails part-way (an unreachable child,
+  //  a raw io error like ENOTDIR from a worktree-source readdir) must not leave a
+  //  LIVE-but-broken sub wt.  The pre-fetch/clone steps touch nothing under the
+  //  sub wt; only the anchor + checked-out files (written last, in order) do.  On
+  //  any failure, drop the anchor (so a stale `<wt>/<path>/.be` never makes
+  //  be.find resolve a half-mounted sub) and surface a FRIENDLY string — our own
+  //  throws pass through, a raw io error is wrapped — never a raw uncaught
+  //  exception to the user (cf. [GET-018] atomicity).  (io has no rmdir, so an
+  //  emptied sub dir may remain; it is inert without the anchor.)
+  try {
+    //  Already-local pin?  An idempotent re-mount (a re-get over an existing
+    //  mount, or an in-repo FF `be get` with no remote) must NOT re-fetch: if the
+    //  sibling shard already RESOLVES the pin commit, reuse it (anchor + checkout
+    //  only).  This is also what makes a bumped sub re-checkout-able after a local
+    //  post (the new commit already lives in the local sub shard).
+    //  GET-037: open the sibling shard against the STORE dir (`beDir`), NOT the
+    //  parent wt — for a local-store get `<wt>/.be` is a redirect FILE and the
+    //  shard lives under `beDir` (the source store), so `store.open(wt, …)` would
+    //  miss it (and a fresh re-fetch + `ingest.add` would mutate the user's
+    //  canonical store).  `store.open(beDir, title)` resolves `<beDir>/<title>`.
+    let havePin = false;
+    if (exists(join(shard, "0000000001.keeper"))) {
+      try { havePin = !!store.open(beDir, title).getObject(pin); } catch (e) {}
+    }
+
+    if (!havePin) {
+      //  D4: same-source fetch first (the parent's remote, project swapped), then
+      //  the `.gitmodules` URL fallback.  Fetch by the EXACT pin so the checkout
+      //  target rides the pack.
+      const sameUri = sameSourceUri(opts.source, title);
+      let f = tryFetch(sameUri, pin);
+      let usedUri = sameUri;
+      if (!f && url) { f = tryFetch(url, pin); usedUri = url; }
+      if (!f)
+        throw "be get: SUBFETCH cannot fetch sub " + subpath + " (" + title +
+              ") from " + (sameUri || "(no same-source)") +
+              (url ? " or " + url : "") + " — child unreachable";
+
+      //  Clone/land the child shard as a sibling at `<beDir>/<title>/` ([Store]
+      //  flat layout).  A FRESH shard clones (pack + refs + idx); an EXISTING
+      //  shard that lacks the pin lands the new pack via ingest.add (a re-get
+      //  pulling an advanced child).
+      if (!exists(join(shard, "0000000001.keeper")))
+        ingest.clone(f.pack, beDir, title, pin, usedUri || ("be:" + shard));
+      else
+        ingest.add(f.pack, shard, usedUri || ("be:" + shard), pin);
+    }
+
+    //  D13: write the sub wtlog anchor `<wt>/<path>/.be` — row-0 redirect names
+    //  the sibling shard + project (so be.find resolves the mount), then the
+    //  `?<synthetic-branch>#<pin>` tip the child wt tracks ([Submodules] §1).
+    try { io.mkdir(subWt); } catch (e) {}
+    const redirect = "file:" + beDir + "/?/" + title;
+    ulog.write(anchorPath, [{ verb: "get", uri: redirect },
+                            { verb: "get", uri: "?" + branch + "#" + pin }]);
+
+    //  D3: check out the commit named by the parent gitlink into `<wt>/<path>/`.
+    //  Open against `beDir` (the store dir), per the havePin note above.
+    const k = store.open(beDir, title);
+    checkout.apply(k, pin, subWt);
+
+    return { storePath: beDir, project: title, shard: shard, tip: pin,
+             branch: branch, k: k };
+  } catch (e) {
+    //  Roll back this mount's anchor (best-effort; never mask the failure) so a
+    //  stale `<wt>/<path>/.be` redirect can't outlive a failed mount.
+    try { io.unlink(anchorPath); } catch (e2) {}
+    //  Friendly surface: our own throws are already strings; a raw io error
+    //  (e.g. ENOTDIR — a worktree-source `.be` wtlog FILE read as a store dir)
+    //  becomes a friendly SUBMOUNT string so `get` never leaks an uncaught io
+    //  exception.  (Worktree-source row-0 redirect is the deeper fix — GET-037
+    //  stretch; here we at minimum refuse cleanly.)
+    if (typeof e === "string") throw e;
+    throw "be get: SUBMOUNT cannot mount sub " + subpath +
+          " — " + ((e && e.message) || e);
   }
-
-  if (!havePin) {
-    //  D4: same-source fetch first (the parent's remote, project swapped), then
-    //  the `.gitmodules` URL fallback.  Fetch by the EXACT pin so the checkout
-    //  target rides the pack.
-    const sameUri = sameSourceUri(opts.source, title);
-    let f = tryFetch(sameUri, pin);
-    let usedUri = sameUri;
-    if (!f && url) { f = tryFetch(url, pin); usedUri = url; }
-    if (!f)
-      throw "be get: SUBFETCH cannot fetch sub " + subpath + " (" + title +
-            ") from " + (sameUri || "(no same-source)") +
-            (url ? " or " + url : "") + " — child unreachable";
-
-    //  Clone/land the child shard as a sibling at `<beDir>/<title>/` ([Store]
-    //  flat layout).  A FRESH shard clones (pack + refs + idx); an EXISTING
-    //  shard that lacks the pin lands the new pack via ingest.add (a re-get
-    //  pulling an advanced child).
-    if (!exists(join(shard, "0000000001.keeper")))
-      ingest.clone(f.pack, beDir, title, pin, usedUri || ("be:" + shard));
-    else
-      ingest.add(f.pack, shard, usedUri || ("be:" + shard), pin);
-  }
-
-  //  D13: write the sub wtlog anchor `<wt>/<path>/.be` — row-0 redirect names
-  //  the sibling shard + project (so be.find resolves the mount), then the
-  //  `?<synthetic-branch>#<pin>` tip the child wt tracks ([Submodules] §1).
-  try { io.mkdir(subWt); } catch (e) {}
-  const redirect = "file:" + beDir + "/?/" + title;
-  ulog.write(anchorPath, [{ verb: "get", uri: redirect },
-                          { verb: "get", uri: "?" + branch + "#" + pin }]);
-
-  //  D3: check out the commit named by the parent gitlink into `<wt>/<path>/`.
-  const k = store.open(wt, title);
-  checkout.apply(k, pin, subWt);
-
-  return { storePath: wt, project: title, shard: shard, tip: pin,
-           branch: branch, k: k };
 }
 
 module.exports = { mount: mount, gitmodulesUrl: gitmodulesUrl,
