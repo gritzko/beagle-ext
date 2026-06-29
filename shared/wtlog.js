@@ -115,6 +115,28 @@ function open(be) {
              rawQuery: rawQuery };
   }
 
+  //  attachedBranch — the SINGLE source of truth for "what branch is this wt
+  //  on" (DIS-057).  A wt is attached per the RECENTMOST `get` record (NOT
+  //  get/post/patch): `?master`, `?` (trunk), `?branch#sha`, `?#sha` are all
+  //  ATTACHED; only a bare `?<sha>` (a full-sha in the QUERY, no branch) is
+  //  DETACHED.  Returns { branch, detached, rawQuery, sha }.  status's label,
+  //  post's detach guard + curBranch, and divergence all route through THIS so
+  //  they cannot disagree (status said trunk while post said detached).
+  function attachedBranch() {
+    for (let i = rows.length - 1; i >= 0; i--) {
+      const r = rows[i];
+      if (r.verb !== GET) continue;
+      const ref = refOf(r.uri, r.local);
+      if (!ref.sha && !ref.branch) continue;     // store/project anchor pins nothing
+      const q = stripProject(r.uri.query) || "";
+      const detached = !ref.branch &&
+            q.split("&").some(function (c) { return isFullSha(c); });
+      return { branch: ref.branch || "", detached: detached,
+               rawQuery: r.uri.query || "", sha: ref.sha || "" };
+    }
+    return { branch: "", detached: false, rawQuery: "", sha: "" };
+  }
+
   //  A `post` at index idx is commit-all iff no put/delete lies between
   //  its pd boundary (most recent get/post strictly before it) and itself.
   function postIsCommitAll(idx) {
@@ -146,6 +168,10 @@ function open(be) {
 
     //  Baseline tip: latest get/post/patch sha-row.  SNIFFAtBaseline.
     baselineTip: function () { return tip(true); },
+
+    //  attachedBranch: the ONE attach/detach reader (recentmost GET record,
+    //  DIS-057) — status label, post detach-guard + curBranch, divergence.
+    attachedBranch: attachedBranch,
 
     //  pd boundary  = ts of the latest get/post row (SNIFFAtLastPostTs:
     //                 the floor for "put/delete since last post").

@@ -41,6 +41,7 @@
 
 const pathlib = require("./util/path.js");   // JSQUE-016: util libs -> shared/util/
 const shalib = require("./util/sha.js");
+const ulog = require("./ulog.js");           // DIS-057: ronStepMs (ms-correct band)
 const join = pathlib.join;
 const isFullSha = shalib.isFullSha;
 
@@ -143,15 +144,17 @@ function wtEqBase(wtRoot, rel, baseSha) {
 
 //  --- patch-stamp axis (DIS-057) ---------------------------------------
 //  Each in-scope `patch` row sits at the TOP of a reserved 3-stamp band: the
-//  patch verb stamps every merged file's mtime to the row ts-2 (clean apply →
-//  `pat`), ts-1 (`mrg`), or ts (`cnf`), so the OUTCOME rides the stamp offset —
-//  no per-file row, no merge recompute at read time.  The row ts is the band
-//  CEILING (not the floor) so the wtlog monotonic tail already sits past every
-//  stamp it produced, closing the ts+1/ts+2 aliasing gap (DIS-057 Task 2): a
-//  later op's nowAfter(tail) lands strictly above the whole band.  patchStamps
-//  (wtl) → a mtime(BigInt)→bucket map over every in-scope patch row's
-//  {ts-2:pat, ts-1:mrg, ts:cnf}.  Empty when no patch row is in scope, so the
-//  whole axis is a no-op for the common case.
+//  patch verb stamps every merged file's mtime to the row ceil-2ms (clean apply
+//  → `pat`), ceil-1ms (`mrg`), or ceil (`cnf`), so the OUTCOME rides the stamp
+//  offset — no per-file row, no merge recompute at read time.  The row ts is the
+//  band CEILING (not the floor) so the wtlog monotonic tail already sits past
+//  every stamp it produced (DIS-057 Task 2): a later nowAfter(tail) lands above
+//  the whole band.  patchStamps(wtl) → a mtime(BigInt)→bucket map over every
+//  in-scope patch row's {ceil-2ms:pat, ceil-1ms:mrg, ceil:cnf}.  Empty when no
+//  patch row is in scope, so the whole axis is a no-op for the common case.
+//  DIS-057 REOPEN 2026-06-29: step in MILLISECONDS (ulog.ronStepMs), the SAME
+//  ms-correct step the patch verb uses — a raw t-2n corrupts the packed ms field
+//  so the reconstructed band would not match the on-disk mtime → `pat` lost.
 function patchStamps(wtlogReader) {
   const map = {};
   if (!wtlogReader || typeof wtlogReader.patchFloor !== "function") return map;
@@ -160,9 +163,9 @@ function patchStamps(wtlogReader) {
     if (r.verb !== "patch") continue;
     if (floor != null && r.ts <= floor) continue;
     const t = r.ts;
-    map[(t - 2n).toString()] = "pat";
-    map[(t - 1n).toString()] = "mrg";
-    map[t.toString()]        = "cnf";
+    map[ulog.ronStepMs(t, -2).toString()] = "pat";
+    map[ulog.ronStepMs(t, -1).toString()] = "mrg";
+    map[t.toString()]                     = "cnf";
   }
   return map;
 }
@@ -574,4 +577,5 @@ function libDir() {
 
 module.exports = { classify: classify, classifyDir: classifyDir,
                    classifyMerge: classifyMerge, isMeta: isMeta,
-                   wtScan: wtScan, wtEqBase: wtEqBase };
+                   wtScan: wtScan, wtEqBase: wtEqBase,
+                   patchStamps: patchStamps };

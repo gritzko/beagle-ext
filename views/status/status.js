@@ -211,12 +211,12 @@ function emitRepo(repo, prefix, out, recurse) {
 
   //  Cur tip (for the ahead/behind divergence: SNIFFAtCurTip, no patch).
   const cur = log.curTip();
-  //  Summary branch label = the BASELINE tip's VERBATIM query (SNIFFAtBaseline
-  //  → bu.query): a named branch (`master`), a detached full sha, a mounted
-  //  sub's `/<project>[/<branch>]` anchor query (kept RAW, NOT project-
-  //  stripped — JAB-004), or empty (trunk → `?`).
-  const baseTip = log.baselineTip();
-  const branch = (baseTip && baseTip.rawQuery) || "";
+  //  Summary branch label = the ONE attach reader's VERBATIM query (DIS-057:
+  //  the recentmost GET record via wtlog.attachedBranch, NOT baselineTip — so
+  //  status and post can never disagree on the branch): a named branch
+  //  (`master`), a detached full sha, a mounted sub's `/<project>[/<branch>]`
+  //  anchor query (kept RAW, JAB-004), or empty (trunk → `?`).
+  const branch = log.attachedBranch().rawQuery;
 
   //  --- JS-033: classify base-only gitlinks (SUBSDirty 3-axis) ---------
   //  Each deferred gitlink (classify.gitlinks) is pin-vs-tip compared on

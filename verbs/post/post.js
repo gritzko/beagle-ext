@@ -358,18 +358,20 @@ function postOne(info, ctx, row) {
   const slots = parseSlots(args);            // throws POSTPUSH on a Host slot
   const m = parseMessage(args, flags, slots.fragment);
 
-  //  1. Detached guard (DIS-009): a `?<sha>` cur-tip has no branch.
+  //  1. Attachment (DIS-057): the SAME wtlog.attachedBranch reader `status`
+  //  uses — `?#<sha>` (trunk pinned at a sha) is ATTACHED, only a bare `?<sha>`
+  //  is detached.  A detached post is ALLOWED (Bug #2): it commits on top of
+  //  cur and HOPS to the next hash — the FF pre-flight and the branch-ref
+  //  advance below are gated on `!att.detached`, so no branch ref moves; only
+  //  the cur wtlog row advances.  (`cur` = curTip for the parent sha.)
   const cur = wtl.curTip();
-  if (cur && cur.query && cur.query.length === 40 && isFullSha(cur.query) &&
-      (!cur.sha || cur.query === cur.sha) && !curHasFragment(wtl)) {
-    throw "POSTDET: refusing on detached wt — re-attach (be get ?<branch>)";
-  }
+  const att = wtl.attachedBranch();
 
-  //  2. Parent / branch resolve.  The COMMIT's branch is normally cur's; a
-  //  Query slot retargets it (`?other` → the commit lands on `other`).  The
-  //  parent of the new commit stays cur's tip (a FF commit on top of cur),
-  //  whichever branch it is published to.
-  const curBranch = (cur && cur.branch) || "";
+  //  2. Parent / branch resolve.  The COMMIT's branch is the attached branch
+  //  (the recentmost GET record, same reader); a Query slot retargets it
+  //  (`?other` → the commit lands on `other`).  The parent of the new commit
+  //  stays cur's tip (a FF commit on top of cur), whichever branch published to.
+  const curBranch = att.branch || "";
   const parent = (cur && cur.sha && isFullSha(cur.sha)) ? cur.sha : undefined;
   const haveBaseline = !!(cur && cur.sha);
 
@@ -416,8 +418,9 @@ function postOne(info, ctx, row) {
   const dres = decideM.decide(info, wtl, reader, slots.narrow || undefined);
 
   //  4. FF pre-flight (POSTNOFF): a REFS tip != parent must be an ancestor.
+  //  Skipped when detached — there is no branch to fast-forward (Bug #2).
   let expectedOld = "";
-  if (haveBaseline && parent) {
+  if (!att.detached && haveBaseline && parent) {
     const tip = reader.resolveRef(branchKey || "");
     if (tip && isFullSha(tip)) {
       expectedOld = tip;
@@ -505,8 +508,11 @@ function postOne(info, ctx, row) {
   commitM.writePack(reader.shard, info.wt,
                     commit.body, tb.rootTreeSha, tb.bodies, dres.decisions);
 
-  //  Advance the ref (resolve expected-old + conditional store.set).
-  advanceRef(reader, reader.shard, branchKey, expectedOld, commit.sha);
+  //  Advance the branch ref (resolve expected-old + conditional store.set).
+  //  Skipped when detached — a detached post advances cur (the wtlog row below)
+  //  but moves NO branch ref ("hop to the next hash", git detached-HEAD).
+  if (!att.detached)
+    advanceRef(reader, reader.shard, branchKey, expectedOld, commit.sha);
 
   //  Append the `post` row (`?<branch>#<sha>`) at the stamp, then restamp
   //  every `add` file so it reads clean under the new baseline.
@@ -543,17 +549,6 @@ function lastFoldOffset(path, verb) {
 
 function cleanupBarrier(path) {
   try { io.unlink(path); } catch (e) {}
-}
-
-//  Whether the cur-tip row carries a non-empty fragment (a trunk-state
-//  `?#<sha>` is NOT detached — only a bare `?<sha>` query is).
-function curHasFragment(wtl) {
-  for (let i = wtl.rows.length - 1; i >= 0; i--) {
-    const r = wtl.rows[i];
-    if (r.verb !== "get" && r.verb !== "post") continue;
-    return !!(r.uri.fragment && r.uri.fragment.length);
-  }
-  return false;
 }
 
 //  The wtlog tail ts (for the monotonic stamp bump) — the last row's ts.

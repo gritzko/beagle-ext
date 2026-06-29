@@ -405,27 +405,29 @@ module.exports = function handle(row, ctx) {
   //  (ULOG refuses ts<=tail); the seed cohort ctx.T0 is the intended stamp.
   const tail = wtl.rows.length ? wtl.rows[wtl.rows.length - 1].ts : 0n;
   const base = ulog.nowAfter(tail);
-  //  DIS-057 Task 2 — RESERVE stamp headroom: the 3 stamp offsets occupy the
-  //  band [base, base+2], but base+1/base+2 are NOT real wtlog rows, so a later
+  //  DIS-057 Task 2 — RESERVE stamp headroom: the 3 stamps occupy the band
+  //  [base, base+2ms], but base+1ms/base+2ms are NOT real wtlog rows, so a later
   //  op landing on those exact stamps could be misread as a pat/mrg/cnf file.
-  //  Park the patch ROW at the band CEILING (base+2) so the wtlog monotonic tail
-  //  is strictly past every stamp it used — the next appended row's nowAfter
-  //  (tail) is then > base+2, never colliding with a reserved stamp.  Files are
-  //  stamped BELOW the row: pat=ceil-2, mrg=ceil-1, cnf=ceil (patchStamps reads
-  //  the band back relative to the row ts).
-  const ts = base + 2n;                               // patch-row ts = band ceiling
+  //  Park the patch ROW at the band CEILING (base+2ms) so the wtlog monotonic
+  //  tail is strictly past every stamp it used — the next nowAfter(tail) is then
+  //  > the ceiling, never colliding with a reserved stamp.  Files stamp BELOW the
+  //  row: pat=ceil-2ms, mrg=ceil-1ms, cnf=ceil (patchStamps reads the band back).
+  //  DIS-057 REOPEN 2026-06-29: step in MILLISECONDS (ulog.ronStepMs), NOT raw
+  //  BigInt — a raw base+2n corrupts the packed ms field (ms>=1000 → an invalid
+  //  ron60 → FILESetMtime stamps epoch-0 → the band read misses → `mod`).
+  const ts = ulog.ronStepMs(base, 2);                 // patch-row ts = band ceiling
   ulog.append(info.bePath,
               [{ verb: "patch", uri: patchRowUri(sc.scope, sc.theirs), ts: ts }]);
   //  DIS-057 stamp OFFSET: the patch verb knows each file's outcome for free, so
-  //  it stamps the mtime to ts-2 (clean apply → `pat`), ts-1 (merged → `mrg`),
-  //  or ts (conflict → `cnf`).  The unified classifier reads that offset back as
-  //  the bucket — no merge recompute at status/post read time.  A file with no
-  //  per-file status (defensive) restamps to the floor (pat).
+  //  it stamps the mtime to ceil-2ms (clean apply → `pat`), ceil-1ms (merged →
+  //  `mrg`), or ceil (conflict → `cnf`).  The unified classifier reads that
+  //  offset back as the bucket — no merge recompute at status/post read time.  A
+  //  file with no per-file status (defensive) restamps to the floor (pat).
   const statusOf = {};
   for (const r of rc.rows) statusOf[r.path] = r.status;
   for (const p of rc.wrote) {
-    let stamp = ts - 2n;                              // pat (clean apply)
-    if (statusOf[p] === "merged") stamp = ts - 1n;    // mrg
+    let stamp = ulog.ronStepMs(ts, -2);              // pat (clean apply) = base
+    if (statusOf[p] === "merged") stamp = ulog.ronStepMs(ts, -1);  // mrg
     else if (statusOf[p] === "cnf") stamp = ts;       // cnf
     try { io.setMtime(join(info.wt, p), stamp); } catch (e) {}
   }
