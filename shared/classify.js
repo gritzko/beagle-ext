@@ -141,146 +141,292 @@ function wtEqBase(wtRoot, rel, baseSha) {
   return shalib.frameSha("blob", content) === baseSha;
 }
 
-//  --- the merge --------------------------------------------------------
-//  STATUS classify: a clean file is count-only `ok`, a move's dst is suppressed
-//  (its row rides the src `mov`).  The `ls:`/`lsr:` LISTING view does NOT use
-//  this whole-tree pass — it calls classifyDir (below), O(dir) not O(repo).
-function classify(be, wtlogReader, keeperReader, opts) {
+//  --- patch-stamp axis (DIS-057) ---------------------------------------
+//  Each in-scope `patch` row sits at the TOP of a reserved 3-stamp band: the
+//  patch verb stamps every merged file's mtime to the row ts-2 (clean apply →
+//  `pat`), ts-1 (`mrg`), or ts (`cnf`), so the OUTCOME rides the stamp offset —
+//  no per-file row, no merge recompute at read time.  The row ts is the band
+//  CEILING (not the floor) so the wtlog monotonic tail already sits past every
+//  stamp it produced, closing the ts+1/ts+2 aliasing gap (DIS-057 Task 2): a
+//  later op's nowAfter(tail) lands strictly above the whole band.  patchStamps
+//  (wtl) → a mtime(BigInt)→bucket map over every in-scope patch row's
+//  {ts-2:pat, ts-1:mrg, ts:cnf}.  Empty when no patch row is in scope, so the
+//  whole axis is a no-op for the common case.
+function patchStamps(wtlogReader) {
+  const map = {};
+  if (!wtlogReader || typeof wtlogReader.patchFloor !== "function") return map;
+  const floor = wtlogReader.patchFloor();
+  for (const r of wtlogReader.rows) {
+    if (r.verb !== "patch") continue;
+    if (floor != null && r.ts <= floor) continue;
+    const t = r.ts;
+    map[(t - 2n).toString()] = "pat";
+    map[(t - 1n).toString()] = "mrg";
+    map[t.toString()]        = "cnf";
+  }
+  return map;
+}
+
+//  --- the unified N-way merge (DIS-057) --------------------------------
+//  classifyMerge: ONE classifier built as an N-way merge of FOUR input ulogs —
+//  the base tree (path→{sha,mode}), the put list (wtlog put/delete/move
+//  intents), the wt scan (path→{mtime,kind}), and the patched-in (theirs)
+//  stamps — whose OUTPUT is itself a ulog: one row per dirty path, lex-sorted,
+//    { path, bucket, ts, sha?, mode?, oldSha?, dst?, kind?, eq? }
+//  `bucket` is the [Dirty] status (rendered by `status`); `sha`/`mode` is the
+//  resolved content the wt file would commit as (consumed by `post`).  Both
+//  surfaces map from this single output — no second merge.
+//
+//  opts:
+//    listing   — JAB-018 listing divergence (emit `eq` rows; SHOW a move dst
+//                as `new` instead of suppressing it).  status default OFF.
+//    underNarrow(p) — DIS-054 post Path-slot scope test (in-scope?).  Out-of-
+//                scope paths are dropped from the output (post keeps baseline).
+//    skipMeta  — drop `.be`/`.git` rows from base + put/del (post needs this;
+//                status's wtScan already drops them on disk).
+//  Returns { rows, counts, haveBase, baseTreeSha, gitlinks }.
+function classifyMerge(be, wtlogReader, reader, opts) {
   opts = opts || {};
   const wtRoot = be.wt;
   const ignore = require(libDir() + "/util/ignore.js").load(wtRoot);  // JSQUE-016
+  const dropMeta = !!opts.skipMeta;
+  const underNarrow = opts.underNarrow || null;
 
-  //  1. baseline tree leaves: rel → { sha, kind }  (kind f/x/l/s).
+  //  1. base tree ulog: rel → { sha, kind, mode }.  DIS-057 RULING 2026-06-29:
+  //  the base is the OURS tree — the latest get/post sha-tip, patch rows EXCLUDED
+  //  (curTip, NOT baselineTip).  baselineTip folds a patch row's THEIRS sha into
+  //  the baseline, so a clean take-theirs file equalled that (theirs) baseline
+  //  and collapsed to `ok` — `pat` never appeared.  The patched-in (theirs)
+  //  tree(s) are a SEPARATE 4th input (step 4 below), never the baseline.
   const base = {};
-  const baseTip = wtlogReader.baselineTip();
-  let haveBase = false;
-  let baseTreeSha = undefined;
+  const baseTip = wtlogReader.curTip();
+  let haveBase = false, baseTreeSha = undefined;
   if (baseTip && baseTip.sha && isFullSha(baseTip.sha)) {
-    const treeSha = keeperReader.commitTree(baseTip.sha);
+    const treeSha = reader.commitTree(baseTip.sha);
     if (treeSha) {
       baseTreeSha = treeSha;
-      keeperReader.readTreeRecursive(treeSha, function (leaf) {
-        base[leaf.path] = { sha: leaf.sha, kind: leaf.kind };
+      reader.readTreeRecursive(treeSha, function (leaf) {
+        if (dropMeta && isMeta(leaf.path)) return;
+        base[leaf.path] = { sha: leaf.sha, kind: leaf.kind, mode: leaf.mode };
       });
       haveBase = true;
     }
   }
 
-  //  2. wt scan: rel → { ts, kind }.
+  //  2. wt scan ulog: rel → { ts, kind }.
   const wt = wtScan(wtRoot, ignore);
 
-  //  3. staged put/del since the last post: rel → row.  Move-form put
-  //  rows carry a dest path in the fragment (skip sha-fragment "bumps").
+  //  3. put list ulog: staged put/del since the pd floor.  A move-form put
+  //  carries a dest path in the fragment; a 40-hex fragment is a gitlink pin.
   const puts = {}, dels = {};
-  const bnd = wtlogReader.boundaries();
-  const floor = bnd.pd;       // SNIFFAtLastPostTs floor
+  const floor = wtlogReader.boundaries().pd;
   wtlogReader.eachPutDelete(floor, function (r) {
     const u = r.uri;
     let path = u.path || "";
     if (path === "" || path[path.length - 1] === "/") return;   // dir-prefix rows
-    if (r.verb === "put") {
-      let frag = u.fragment || "";
-      puts[path] = { ts: r.ts, dst: frag };
-    } else if (r.verb === "delete") {
-      dels[path] = { ts: r.ts };
-    }
+    if (dropMeta && isMeta(path)) return;
+    if (r.verb === "put") puts[path] = { ts: r.ts, dst: u.fragment || "" };
+    else if (r.verb === "delete") dels[path] = { ts: r.ts };
   });
+  const anyPd = Object.keys(puts).length > 0 || Object.keys(dels).length > 0;
 
-  //  4. merge keys: union of base/wt/put/del paths, lex sorted.
+  //  4. patched-in (theirs) stamps: mtime → pat/mrg/cnf bucket — the cheap
+  //  per-file OUTCOME tag the patch verb wrote.  And the theirs TREE ulog itself
+  //  (rel → {sha,kind,mode}), the merge's SEPARATE 4th input: a patch-stamped,
+  //  ours-modified file is `pat` when wt == theirs (a clean take-theirs), else
+  //  `mrg`/`cnf` (a merge of ours+theirs).  Read each in-scope patch row's
+  //  theirs tree (later rows win on a path collision — newest absorb).  Empty
+  //  when no patch row is in scope, so the whole axis is a no-op otherwise.
+  const pstamps = patchStamps(wtlogReader);
+  const theirs = {};
+  if (typeof wtlogReader.patchTheirs === "function") {
+    for (const tsha of wtlogReader.patchTheirs()) {
+      if (!isFullSha(tsha)) continue;
+      const ttree = reader.commitTree(tsha);
+      if (!ttree) continue;
+      reader.readTreeRecursive(ttree, function (leaf) {
+        if (dropMeta && isMeta(leaf.path)) return;
+        theirs[leaf.path] = { sha: leaf.sha, kind: leaf.kind, mode: leaf.mode };
+      });
+    }
+  }
+
+  //  merge keys: union of all FOUR input ulogs (base ⊕ wt ⊕ put/del ⊕ theirs),
+  //  lex sorted.  theirs contributes a key for a path theirs ADDED that ours
+  //  lacks (a take-theirs add lands on disk wt-only; without theirs in the union
+  //  it would still surface via wt, but listing it keeps the inputs symmetric).
   const keys = {};
   for (const k in base) keys[k] = 1;
   for (const k in wt) keys[k] = 1;
   for (const k in puts) keys[k] = 1;
   for (const k in dels) keys[k] = 1;
+  for (const k in theirs) keys[k] = 1;
   const paths = Object.keys(keys).sort();
 
-  //  Submodule prefixes (gitlink baseline rows) — drop descendants.
+  //  Move dst index: a put-with-dest yields `rmv` on the source and `mov` on
+  //  the destination (the move pair); the dst's own wt-only row is suppressed.
+  const movDsts = {};
+  for (const k in puts) {
+    const dst = puts[k].dst;
+    if (dst && !isFullSha(dst)) movDsts[dst] = 1;
+  }
+
+  //  Submodule baseline prefixes — descendants dropped.
   const subPrefixes = [];
   function underSub(p) { for (const s of subPrefixes) if (p.indexOf(s) === 0) return true; return false; }
-  //  Suppress the destination side of a move (its row is on the source).
-  const movDsts = {};
-  for (const k in puts) { const d = puts[k].dst; if (d && !isFullSha(d)) movDsts[d] = 1; }
 
-  const counts = { ok: 0, put: 0, new: 0, mov: 0, mod: 0, del: 0, mis: 0, unk: 0 };
+  const counts = { ok: 0, put: 0, new: 0, mov: 0, rmv: 0, pat: 0, mrg: 0,
+                   cnf: 0, mod: 0, del: 0, mis: 0, unk: 0 };
   const rows = [];
-  //  Base-only gitlinks with no put/del intent: deferred to JS-033's
-  //  SUBSDirty classifier (the 3-axis pin-vs-tip compare needs the sub
-  //  shard, which classify deliberately doesn't open).  status.js reads
-  //  this list, classifies each, and either counts `ok` or emits a `mod`
-  //  row — so they are NOT folded into counts.ok here.
-  const gitlinks = [];
-  function push(bucket, path, ts, dst) {
-    counts[bucket]++;
-    if (bucket === "ok") return;       // ok is count-only, no row
-    rows.push({ bucket: bucket, path: path, ts: ts || 0n, dst: dst });
+  const gitlinks = [];   // base-only gitlinks → JS-033 SUBSDirty (status only)
+  //  `ok` is count-only for STATUS (a clean file would flood the output), but
+  //  `post` (opts.wantClean) NEEDS each clean row to `keep` it in the tree.
+  const emitClean = !!(opts.listing || opts.wantClean);
+  function push(o) {
+    counts[o.bucket]++;
+    if (o.bucket === "ok" && !emitClean) return;   // status: ok is count-only
+    rows.push(o);
   }
 
   for (const path of paths) {
     if (underSub(path)) continue;
+    //  DIS-054 Path slot (post): an out-of-scope path keeps baseline → no row.
+    if (underNarrow && !underNarrow(path)) continue;
     const b = base[path], w = wt[path], p = puts[path], d = dels[path];
 
-    //  Gitlink (submodule) baseline row: record prefix, drop internals.
-    //  No sub row here (JS-033); a clean gitlink with no intent → ok.
-    if (b && b.kind === "s") {
-      subPrefixes.push(path + "/");
-      if (d) { push("del", path, d.ts); continue; }
-      if (p) {
-        //  staged bump: put (in base) — fragment is a sha, not a dest.
-        push(b ? "put" : "new", path, p.ts); continue;
-      }
-      //  base-only / both gitlink with no intent: defer to the SUBSDirty
-      //  classifier (JS-033) — record the path + R1 pin (the baseline
-      //  gitlink sha) so status.js can run the 3-axis pin-vs-tip compare
-      //  on the sub's own shard.  NOT counted ok here.
-      gitlinks.push({ path: path, pin: b.sha });
+    //  Gitlink bump (`put <sub>#<40hex>`): the put fragment is a PIN (a full
+    //  sha), winning over any on-disk file (SUBS-019).  Subsumes bump + add.
+    if (p && isFullSha(p.dst)) {
+      const baseIsSub = b && (b.mode === 0o160000 || b.kind === "s");
+      push({ bucket: baseIsSub ? "put" : "new", path: path, ts: p.ts,
+             gitlink: true, mode: 0o160000, sha: p.dst,
+             oldSha: baseIsSub ? b.sha : undefined });
       continue;
     }
 
-    //  Staged groups take precedence (status_step).
-    if (d) { push("del", path, d.ts); continue; }
+    //  Gitlink (submodule) baseline row: record prefix, drop internals.
+    if (b && (b.kind === "s" || b.mode === 0o160000)) {
+      subPrefixes.push(path + "/");
+      if (d) { push({ bucket: "del", path: path, ts: d.ts, inBase: true }); continue; }
+      //  base-only/both gitlink, no intent → defer to JS-033 (status); post
+      //  carries it through verbatim (it has the base sha/mode).
+      gitlinks.push({ path: path, pin: b.sha, mode: b.mode || 0o160000 });
+      continue;
+    }
+
+    //  Staged groups take precedence (status_step / post_classify_step).
+    if (d) {
+      push({ bucket: "del", path: path, ts: d.ts, inBase: !!b, onDisk: !!w });
+      continue;
+    }
     if (p) {
       const frag = p.dst || "";
-      const isBump = isFullSha(frag);
-      if (frag && !isBump) { push("mov", path, p.ts, frag); continue; }
-      if (b) push("put", path, p.ts);
-      else   push("new", path, p.ts);
+      if (frag && !isFullSha(frag)) {
+        //  Move PAIR (Dirty.mkd): `rmv` on the SOURCE (base-present, wt-absent)
+        //  and `mov` on the DESTINATION (base-absent, wt-present).  status
+        //  collapses the pair to one `mov src#dst` row (native parity); post
+        //  unlinks the source and adds the dest.  Both rows carry `src` so the
+        //  renderer can spell `src#dst`.
+        push({ bucket: "rmv", path: path, ts: p.ts, src: path,
+               oldSha: b ? b.sha : undefined, inBase: !!b });
+        push({ bucket: "mov", path: frag, ts: p.ts, src: path, dst: frag,
+               kind: wt[frag] ? wt[frag].kind : undefined, onDisk: !!wt[frag] });
+        continue;
+      }
+      push({ bucket: b ? "put" : "new", path: path, ts: p.ts,
+             oldSha: b ? b.sha : undefined, kind: w ? w.kind : undefined,
+             onDisk: !!w, inBase: !!b });
       continue;
     }
 
-    //  No staged intent — classify by presence + content.
+    //  No staged intent — classify by presence + content (+ patch stamp).  The
+    //  patch axis (DIS-057 RULING 2026-06-29) refines a patch-STAMPED file's
+    //  outcome against the THEIRS input, NOT the (ours) baseline: the stamp band
+    //  carries pat/mrg/cnf coarsely, and theirs corroborates `pat` = wt == theirs.
     const inBase = !!b, onDisk = !!w;
+    const t = theirs[path];
+    const pStamp = w ? pstamps[(w.ts || 0n).toString()] : undefined;
     if (onDisk && !inBase) {
-      //  wt-only.  status SUPPRESSES a move destination (its row rides the src
-      //  `mov` row); a LISTING view (opts.listing) instead SHOWS it as a `new`
-      //  row — the staged-add side of the rename (JAB-018).  The ls:/lsr: views
-      //  no longer use this path (they call classifyDir below), but status may.
-      if (movDsts[path]) { if (opts.listing) push("new", path, w.ts); continue; }
-      push("unk", path, w.ts);
+      //  wt-only.  A move destination already has its `mov` row (emitted from
+      //  the source's put), so SUPPRESS its standalone wt-only row here.
+      if (movDsts[path]) continue;
+      //  A patch-stamped take-theirs ADD (theirs added a path ours lacked):
+      //  pat/mrg/cnf from the stamp band, carrying theirs' sha/mode as the
+      //  resolved content (post commits it; ours-base has no oldSha here).
+      if (pStamp && t) {
+        push({ bucket: pStamp, path: path, ts: w.ts, kind: w.kind,
+               onDisk: true, inBase: false });
+        continue;
+      }
+      push({ bucket: "unk", path: path, ts: w.ts, kind: w.kind, onDisk: true });
       continue;
     }
     if (inBase && !onDisk) {
-      //  base-only: gone from disk → mis (gitlinks handled above).
-      push("mis", path, 0n);
+      push({ bucket: "mis", path: path, ts: 0n, inBase: true,
+             oldSha: b.sha, mode: b.mode });
       continue;
     }
     if (inBase && onDisk) {
-      //  both: content-confirmed clean vs modified.  wtEqBase handles
-      //  every kind uniformly (CLASS.c CLASSWtEqBase) — a symlink hashes
-      //  its readlink target, so a re-pointed link reads `mod` and an
-      //  unchanged one `ok` (no more assume-clean hack).
-      if (wtEqBase(wtRoot, path, b.sha)) {
-        counts.ok++;   // clean → count-only
-        //  opts.listing: a listing view emits the clean file as an `eq` row
-        //  (with its wt mtime); status keeps `ok` count-only (JAB-018).
-        if (opts.listing) rows.push({ bucket: "eq", path: path, ts: w.ts });
-      } else push("mod", path, w.ts);
+      //  Patch axis FIRST: a content-modified (vs OURS), patch-STAMPED file reads
+      //  its stamp-offset bucket (pat/mrg/cnf).  The "modified?" test is against
+      //  OURS (b.sha) now — so a clean take-theirs (wt == theirs != ours) is
+      //  modified-vs-ours and surfaces `pat`, no longer collapsing to `ok`.
+      const pb = pStamp;
+      const eqBase = wtEqBase(wtRoot, path, b.sha);
+      if (pb && !eqBase) {
+        push({ bucket: pb, path: path, ts: w.ts, kind: w.kind,
+               oldSha: b.sha, onDisk: true, inBase: true });
+        continue;
+      }
+      if (eqBase) {
+        push({ bucket: "ok", path: path, ts: w.ts, oldSha: b.sha,
+               mode: b.mode, eq: true, clean: true });
+      } else {
+        push({ bucket: "mod", path: path, ts: w.ts, kind: w.kind,
+               oldSha: b.sha, onDisk: true, inBase: true });
+      }
       continue;
     }
-    //  (no base, no wt — only put/del, already handled above)
   }
 
-  return { rows: rows, counts: counts, haveBase: haveBase,
-           gitlinks: gitlinks, baseTreeSha: baseTreeSha };
+  return { rows: rows, counts: counts, haveBase: haveBase, anyPd: anyPd,
+           gitlinks: gitlinks, baseTreeSha: baseTreeSha, base: base };
+}
+
+//  --- the merge --------------------------------------------------------
+//  STATUS classify: a renderer-facing view over the unified merge.  A clean
+//  file is count-only `ok`, a move's dst rides the source `mov` row.  The
+//  `ls:`/`lsr:` LISTING view does NOT use this whole-tree pass — it calls
+//  classifyDir (below), O(dir) not O(repo).
+function classify(be, wtlogReader, keeperReader, opts) {
+  opts = opts || {};
+  const m = classifyMerge(be, wtlogReader, keeperReader,
+                          { listing: opts.listing });
+  //  Map the output ulog rows onto status's render rows ({bucket,path,ts}).
+  //  DIS-057: a staged rename surfaces as the Dirty.mkd move PAIR — `rmv` on
+  //  the SOURCE (present-in-base, absent-in-wt) and `mov` on the DESTINATION
+  //  (absent-in-base, present-in-wt), TWO plain `<bucket> <path>` rows.  The
+  //  earlier native-parity collapse to one `mov src#dst` row is gone (the tests
+  //  are untied from C and the collapse contradicts Dirty.mkd).  A clean
+  //  `ok`/`eq` row is count-only in status (no row) but a listed `eq` row in a
+  //  listing view.
+  const rows = [];
+  for (const r of m.rows) {
+    if (r.bucket === "ok") {
+      if (opts.listing) rows.push({ bucket: "eq", path: r.path, ts: r.ts });
+      continue;
+    }
+    rows.push({ bucket: r.bucket, path: r.path, ts: r.ts || 0n });
+  }
+  return { rows: rows, counts: m.counts, haveBase: m.haveBase,
+           gitlinks: m.gitlinks, baseTreeSha: m.baseTreeSha };
+}
+
+//  Is `rel` a `.be`/`.git` meta path (SNIFFSkipMeta)?  Never carried into a
+//  commit tree; status's wtScan already drops them on disk.
+function isMeta(rel) {
+  if (rel === ".be" || rel === ".git") return true;
+  return rel.indexOf(".be/") === 0 || rel.indexOf(".git/") === 0;
 }
 
 //  --- scoped one-level listing (JAB-018 ls:/lsr:) ----------------------
@@ -296,9 +442,12 @@ function classify(be, wtlogReader, keeperReader, opts) {
 //  newest-mtime-under-dir value native never asked for).
 //  `scopePfx` is the dir RELATIVE to be.wt in DIR form ("" root, "sub/").
 //
-//  → { files: [{ bucket, name, ts, dst? }], dirs: [name, ...] }  names are
-//    RELATIVE to the scope (a mov `dst` too); buckets are the listing set
-//    eq/mod/unk/new/mov/mis/del/put; `dirs` = immediate subdir + mount names.
+//  → { files: [{ bucket, name, ts }], dirs: [name, ...] }  names are RELATIVE to
+//    the scope; buckets are the listing set eq/mod/unk/new/mov/rmv/mis/del/put.
+//    DIS-057 RULING 2026-06-29: a staged RENAME is the SAME `rmv`(src)+`mov`(dst)
+//    move PAIR `status` renders (untied from native's `mov src -> dst` + `new
+//    dst`) — two plain rows, no `-> dst` arrow.  `dirs` = immediate subdir +
+//    mount names.
 function classifyDir(be, wtlogReader, keeperReader, scopePfx) {
   const wtRoot = be.wt;
   const ignore = require(libDir() + "/util/ignore.js").load(wtRoot);
@@ -392,15 +541,21 @@ function classifyDir(be, wtlogReader, keeperReader, scopePfx) {
     if (p) {
       const frag = p.dst || "";
       if (frag && !isFullSha(frag)) {
-        const dst = frag.indexOf(scopePfx) === 0 ? frag.slice(scopePfx.length) : frag;
-        files.push({ bucket: "mov", name: n, ts: p.ts, dst: dst });
+        //  DIS-057 RULING 2026-06-29: untie ls:/lsr: from the native `mov src ->
+        //  dst` + `new dst` form — render the SAME `rmv`(src)+`mov`(dst) move
+        //  PAIR `status` does.  The SOURCE (this immediate put row) is `rmv`; the
+        //  DESTINATION's own wt-only row becomes `mov` (suppressing its `new`)
+        //  below.  Two plain `<bucket> <name>` rows, no `-> dst` arrow.
+        files.push({ bucket: "rmv", name: n, ts: p.ts });
       } else files.push({ bucket: b ? "put" : "new", name: n, ts: p.ts });
       continue;
     }
     if (w && !b) {
       //  baseline dir/mount now a wt file or symlink → `mod` (type change,
-      //  matches native `mod be`); else a move dst is `new`, otherwise `unk`.
-      const bucket = baseDir[n] ? "mod" : (movDsts[full] ? "new" : "unk");
+      //  matches native `mod be`); else a move DESTINATION is the `mov` half of
+      //  the pair (DIS-057 RULING 2026-06-29 — untied from native's `new`),
+      //  otherwise a genuinely untracked file is `unk`.
+      const bucket = baseDir[n] ? "mod" : (movDsts[full] ? "mov" : "unk");
       files.push({ bucket: bucket, name: n, ts: w.ts }); continue;
     }
     if (b && !w) { files.push({ bucket: "mis", name: n, ts: 0n }); continue; }
@@ -418,4 +573,5 @@ function libDir() {
 }
 
 module.exports = { classify: classify, classifyDir: classifyDir,
+                   classifyMerge: classifyMerge, isMeta: isMeta,
                    wtScan: wtScan, wtEqBase: wtEqBase };

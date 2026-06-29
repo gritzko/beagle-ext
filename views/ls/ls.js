@@ -79,9 +79,10 @@ function emitHunk(sink, banner, navPfx, entries) {
       const nav = "ls:" + navPfx + e.name + "/";
       off += appendRow(textParts, spans, off, "dir", e.name + "/", nav, 0n);
     } else {
-      const dst = e.verb === "mov" && e.text.indexOf(" -> ") >= 0
-                ? e.text.slice(e.text.indexOf(" -> ") + 4) : null;
-      const nav = "cat:" + navPfx + (dst || e.key);
+      //  DIS-057 RULING 2026-06-29: a move is the `rmv`(src)+`mov`(dst) pair (no
+      //  `-> dst` arrow), so the entry text is the bare name — the nav click
+      //  target is just `cat:<path>`.
+      const nav = "cat:" + navPfx + e.key;
       off += appendRow(textParts, spans, off, e.verb, e.text, nav, e.ts);
     }
   }
@@ -159,8 +160,10 @@ module.exports = function handle(row, ctx) {
   //  was never asked for (computing it was the whole O(repo) cost).
   const entries = [];
   for (const f of res.files) {
-    const text = f.bucket === "mov" && f.dst ? f.name + " -> " + f.dst : f.name;
-    entries.push({ key: f.name, dir: false, text: text, verb: f.bucket, ts: f.ts });
+    //  DIS-057 RULING 2026-06-29: a rename lists as the `rmv`(src)+`mov`(dst)
+    //  pair (untied from native's `mov src -> dst` + `new dst`) — each is a plain
+    //  `<bucket> <name>` row, no `-> dst` arrow.
+    entries.push({ key: f.name, dir: false, text: f.name, verb: f.bucket, ts: f.ts });
   }
   for (const name of res.dirs)
     entries.push({ key: name + "/", dir: true, name: name });

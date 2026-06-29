@@ -259,7 +259,7 @@ function classifyAndApply(rc, path, f, o, t) {
 //  Full-history merge of one diverged file: reconstruct ours/theirs weaves
 //  from their commit DAGs, union them, render with conflict fences over the
 //  per-side scopes.  Mirrors GRAFMergeWtFileTunable.  A residual conflict
-//  marker reports `conf` (markers left in the wt, like native).
+//  marker reports `cnf` (markers left in the wt; DIS-057 conf→cnf).
 function mergeApply(rc, path, oLeaf) {
   const ctx = { reader: rc.reader, path: path, ext: extOf(path),
                 treeCache: rc.treeCache, weaveCache: Object.create(null),
@@ -289,7 +289,7 @@ function mergeApply(rc, path, oLeaf) {
   const leaf = oLeaf || { kind: "f" };
   writeBytes(rc, path, leaf, merged);
   if (conflict.hasConflictMarker(merged)) {
-    rc.st.mergedConflict++; emit(rc, "conf", path);
+    rc.st.mergedConflict++; emit(rc, "cnf", path);   // DIS-057: conf→cnf
   } else { rc.st.merged++; emit(rc, "merged", path); }
 }
 
@@ -387,19 +387,38 @@ module.exports = function handle(row, ctx) {
   //  postIsCommitAll/baseline resolution (PATCH.md).  Strictly-after the tail
   //  (ULOG refuses ts<=tail); the seed cohort ctx.T0 is the intended stamp.
   const tail = wtl.rows.length ? wtl.rows[wtl.rows.length - 1].ts : 0n;
-  const ts = ulog.nowAfter(tail);
+  const base = ulog.nowAfter(tail);
+  //  DIS-057 Task 2 — RESERVE stamp headroom: the 3 stamp offsets occupy the
+  //  band [base, base+2], but base+1/base+2 are NOT real wtlog rows, so a later
+  //  op landing on those exact stamps could be misread as a pat/mrg/cnf file.
+  //  Park the patch ROW at the band CEILING (base+2) so the wtlog monotonic tail
+  //  is strictly past every stamp it used — the next appended row's nowAfter
+  //  (tail) is then > base+2, never colliding with a reserved stamp.  Files are
+  //  stamped BELOW the row: pat=ceil-2, mrg=ceil-1, cnf=ceil (patchStamps reads
+  //  the band back relative to the row ts).
+  const ts = base + 2n;                               // patch-row ts = band ceiling
   ulog.append(info.bePath,
               [{ verb: "patch", uri: patchRowUri(sc.scope, sc.theirs), ts: ts }]);
+  //  DIS-057 stamp OFFSET: the patch verb knows each file's outcome for free, so
+  //  it stamps the mtime to ts-2 (clean apply → `pat`), ts-1 (merged → `mrg`),
+  //  or ts (conflict → `cnf`).  The unified classifier reads that offset back as
+  //  the bucket — no merge recompute at status/post read time.  A file with no
+  //  per-file status (defensive) restamps to the floor (pat).
+  const statusOf = {};
+  for (const r of rc.rows) statusOf[r.path] = r.status;
   for (const p of rc.wrote) {
-    try { io.setMtime(join(info.wt, p), ts); } catch (e) {}
+    let stamp = ts - 2n;                              // pat (clean apply)
+    if (statusOf[p] === "merged") stamp = ts - 1n;    // mrg
+    else if (statusOf[p] === "cnf") stamp = ts;       // cnf
+    try { io.setMtime(join(info.wt, p), stamp); } catch (e) {}
   }
 
   emitBanner(out, sc, rc.rows, ts);
 };
 
 //  Banner via ctx.out: a `patch:` header (raw framing) then the per-file status
-//  rows (applied / merged / conf / del / modl) at ts=0n (blank-date column),
-//  matching native's patch table.  ONE flush at the loop edge renders them.
+//  rows (applied / merged / cnf / del / modl) at ts=0n (blank-date column).
+//  DIS-057 untied JS patch output from native (conf→cnf, pat/mrg/cnf stamps).
 function emitBanner(out, sc, rows, ts) {
   out.row("patch:", "patch", ts);
   for (const r of rows) out.row(r.path, r.status, 0n);

@@ -40,8 +40,31 @@ const theme    = require("../../view/theme.js");
 //  `mod` (SUBS-030: an advanced-sub gitlink-bump row, dumped/summarised
 //  immediately after the content-`mod` block — see SNIFF.exe.c
 //  status_dump_verb + STATUS_BUCKET order).
-const ROW_ORDER = ["put", "new", "mov", "mod", "adv", "del", "mis", "unk"];
-const SUMMARY_ORDER = ["ok", "put", "new", "mov", "pat", "mod", "adv", "del", "mis", "unk"];
+//  DIS-057: pat/mrg/cnf (patch-derived states) slot after `mod` in the
+//  present-in-base/present-in-wt group.  A staged rename is the Dirty.mkd move
+//  PAIR — `rmv` (the absent-in-wt source) renders just BEFORE `mov` (the
+//  present-in-wt dest) so the pair reads `rmv src` then `mov dst`, two plain
+//  `<bucket> <path>` rows; the old collapse to one `mov src#dst` row is gone.
+const ROW_ORDER = ["put", "new", "rmv", "mov", "mod", "pat", "mrg", "cnf", "adv", "del", "mis", "unk"];
+const SUMMARY_ORDER = ["ok", "put", "new", "rmv", "mov", "mod", "pat", "mrg", "cnf", "adv", "del", "mis", "unk"];
+
+//  BRO-006 / DIS-057: per-bucket `U`-tag nav target — `diff:<path>` (a wt-vs-
+//  base diff) when a baseline EXISTS for the path, else `cat:<path>` (no base to
+//  diff against).  C native (sniff/SNIFF.exe.c::status_verb_wants_diff_nav,
+//  ~line 343) only flips `mod` to `diff:` because its other buckets either have
+//  no baseline (new/unk), carry the dst already (mov), or are gone-from-disk
+//  (del/mis would error a content diff).  The DIS-057 JS view instead leads
+//  EVERY base-present row to its wt-vs-base diff (the user's intent — "paths
+//  clickable → wt-vs-base diffs"):
+//    diff: — base present, content differs   (mod, put, pat, mrg, cnf)
+//    diff: — base present, gone/removed in wt (rmv, del, mis → the deletion diff,
+//            base-vs-empty)
+//    cat:  — no base / new content           (new, unk, mov, adv)
+//  `adv` (a submodule gitlink-bump row) keeps its prior `cat:` nav.
+const NAV_DIFF = {
+  mod: 1, put: 1, pat: 1, mrg: 1, cnf: 1,   // base present, content differs
+  rmv: 1, del: 1, mis: 1,                    // base present, gone/removed → deletion diff
+};
 
 //  JSQUE-008: `be status` as a loop HANDLER.  Converted from a `main();`
 //  one-shot to `module.exports = handle(row, ctx)` — the wt path rides the ROW
@@ -256,15 +279,18 @@ function emitRepo(repo, prefix, out, recurse) {
       return a.path < b.path ? -1 : a.path > b.path ? 1 : 0;
     });
     for (const r of inBucket) {
-      let path = r.path;
-      if (r.bucket === "mov" && r.dst) path = path + "#" + r.dst;
-      //  BRO-006: a hidden `U`-tag nav target per file row — `diff:` for `mod`,
-      //  else `cat:`; a move targets its DST.  Mirrors C SNIFF.exe.c
-      //  status_dump_verb → HUNK_NAV_DIFF/CAT.  ctx.out ignores the 5th arg
-      //  (plain/colour unchanged); sinkOut packs it under a 'U' tok.
-      const navPath = r.bucket === "mov" && r.dst ? r.dst : r.path;
-      const nav = (r.bucket === "mod" ? "diff:" : "cat:") + joinPrefix(prefix, navPath);
-      out.row(joinPrefix(prefix, path), bucket, r.ts, null, nav);
+      //  BRO-006 / DIS-057: a hidden `U`-tag nav target per file row, routed by
+      //  NAV_DIFF above — `diff:<path>` when a baseline exists for the path (a
+      //  wt-vs-base diff, or a base-vs-empty deletion diff for rmv/del/mis),
+      //  else `cat:<path>` (no base to diff against — new/unk/mov/adv).  Mirrors
+      //  the C HUNK_NAV_DIFF/CAT mechanism (sniff/SNIFF.exe.c status_dump_verb),
+      //  widened so EVERY base-present row leads to its diff.  ctx.out ignores
+      //  the 5th arg (plain/colour unchanged); sinkOut packs it under a 'U' tok.
+      //  A rename renders as the `rmv` source + `mov` dest PAIR (two plain path
+      //  rows), each nav targeting its OWN path — the move-row nav restored.
+      const navPath = joinPrefix(prefix, r.path);
+      const nav = (NAV_DIFF[r.bucket] ? "diff:" : "cat:") + navPath;
+      out.row(navPath, bucket, r.ts, null, nav);
     }
   }
 

@@ -14,6 +14,7 @@
 //    boundaries()   → { pd, patch }         pd = latest get/post ts;
 //                                           patch = latest get / commit-all post ts
 //    has(ts)        → bool                  ron60 stamp-set membership
+//    patchTheirs()  → ["<40hex>", …]        in-scope patch rows' theirs shas
 //    eachPutDelete(floorTs, cb)             put/del rows with ts > floor, oldest-first
 //
 //  A "tip" is the latest get/post row carrying a sha; the sha sits in the
@@ -175,6 +176,30 @@ function open(be) {
       }
       const key = (typeof ts === "string") ? ts : ron.encode(BigInt(ts));
       return this._set.has(key);
+    },
+
+    //  patchFloor(): the patch-scope floor ts — the latest get / commit-all
+    //  post ts (boundaries().patch).  A `patch` row with ts strictly greater is
+    //  in scope (its theirs tree is un-posted).  null when no floor (DIS-057).
+    patchFloor: function () { return this.boundaries().patch; },
+
+    //  patchTheirs(): the THEIRS commit shas of every IN-SCOPE patch row, oldest
+    //  -first (DIS-057 RULING 2026-06-29).  A patch row's URI pins the absorbed
+    //  (theirs) commit in the fragment (`#<sha>`, NAMED) OR the query (`?<sha>`/
+    //  `?<sha>!`, NEXT/WHOLE) — refOf() reads either form back to a 40-hex sha.
+    //  These trees are the classifier's SEPARATE 4th input (the patched-in
+    //  trees), NEVER folded into the OURS baseline (which stays curTip).  Empty
+    //  when no patch row is in scope, so the whole axis is a no-op otherwise.
+    patchTheirs: function () {
+      const floor = this.patchFloor();
+      const out = [];
+      for (const r of rows) {
+        if (r.verb !== PATCH) continue;
+        if (floor != null && r.ts <= floor) continue;
+        const ref = refOf(r.uri, r.local);
+        if (ref.sha && isFullSha(ref.sha)) out.push(ref.sha);
+      }
+      return out;
     },
 
     //  eachPutDelete(floorTs, cb): every put/delete row with ts strictly

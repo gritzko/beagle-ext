@@ -6,10 +6,12 @@
 //  BEFORE the first store write (no orphans).  Output via ctx.out; sibling libs
 //  via relative ./ requires (JSQUE-008).  Pure JS over libabc+libdog ONLY.
 //
-//  SCOPE — FF-or-refuse (unchanged from JS-051).  A non-FF advance throws
-//  POSTNOFF; an in-scope `patch` row throws POSTSCOPE; the descendant cascade
-//  is out of scope.  PARALLEL/RESUME follow-up: the keeper-pack idempotency
-//  guard (no double pack-write on a barrier re-fold) is NOT built here.
+//  SCOPE — FF-or-refuse.  A non-FF advance throws POSTNOFF; the descendant
+//  cascade is out of scope.  DIS-057: an in-scope `patch` row is now CONSUMED
+//  (the unified classifier reads a patch-derived file as pat/mrg/cnf, the
+//  consumer commits its merged content) — no more POSTSCOPE throw.
+//  PARALLEL/RESUME follow-up: the keeper-pack idempotency guard (no double
+//  pack-write on a barrier re-fold) is NOT built here.
 //
 //  Usage:  jab be/loop.js post '#msg' | post msg… | post -m msg  (SUT=loop)
 
@@ -297,6 +299,20 @@ module.exports = function handle(row, ctx) {
   const parent = (cur && cur.sha && isFullSha(cur.sha)) ? cur.sha : undefined;
   const haveBaseline = !!(cur && cur.sha);
 
+  //  DIS-057 RULING 2026-06-29: an in-scope `patch` row's THEIRS commit becomes a
+  //  MERGE PARENT of the absorb (the merged/take-theirs bytes ride the wt; the
+  //  commit records the second parent so the absorb is a real merge in the DAG).
+  //  base=ours did NOT change this — the absorb's parents are ours-tip (parent,
+  //  below) + each in-scope theirs.  De-dup + drop any that equal ours-tip.
+  const theirsParents = [];
+  if (typeof wtl.patchTheirs === "function") {
+    const seen = {};
+    for (const tsha of wtl.patchTheirs()) {
+      if (!isFullSha(tsha) || tsha === parent || seen[tsha]) continue;
+      seen[tsha] = 1; theirsParents.push(tsha);
+    }
+  }
+
   //  DIS-054 Query slot: resolve the target branch the post advances.  No
   //  Query → cur's branch (the unchanged local-FF path).  A Query target is
   //  `` (trunk, `?`), the parent (`?..`), cur's own (`?.`), or a named branch.
@@ -319,10 +335,11 @@ module.exports = function handle(row, ctx) {
   //  3. Classify the change-set into keep/unlink/add decisions.  A Path slot
   //  (DIS-054) narrows the classify to that path — out-of-scope paths keep
   //  baseline, so only the named path's change lands in the commit.
+  //  DIS-057: post CONSUMES an in-scope `patch` row's theirs tree (POST-005
+  //  subsumed).  The unified classifier reads a patch-derived file as pat/mrg/
+  //  cnf and the consumer commits its merged content; a `cnf` (conflict-marked)
+  //  file is still caught by the POSTCFLCT pre-scan below.  No more POSTSCOPE.
   const dres = decideM.decide(info, wtl, reader, slots.narrow || undefined);
-  if (dres.hasPatch)
-    throw "POSTSCOPE: a `patch` row is in scope — absorbed-patch trees are " +
-          "out of scope for the JS FF post (use native `be post`)";
 
   //  4. FF pre-flight (POSTNOFF): a REFS tip != parent must be an ancestor.
   let expectedOld = "";
@@ -401,7 +418,7 @@ module.exports = function handle(row, ctx) {
 
   const commit = commitM.buildCommit({
     treeSha: tb.rootTreeSha || commitM.EMPTY_TREE_SHA,
-    parents: parent ? [parent] : [],
+    parents: (parent ? [parent] : []).concat(theirsParents),
     author: author,
     epochSec: epochSecOf(stamp),
     message: m.msg

@@ -42,7 +42,7 @@ const SLOTS_16 = {
   W: "32",        // new / add        — green
   E: "33",        // mod              — yellow
   X: "38;5;94",   // del              — 256 brown
-  M: "91",        // mis/miss/conf/modl/conflict — bright red
+  M: "91",        // mis/miss/cnf/modl/conflict — bright red
   Q: "90",        // unk / dirty / dir — grey
   Z: "35",        // mrg / merged     — magenta
   //  'S' default + 'A' sentinel: no entry → no paint.
@@ -66,18 +66,32 @@ const SLOTS_LIGHT = {
 
 //  --- verb → slot letter (dog/ULOG.c ULOG_VERB_TAGS) ----------------------
 //  The status verbs the row render emits map to a palette slot exactly as
-//  ulog_verb_tag does; an unlisted verb falls back to 'S' (no paint), like
-//  ULOGVerbTag returning 'S'.
+//  ulog_verb_tag does (dog/ULOG.c:1187-1232) — mirrored bucket-for-bucket so
+//  JS `be status --color` paints each row the SAME hue as native.  An unlisted
+//  verb falls back to 'S' (no paint), like ULOGVerbTag returning 'S'.  The
+//  native `be status` SUMMARY line (sniff/SNIFF.exe.c:417-426 STATUS_BUCKET)
+//  is the per-bucket authority for the buckets ULOG_VERB_TAGS omits (`pat`).
+//
+//  DIS-057 introduces three buckets native `be status` has NO equivalent for —
+//  `rmv` (the removal half of a move pair) and `cnf` (a DIS-057 spelling of
+//  C's `conf`).  Each is mapped to its closest C family:
+//    rmv → 'X'  (del/brown — the removal family; analogy, no native verb)
+//    cnf → 'M'  (== C `conf` bright red, ULOG.c:1230)
+//    mrg → 'Z'  (== C `mrg` magenta, ULOG.c:1211)
+//    pat → 'C'  (== native summary tag, SNIFF.exe.c:421 — bold; ULOG.c has no
+//                `pat` row verb, so the summary slot is the only C authority)
 const VERB_SLOT = {
-  put: "Y", upd: "Y", adv: "Y",
-  post: "V", mov: "V",
-  "new": "W", add: "W", applied: "W",
-  mod: "E",
-  del: "X",
-  mis: "M", miss: "M", conf: "M", modl: "M", conflict: "M",
-  unk: "Q", dir: "Q", dirty: "Q",
-  mrg: "Z", merged: "Z",
-  hunk: "B", eq: "D",
+  put: "Y", upd: "Y", adv: "Y",                          // C ULOG.c:1194/1205/1202 — blue
+  post: "V", mov: "V",                                   // C ULOG.c:1195/1200 — cyan
+  rmv: "X",                                              // DIS-057 analogy → del family (brown)
+  "new": "W", add: "W", applied: "W",                    // C ULOG.c:1197/1198/1217 — green
+  pat: "C",                                              // DIS-057: native summary tag (SNIFF.exe.c:421) — bold
+  mod: "E",                                              // C ULOG.c:1201 — yellow
+  del: "X",                                              // C ULOG.c:1206 — brown
+  mis: "M", miss: "M", cnf: "M", modl: "M", conflict: "M",  // C ULOG.c:1207-1231 — bright red (cnf≡conf)
+  unk: "Q", dir: "Q", dirty: "Q",                        // C ULOG.c:1210/1214/1220 — grey
+  mrg: "Z", merged: "Z",                                 // C ULOG.c:1211/1218 — magenta
+  hunk: "B", eq: "D",                                    // C ULOG.c:1213/1212
 };
 
 //  --- banner band (dog/THEME.h THEME_BANNER) ------------------------------

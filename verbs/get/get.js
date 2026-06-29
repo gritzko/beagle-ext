@@ -631,7 +631,8 @@ function leaf(uri, ctx) {
       checkout.materialise(g.wt, rel, { kind: kind }, merged);
       if (conflict.hasConflictMarker(merged)) {
         g.conf = (g.conf || 0) + 1;
-        out.row(rel, "conf", g.ts);
+        out.row(rel, "cnf", g.ts);   // DIS-057: conf→cnf
+
         //  D5: defer a loud non-zero exit until every file is materialised — the
         //  CONFMARK sentinel dispatches after all tail-appended leaves.
         return { enqueue: [{ verb: "get", uri: CONFMARK }] };
