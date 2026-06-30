@@ -44,6 +44,11 @@ const isFullSha = sha.isFullSha;
 const writeWtlog = ulog.write;
 const appendWtlog = ulog.append;
 
+//  SUBS-041: cap the checkout sub-mount RECURSION depth.  A deep/cyclic gitlink
+//  chain (a sub of a sub of a sub…) fans out unbounded; past this many descents,
+//  stop mounting deeper (log a skip, leave the mount as-is, no crash).
+const MAX_SUBMODULE_DEPTH = 8;
+
 //  del-sweep fold-row URI marker.  Plain ASCII (no leading `:` / `?` / `#`):
 //  a leading colon mis-frames the NEXT queue ULOG row (a URI-scheme parse
 //  hazard — JSQUE-009 own-ticket), so the marker must be scheme-free.
@@ -103,6 +108,13 @@ function parseRemote(uri) {
 }
 
 function exists(p) { try { io.stat(p); return true; } catch (e) { return false; } }
+
+//  SUBS-041: a friendly diagnostic line to stderr (fd 2) — the runtime has no
+//  console/log global; output goes via io.write of a utf8 buffer.
+function warn(s) {
+  try { const u = utf8.Encode(s + "\n"); const b = io.buf(u.length + 8);
+        b.feed(u); io.write(2, b); } catch (e) {}
+}
 
 //  Newest tip sha recorded in an existing wtlog (the last `#<40hex>` row).
 function oldTipOf(bePath) {
@@ -732,7 +744,8 @@ function mountGitlink(g, rel, pin, out) {
   });
   out.row(rel, "new", g.ts);                    // the mounted sub leaf row
   //  Pre-order recurse: descend the mounted sub's pin tree for nested gitlinks.
-  recurseSubMounts(g, rel, m, out);
+  //  SUBS-041: this top-level mount is depth 0; each descent increments.
+  recurseSubMounts(g, rel, m, out, 0);
 }
 
 //  Walk a just-mounted sub's pin tree for `160000` gitlinks and mount each
@@ -740,7 +753,14 @@ function mountGitlink(g, rel, pin, out) {
 //  its source is the SAME parent source (the same store serves every shard),
 //  its synthetic-branch parent token is this sub's title.  In-process (not the
 //  queue) so the parent's source coords stay in scope.
-function recurseSubMounts(g, rel, m, out) {
+function recurseSubMounts(g, rel, m, out, depth) {
+  //  SUBS-041: bound the descent — a deep/cyclic gitlink chain past the cap
+  //  stops here (a friendly stderr skip, leave the mount as-is, no fan-out crash).
+  if (depth >= MAX_SUBMODULE_DEPTH) {
+    warn("be get: SUBS-041 sub-mount depth cap " + MAX_SUBMODULE_DEPTH +
+         " reached at " + rel + " — not descending deeper");
+    return;
+  }
   const tree = m.k.commitTree(m.tip);
   if (!tree) return;
   const links = [];
@@ -756,7 +776,7 @@ function recurseSubMounts(g, rel, m, out) {
       source: g.source, parentTitle: m.project, parentBranch: m.branch,
     });
     out.row(sp, "new", g.ts);
-    recurseSubMounts(g, sp, cm, out);
+    recurseSubMounts(g, sp, cm, out, depth + 1);
   }
 }
 
