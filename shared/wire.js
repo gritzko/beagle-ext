@@ -26,7 +26,8 @@ const shq = require("../view/render.js").shQuote;       // JSQUE-016: render -> 
 //    file:///P, keeper://local/P, scheme-less local → exec keeper locally
 //    be://host/P, keeper://host/P                   → ssh host keeper …
 //    //host/P, //host/P.git, git://, ssh://         → ssh host git-upload-pack
-//  Returns { bin, argv } for io.spawn.  `verb` = "upload-pack"/"receive-pack".
+//    http(s)://host/owner/repo.git                  → curl smart-HTTP (GIT-012)
+//  Returns { bin, argv } (spawn), or { http, url } for the curl adapter.
 function classify(remoteUri, verb) {
   const u = new URI(remoteUri);
   const scheme = u.scheme || "";
@@ -56,6 +57,15 @@ function classify(remoteUri, verb) {
   if (localish) {
     return { bin: keeperBin, argv: [keeperBin, verb, servePath(path)],
              ssh: false };
+  }
+
+  //  GIT-012: http(s) rides a spawned curl (jab has no TLS), smart-protocol.
+  //  The base URL is the remote verbatim minus any in-band `?<sel>`/`?ref`.
+  if (scheme === "http" || scheme === "https") {
+    let base = remoteUri;
+    const q = base.indexOf("?");
+    if (q >= 0) base = base.slice(0, q);
+    return { http: true, url: base, ssh: false };
   }
 
   //  Remote: ssh.  Strip a leading '/' (HOME-relative convention).
@@ -138,9 +148,139 @@ function readToEof(fd, head) {
   return out;
 }
 
+//  --- GIT-012: smart-HTTP transport over a spawned curl ------------------
+//  jab has no TLS, so https rides curl.  Both requests are stateless; curl's
+//  stdout is read NON-BLOCKING via pol.watch, pumped by pol.run(budget) until
+//  the watched fd hits EOF (handler returns 0 → loop drains → run returns).
+const CURL_BIN = io.getenv("CURL_BIN") || "curl";
+
+//  Spawn `curl argv`, drain its stdout to EOF over pol, reap, return the
+//  bytes.  Throws on a non-zero curl exit (missing curl, HTTP error via -f).
+function curlRun(argv) {
+  let child;
+  try { child = io.spawn(CURL_BIN, argv); }
+  catch (e) { throw "wire.fetch: cannot spawn '" + CURL_BIN + "' (" + e + ")"; }
+  const rfd = child.stdout, pid = child.pid;
+  io.close(child.stdin);                         // no request body on this pipe
+  const chunks = []; let total = 0, done = false;
+  const scratch = new Uint8Array(1 << 16);
+  pol.watch(rfd, pol.IN, (fd, rev) => {
+    const n = io._read(fd, scratch);
+    if (n <= 0) { done = true; io.close(fd); return 0; }
+    chunks.push(scratch.slice(0, n)); total += n;
+    return pol.IN;
+  });
+  let guard = 0;
+  while (!done && guard++ < 1000000) pol.run(50 * pol.MS);
+  let rc = {};
+  try { rc = io.reap(pid); } catch (e) {}
+  if (!done) { try { pol.unwatch(rfd); io.close(rfd); } catch (e) {} }
+  if (rc.code !== 0 || rc.signal != null)
+    throw "wire.fetch: curl failed (code=" + rc.code + " signal=" + rc.signal +
+          ") — check the URL / curl is installed";
+  const out = new Uint8Array(total); let off = 0;
+  for (const c of chunks) { out.set(c, off); off += c.length; }
+  return out;
+}
+
+//  A pull cursor (like pkt.Reader) over an in-memory buffer — feeds the same
+//  parse loop with already-fetched curl bytes (the stateless body).
+function memReader(buf) {
+  let pos = 0;
+  return {
+    next() {
+      if (buf.length - pos < 4) return { kind: pkt.EOF };
+      const total = pkt.readLen(buf, pos);
+      if (total < 0) throw "pkt: bad length hex at " + pos;
+      if (total === 0) { pos += 4; return { kind: pkt.FLUSH }; }
+      if (total === 1) { pos += 4; return { kind: pkt.DELIM }; }
+      if (total === 2) { pos += 4; return { kind: "respend" }; }
+      if (total < 4) throw "pkt: short length " + total;
+      if (buf.length - pos < total)
+        throw "pkt: truncated pkt-line (want " + total + ")";
+      const payload = buf.slice(pos + 4, pos + total);
+      pos += total;
+      return { kind: pkt.LINE, payload };
+    },
+    rest() { return buf.slice(pos); }
+  };
+}
+
+//  Smart-HTTP fetch: GET info/refs (skip the `# service…`+flush preamble),
+//  pick the want, POST git-upload-pack, return the pack after NAK.  Reuses
+//  parseAdvLine/pickWant verbatim — same negotiation as the spawn path.
+function fetchHttp(url, wantRef, haves) {
+  const advert = curlRun(["-sSf", "-A", "git/2.0",
+                          url + "/info/refs?service=git-upload-pack"]);
+  const ar = memReader(advert);
+  //  Skip the HTTP-only preamble: `# service=…\n` line + its flush.
+  let skipped = false;
+  for (let i = 0; i < 2; i++) {
+    const ev = ar.next();
+    if (ev.kind === pkt.LINE) {
+      const s = utf8.Decode(ev.payload);
+      if (s.indexOf("# service=") === 0) { skipped = true; continue; }
+    }
+    if (ev.kind === pkt.FLUSH && skipped) break;
+    throw "wire.fetch: malformed smart-HTTP advert preamble";
+  }
+  const refs = []; let headSha = "";
+  for (;;) {
+    const ev = ar.next();
+    if (ev.kind === pkt.FLUSH || ev.kind === pkt.EOF) break;
+    if (ev.kind !== pkt.LINE) continue;
+    const a = parseAdvLine(ev.payload);
+    if (!a) continue;
+    if (a.name === "HEAD") { headSha = a.sha; continue; }
+    if (/\^\{\}$/.test(a.name)) continue;
+    if (a.name.indexOf("refs/remotes/") === 0) continue;
+    if (!isHead(a.name) && a.name.indexOf("refs/tags/") !== 0) continue;
+    refs.push({ sha: a.sha, name: a.name });
+  }
+  const want = pickWant(refs, headSha, wantRef || "");
+  if (!want) throw "wire.fetch: peer advertised no usable ref";
+
+  //  POST the want/have/done body from a temp file (avoids a pipe deadlock).
+  const reqs = [];
+  reqs.push(pkt.frame("want " + want.sha + " ofs-delta\n"));
+  reqs.push(pkt.flushPkt());
+  if (haves) for (const h of haves) if (isFullSha(h))
+    reqs.push(pkt.frame("have " + h + "\n"));
+  reqs.push(pkt.frame("done\n"));
+  let blen = 0; for (const r of reqs) blen += r.length;
+  const body = new Uint8Array(blen); { let o = 0;
+    for (const r of reqs) { body.set(r, o); o += r.length; } }
+  const tmp = (io.getenv("TMPDIR") || "/tmp") + "/wire-" + io.getpid() + "-" +
+              (Date.now() & 0xffffff) + ".req";
+  const fd = io.open(tmp, "c");
+  io.writeAll(fd, body); io.close(fd);
+  let result;
+  try {
+    const res = curlRun(["-sSf", "-A", "git/2.0", "-H",
+      "Content-Type: application/x-git-upload-pack-request",
+      "--data-binary", "@" + tmp, url + "/git-upload-pack"]);
+    const rr = memReader(res);
+    for (;;) {
+      const ev = rr.next();
+      if (ev.kind === pkt.EOF) throw "wire.fetch: peer closed before pack";
+      if (ev.kind === pkt.LINE) {
+        const s = utf8.Decode(ev.payload).replace(/\n$/, "");
+        if (s === "NAK" || s.indexOf("ACK") === 0) break;
+        continue;
+      }
+      if (ev.kind === pkt.FLUSH) continue;
+    }
+    const pack = rr.rest();
+    result = { pack, refs, want: want.sha, refname: want.name,
+               branch: want.branch };
+  } finally { try { io.unlink(tmp); } catch (e) {} }
+  return result;
+}
+
 //  --- the fetch ----------------------------------------------------------
 function fetch(remoteUri, wantRef, haves) {
   const sp = classify(remoteUri, "upload-pack");
+  if (sp.http) return fetchHttp(sp.url, wantRef, haves);   // GIT-012
   const child = io.spawn(sp.bin, sp.argv);
   const wfd = child.stdin, rfd = child.stdout, pid = child.pid;
 
