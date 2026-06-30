@@ -283,13 +283,36 @@ function postTree(info, ctx, row) {
   return postOne(info, ctx, row);
 }
 
+//  SUBS-042: anyStaged(wtl) — the [Dirty] `anyPd` selective test: any in-scope
+//  (since the last get/post) put/delete row? (the classify.js anyPd predicate).
+function anyStaged(wtl) {
+  let any = false;
+  wtl.eachPutDelete(wtl.boundaries().pd, function () { any = true; });
+  return any;
+}
+
+//  SUBS-042: does an in-scope parent put/delete target this sub (its dir or a
+//  file under it)? — a gitlink bump or staged sub-internal change keeps it in scope.
+function subInParentScope(wtl, subPath) {
+  const pfx = subPath + "/";
+  let hit = false;
+  wtl.eachPutDelete(wtl.boundaries().pd, function (r) {
+    const p = (r.uri && r.uri.path) || "";
+    if (p === subPath || p.indexOf(pfx) === 0) hit = true;
+  });
+  return hit;
+}
+
 //  postSubs: walk the parent's MOUNTED gitlink subs in `.gitmodules` order and,
 //  for each one that is dirty/advanced, RECURSE a post into it FIRST (so its new
 //  commit hash exists), then synthesise a `put <subpath>#<newtip>` gitlink bump
 //  in the PARENT wtlog so the parent's commit records the advance (D7 auto).
+//  SUBS-042: in selective mode commit only what's staged — skip a sub with nothing
+//  in scope; commit-all mode descends into every dirty sub as before.
 function postSubs(info, ctx) {
   const reader = store.open(info.storePath, info.project);
   const wtl = wtlog.open(info);
+  const parentSelective = anyStaged(wtl);           // SUBS-042 parent mode
   const baseTip = wtl.curTip();
   const baseTree = (baseTip && baseTip.sha && isFullSha(baseTip.sha))
         ? reader.commitTree(baseTip.sha) : "";
@@ -301,6 +324,14 @@ function postSubs(info, ctx) {
     const subWt = join(info.wt, s.path);
     let subInfo;
     try { subInfo = be.find(subWt); } catch (e) { continue; }
+
+    //  SUBS-042 selective gate: skip a sub not in scope (no parent bump / sub-internal
+    //  stage, no own anyPd, not already adv); commit-all falls through.
+    if (parentSelective &&
+        !subInParentScope(wtl, s.path) &&
+        s.bucket !== "adv" &&
+        !anyStaged(wtlog.open(subInfo)))
+      continue;
 
     //  The sub's cur tip BEFORE the recursive post.
     const subWtl0 = wtlog.open(subInfo);

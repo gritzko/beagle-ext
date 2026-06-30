@@ -33,6 +33,7 @@ const wtlog   = require("../../shared/wtlog.js");
 const store   = require("../../shared/store.js");
 const stage   = require("../../shared/stage.js");
 const classify = require("../../shared/classify.js");
+const recurse = require("../../core/recurse.js");
 const ulog    = require("../../shared/ulog.js");
 const isFullSha = require("../../shared/util/sha.js").isFullSha;
 
@@ -306,6 +307,50 @@ function bareStage(repo, wtl, k) {
 //  per-file STAGE is the LEAF; the bare-walk + move auto-pair (no path arg) is
 //  the PUT-004 whole-tree fold (bareStage).  Ref-write forms are applied once
 //  from ctx.refs.
+//  SUBS-039/PUT ([Submodules] §3): the shallowest MOUNTED-sub prefix of `rel`
+//  (a `<sub>/.be` file, never a symlink — recurse.isMount), or "".
+function subMountPrefix(repo, rel) {
+  const segs = rel.split("/");
+  let pfx = "";
+  for (let i = 0; i < segs.length - 1; i++) {
+    pfx = pfx ? pfx + "/" + segs[i] : segs[i];
+    if (recurse.isMount(repo.wt, pfx)) return pfx;
+  }
+  return "";
+}
+
+//  SUBS-039/PUT: stage a sub-crossing path INSIDE the sub (its own wtlog); the
+//  parent records nothing (the gitlink bump is POST's job).  The row shows its
+//  full top-relative path under the `put:` banner; tallies feed PUTNONE.
+function stageInSub(repo, pfx, uri, ctx) {
+  const out = ctx && ctx.out;
+  const subRepo = be.find(join(repo.wt, pfx));
+  const subK = store.open(subRepo.storePath, subRepo.project);
+  const u = new URI(uri);
+  let subUri = normRel(u.path).slice(pfx.length + 1);
+  if (u.fragment) {
+    let dst = normRel(u.fragment);
+    if (dst.indexOf(pfx + "/") === 0) dst = dst.slice(pfx.length + 1);
+    subUri = subUri + "#" + dst;
+  }
+  if (out && !ctx._putBannerOpen) { ctx._putBannerOpen = true; out.banner("put", "put:", ron.now()); }
+  const eng = stage.prep(subRepo, wtlog.open(subRepo), subK);
+  const r = stageArg(eng, subRepo, subUri);
+  commitOps(subRepo, r.ops, ctx && ctx.T0);
+  if (out)
+    for (const it of r.items) {
+      if (it.type === "skip") out.raw(skipText({ path: pfx + "/" + it.path, reason: it.reason, whole: it.whole }));
+      else { const op = r.ops[it.opIdx]; out.row(pfx + "/" + (op.dst ? op.path + "#" + op.dst : op.path), "put", 0n); }
+    }
+  ctx._putStaged = (ctx._putStaged || 0) + r.ops.filter(function (o) { return o.path !== null; }).length;
+  ctx._putSkipped = (ctx._putSkipped || 0) + r.items.filter(function (it) { return it.type === "skip"; }).length;
+  ctx._putCalls = (ctx._putCalls || 0) + 1;
+  if (ctx._putCalls >= (ctx.seededRowCount || 1) && ctx._putStaged === 0) {
+    if (ctx._putSkipped > 0) io.log("be put: no eligible paths\n");
+    throw "PUTNONE";
+  }
+}
+
 module.exports = function handle(row, ctx) {
   const out = ctx && ctx.out;
   const repo = (ctx && ctx.repo) || be.find((row && row.uri) || undefined);
@@ -336,6 +381,12 @@ module.exports = function handle(row, ctx) {
           out.row(op.dst ? (op.path + "#" + op.dst) : op.path, "put", 0n);
     return;
   }
+
+  //  SUBS-039/PUT: a path arg crossing a mounted submodule stages INSIDE the sub
+  //  ([Submodules] §3) — delegate, don't refuse "exists but is not stageable".
+  const argPath = normRel(new URI((row && row.uri) || "").path || "");
+  const subPfx = argPath ? subMountPrefix(repo, argPath) : "";
+  if (subPfx) return stageInSub(repo, subPfx, (row && row.uri) || "", ctx);
 
   //  Open the shared `put:` table header ONCE (native opens it for every
   //  PUTStage run; the row lines below carry a BLANK date, native HUNK `.ts=0`).
