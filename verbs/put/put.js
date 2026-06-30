@@ -213,31 +213,15 @@ function applyRefs(repo, k, ctx) {
 }
 
 //  --- bare `be put` (no path args) — PUT-004 ------------------------------
-//  Stage the WHOLE working tree against the baseline, byte-for-byte as native
-//  (sniff/PUT.c put_detect_moves + put_visit_tracked).  The dirty list is
-//  SOURCED from the non-recursive classifier (shared/classify.js::classifyMerge,
-//  which merges base-tree ⊕ wt-scan ⊕ wtlog put/del into per-path buckets) PLUS
-//  the wtlog — NOT a hand-rolled second tree walk: a path already staged since
-//  the last get/post shows as `put`/`new`/`mov` and is naturally skipped.  The
-//  per-path DECISION (mod / mis / unk / ok) comes from the classifier; the
-//  baseline-tree WALK order and the get/post stamp fast-path (native's clean
-//  short-circuit) are layered from the same baseline tree the engine loaded, so
-//  the emitted rows are identical to stage.js::bareWalk (the semantics oracle):
-//    - mod (bytes != baseline)              → one `put <path>` row, WALK order
-//    - mis↔unk content-sha 1:1 auto-pair    → SILENT `put <old>#<new>` move row
-//                                             (BEFORE the dirty rows; PUTAMBIG
-//                                              when a sha matches >1 candidate)
-//    - ok  (bytes == baseline)              → restamp mtime to baselineTs, NO row
-//    - unk that is NOT a move dest          → NEVER staged (needs `be put <f>`)
-//  Returns { ops } shaped for commitOps (moves first, then dirty/restamp ops).
+//  PUT-004: stage the whole wt vs baseline from the classifier's buckets —
+//  mod→put, mis↔unk→silent move, ok→restamp (no row), unk→skip; returns { ops }.
 function bareStage(repo, wtl, k) {
   const eng = stage.prep(repo, wtl, k);
   const wtRoot = repo.wt;
   if (!eng.haveBase || !eng.baseTreeSha) return { ops: [] };
 
-  //  Dirty list from the classifier (base ⊕ wt ⊕ wtlog put/del → buckets).
-  //  wantClean yields the `ok` rows we need for the restamp.  A staged path
-  //  already shows as put/new/mov, so it is absent from mod/mis/unk → skipped.
+  //  PUT-004: dirty list from the classifier (base⊕wt⊕wtlog put/del → buckets);
+  //  wantClean adds the `ok` rows for restamp; already-staged paths are absent.
   const cls = classify.classifyMerge(repo, wtl, k, { wantClean: true, skipMeta: true });
   const mod = {}, mis = {}, unk = {}, ok = {};
   for (const r of cls.rows) {
@@ -247,9 +231,8 @@ function bareStage(repo, wtl, k) {
     else if (r.bucket === "ok") ok[r.path] = 1;
   }
 
-  //  get/post stamp gate (native clean fast-path): a tracked file whose mtime
-  //  is a get/post stamp is taken clean WITHOUT a content re-hash — left as-is
-  //  (no row, no restamp), exactly like stage.js::bareWalk.
+  //  PUT-004: clean fast-path — a tracked file whose mtime is a get/post stamp is
+  //  taken clean (no row, no restamp), like stage.js::bareWalk.
   const gpStamp = {};
   for (const r of wtl.rows)
     if (r.verb === "get" || r.verb === "post") gpStamp[r.ron] = true;
@@ -261,10 +244,8 @@ function bareStage(repo, wtl, k) {
   const ops = [];
 
   //  --- auto-pair mis↔unk system-`mv` renames (put_detect_moves) ----------
-  //  A tracked path gone from disk (`mis`, baseline blob sha) + an untracked
-  //  on-disk file (`unk`, hashed via diskSha) of identical content → one SILENT
-  //  `put <old>#<new>` move op (written + dest restamped, NOT in the banner).
-  //  Strictly 1:1; a sha matching >1 candidate either side throws PUTAMBIG.
+  //  PUT-004: a `mis` (gone, baseline sha) + an `unk` (on disk, diskSha) of equal
+  //  content → one SILENT `put <old>#<new>` move (1:1, else PUTAMBIG).
   const baseCand = [];                      // { path, sha } in baseline WALK order
   const baseSeen = {};
   k.readTreeRecursive(eng.baseTreeSha, function (leaf) {
