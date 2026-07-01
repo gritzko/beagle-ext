@@ -35,6 +35,8 @@ const ulog     = require("../../shared/ulog.js");
 const sha      = require("../../shared/util/sha.js");
 const barrier  = require("../../core/barrier.js");
 const be       = require("../../core/discover.js");
+//  JAB-003: get emits a TRUE hunk (accumulated across dispatches, flushed once).
+const hunkrows = require("../../shared/hunkrows.js");
 const wtlog    = require("../../shared/wtlog.js");
 const conflict = require("../../shared/conflict.js");
 const submount = require("../../shared/submount.js");   // DIS-058 D2-D5 sub mount
@@ -296,6 +298,7 @@ module.exports = function handle(row, ctx) {
   const uri = (row && row.uri) || "";
   if (uri === DELSWEEP) return delSweep(row, ctx);   // BARRIER fold row
   if (uri === CONFMARK) {                              // D5: post-leaf conflict gate
+    flushGet(ctx);                                     // JAB-003: emit partial hunk before the loud exit
     throw "be get: GETCONF " + (ctx._get && ctx._get.conf || 1) +
           " file(s) merged with conflicts — resolve the markers";
   }
@@ -327,7 +330,7 @@ function handleSeed(uri, ctx) {
 //  detach / rewind / switch).  `force` (D6) makes the leaf clean-reset dirty
 //  baselined paths instead of weave-merging them.
 function fanoutWholeTree(ctx, r, wt, force) {
-  const out = ctx && ctx.out;
+  const out = getOut(ctx);
 
   //  A re-get of the CURRENT commit (oldTip==tip), non-force: the wt may have
   //  drifted (a deleted tracked file, a dirty edit), so VISIT every path (no
@@ -342,7 +345,7 @@ function fanoutWholeTree(ctx, r, wt, force) {
   //  (the reconcile reads the mode; the queue round-trip drops it, so it rides
   //  ctx — set before the leaf is dispatched).  `dels` tallies the del-sweep.
   ctx._get = { k: r.k, wt: wt, tip: r.tip, oldTip: r.oldTip, fresh: r.fresh,
-               branch: r.branch, ts: ctx.T0, kinds: {}, dels: 0,
+               branch: r.branch, ts: ctx.T0, kinds: {}, dels: 0, rows: [], head: null,
                force: !!force, noPrune: noPrune,
                //  DIS-058 D2-D5: the parent's source (for the same-source child
                //  fetch) + the store dir where sibling sub shards land + the
@@ -361,6 +364,7 @@ function fanoutWholeTree(ctx, r, wt, force) {
   //  first, kept in push order), then file rows — new+upd interleaved lex,
   //  THEN del lex.  The fan-out arrives in queue order, so SORT at the flush.
   ctx.outSort = function (rows) { return sortGetRows(rows); };
+  ctx._finalize = flushGet;   // JAB-003: flush the one get hunk after the queue drains
 
   //  Resolution-at-entry: pin the root NEW + OLD tree shas.  Old empty on a fresh
   //  clone OR a --force reset (re-write everything, discard dirty); else the real
@@ -524,10 +528,11 @@ function restorePath(ctx, k, wt, path, query, curSha, curBranch) {
   //  noPrune: a named restore descends even an unchanged subtree (so a dirty/
   //  deleted file under it is reset), and force makes the leaf clean-overwrite.
   ctx._get = { k: k, wt: wt, tip: srcSha, oldTip: curSha, fresh: false,
-               branch: curBranch, ts: ctx.T0, kinds: {}, dels: 0,
+               branch: curBranch, ts: ctx.T0, kinds: {}, dels: 0, rows: [], head: null,
                force: force, noPrune: true };
   ctx.outSort = function (rows) { return sortGetRows(rows); };
-  ctx.out.banner("get", "?" + (curBranch || "") + "#" + srcSha.slice(0, 8), ctx.T0);
+  ctx._finalize = flushGet;   // JAB-003: flush the one get hunk after the queue drains
+  getOut(ctx).banner("get", "?" + (curBranch || "") + "#" + srcSha.slice(0, 8), ctx.T0);
 
   const enqueue = [];
   const newIsDir = newEnt && newEnt.kind === "tree";
@@ -668,7 +673,7 @@ function reconcileDir(uri, ctx) {
 //  clean-overwrite vs 3-way weave); `get <path>?#<old>` deletes a removed path.
 //  Gitlink (submodule) leaves are recorded-only (mount recursion is a follow-up).
 function leaf(uri, ctx) {
-  const g = ctx._get, out = ctx.out;
+  const g = ctx._get, out = getOut(ctx);
   const u = new URI(uri);
   const rel = u.path || "";
   const newSha = u.query || "";          // URI-009: "" = present-empty = delete leaf
@@ -883,6 +888,31 @@ function delSweep(row, ctx) {
 //  in push order (newest-first by author ts), then file rows — new+upd
 //  interleaved lex by path, THEN del lex by path.  A stable partition keeps the
 //  post block put; the file groups sort by uri.
+//  JAB-003: get's output spans MANY dispatches (seed banner + post rows, then a
+//  per-leaf row each), so accumulate descriptors on ctx._get and flush ONE
+//  sorted hunk at the DELSWEEP terminal — a per-call adapter can't span these.
+function getOut(ctx) {
+  return {
+    banner: function (verb, uri, ts) { ctx._get.head = { verb: verb, uri: uri, ts: ts }; },
+    row: function (uri, verb, ts, tag) {
+      (ctx._get.rows || (ctx._get.rows = [])).push(
+        { uri: uri, verb: verb, ts: ts, _post: !!(tag && tag._post) });
+    },
+  };
+}
+
+//  Flush the accumulated rows as ONE get hunk (uri `get:<head>`): the header row
+//  first, then sortGetRows (post, new/upd lex, del lex).  Idempotent guard.
+function flushGet(ctx) {
+  const g = ctx && ctx._get;
+  if (!g || !g.head || !ctx.sink || g._flushed) return;
+  g._flushed = true;
+  const out = hunkrows(ctx.sink, "get:" + g.head.uri);
+  out.row(g.head.uri, g.head.verb, g.head.ts);
+  for (const r of sortGetRows(g.rows || [])) out.row(r.uri, r.verb, r.ts);
+  out.done();
+}
+
 function sortGetRows(rows) {
   const post = [], nu = [], del = [];
   for (const r of rows) {

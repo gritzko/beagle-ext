@@ -118,6 +118,9 @@ function run(opts) {
   }
   q.markDone();
   q.close(true);                       // clean exit: trim + unlink the queue
+  //  JAB-003: a handler may register ctx._finalize to emit ONE accumulated hunk
+  //  after the whole queue drains (get: fan-out rows collected across dispatches).
+  if (ctx._finalize) ctx._finalize(ctx);
   //  A handler may set ctx.outSort (a flush comparator) to own its render
   //  order at the edge — GET: new+upd lex, then del lex (JSQUE-009).
   return { dispatched: dispatched, order: order, outSort: ctx.outSort };
