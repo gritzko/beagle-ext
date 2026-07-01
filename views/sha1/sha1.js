@@ -54,6 +54,9 @@ const be     = require("../../core/discover.js");
 const store  = require("../../shared/store.js");
 const shalib = require("../../shared/util/sha.js");
 const isFullSha = shalib.isFullSha;
+//  JAB-003: TRUE-hunk output via the shared columnar→hunk adapter (ctx.sink),
+//  retiring the ctx.out columnar path for this view.
+const hunkrows = require("../../shared/hunkrows.js");
 
 const HASH_MIN_HEX = 4;   // keeper/KEEP.h: the `?<hex>`→fragment promotion floor
 
@@ -111,7 +114,6 @@ function commitOrTree(k, sha) {
 }
 
 module.exports = function handle(row, ctx) {
-  const out  = ctx && ctx.out;
   const repo = (ctx && ctx.repo) || be.find();
   if (!repo) return;
 
@@ -167,7 +169,11 @@ module.exports = function handle(row, ctx) {
   //  PROJNONE: unresolvable -> write NOTHING (no '\n').
   if (!target || !isFullSha(target)) return;
 
-  //  Emit the 41-byte line through the emit sink's raw lane (verbatim in plain
-  //  AND colour; the loop edge owns the fd-1 flush).  out.raw appends the '\n'.
-  if (out) out.raw(target);
+  //  Emit the 41-byte line as ONE raw row into a TRUE hunk at the canonical
+  //  `sha1:<path>` (verbatim in plain AND colour; out.raw appends the '\n').
+  if (ctx && ctx.sink) {
+    const out = hunkrows(ctx.sink, "sha1:" + first);
+    out.raw(target);
+    out.done();
+  }
 };

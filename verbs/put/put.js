@@ -38,11 +38,28 @@ const ulog    = require("../../shared/ulog.js");
 const render  = require("../../view/render.js");      // SUBS-044: sub-banner line
 const wire    = require("../../shared/wire.js");      // GIT-014: wire push
 const isFullSha = require("../../shared/util/sha.js").isFullSha;
+//  JAB-003: TRUE-hunk output via the shared columnar→HUNK adapter (ctx.sink),
+//  retiring ctx.out for this verb (scheme "put:" opens the banner/sub hunks).
+const hunkrows = require("../../shared/hunkrows.js");
 
 //  JSQUE-010: the `put:` banner + per-row lines now render through the emit sink
 //  (ctx.out, JSQUE-005), not a local render.js call — the loop does ONE flush.
 const PUTDUP = "PUTDUP";
 const SNIFFFAIL = "SNIFFFAIL";
+
+//  JAB-003: the ONE per-run hunk adapter (ctx.sink) shared across handle and its
+//  delegates; scheme "put:" so the banner opens the hunk, sub-banners open subs.
+function putOut(ctx) {
+  if (!ctx || !ctx.sink) return null;
+  if (!ctx._putOut) ctx._putOut = hunkrows(ctx.sink, null, "put:");
+  return ctx._putOut;
+}
+//  JAB-003: flush the run's ONE put: hunk on its LAST handle call (put has no
+//  fan-out: one call per seed row, or one call for a 0-row placeholder run).
+function putFlush(ctx) {
+  if (!ctx || !ctx._putOut) return;
+  if ((ctx._putHandleCalls || 0) >= (ctx.seededRowCount || 1)) ctx._putOut.done();
+}
 
 //  Normalise a bareword arg: `.`/`./` → "" (reporoot), strip a leading
 //  `./` (mirrors put_stage_named's reporoot normalisation).
@@ -249,12 +266,12 @@ function applyWire(repo, k, ctx) {
 //  old = the remote's advertised value (advertRefs), neu = the target sha;
 //  call wire.push DIRECTLY — no ancestor/FF check (that omission IS the force).
 function pushWire(repo, k, ctx, arg, u) {
-  const out = ctx && ctx.out;
+  const out = putOut(ctx);
   const hasQuery = (u.query || "") !== "";
   //  DIS-011: a bare `ssh://host/path` with NO ?ref is recorded, never pushed.
   if (!hasQuery && (u.path || "")) {
     if (out) {
-      if (!ctx._putBannerOpen) { ctx._putBannerOpen = true; out.banner("put", "put:", ron.now()); }
+      if (!ctx._putBannerOpen) { ctx._putBannerOpen = true; out.raw("put:"); }
       out.row(arg, "put", 0n);
     }
     return;
@@ -282,7 +299,7 @@ function pushWire(repo, k, ctx, arg, u) {
   const pack = wire.buildPushPack(serve, target, haves);
   wire.push(arg, [{ ref: wireRef, neu: target, old: old }], pack);
   if (out) {
-    if (!ctx._putBannerOpen) { ctx._putBannerOpen = true; out.banner("put", "put:", ron.now()); }
+    if (!ctx._putBannerOpen) { ctx._putBannerOpen = true; out.raw("put:"); }
     //  Banner: the remote base (any user #sha stripped) + `?branch#hashlet`.
     const hash = arg.indexOf("#");
     const base = hash >= 0 ? arg.slice(0, hash) : arg;
@@ -408,7 +425,7 @@ function bareStage(repo, wtl, k) {
 //  parent gitlink bump is POST's job (like stageInSub), so the parent records
 //  nothing here.  Reuses core/recurse.walk (mount gate, `.gitmodules` order).
 function bareStageSubs(repo, prefix, ctx) {
-  const out = ctx && ctx.out;
+  const out = putOut(ctx);
   recurse.walk(repo, prefix, function (subRepo, subPrefix) {
     //  SUBS-044: this sub FIRST (banner + own rows + relay-frame blanks), THEN
     //  its grandchildren — native's pre-order, banner-on-entry, then descend.
@@ -416,8 +433,7 @@ function bareStageSubs(repo, prefix, ctx) {
     const r = bareStage(subRepo, wtlog.open(subRepo), subK);  // may throw PUTAMBIG
     commitOps(subRepo, r.ops, ctx && ctx.T0);
     if (out) {
-      out.raw(render.dateCol(ron.now()) + " " + render.verbCol("put") +
-              " put:" + subPrefix);                                // sub banner
+      out.raw("put:" + subPrefix);                                // sub banner (hunk uri)
       let staged = 0;
       for (const op of r.ops)
         if (op.path !== null && !op.silent) {
@@ -455,7 +471,7 @@ function subMountPrefix(repo, rel) {
 //  parent records nothing (the gitlink bump is POST's job).  The row shows its
 //  full top-relative path under the `put:` banner; tallies feed PUTNONE.
 function stageInSub(repo, pfx, uri, ctx) {
-  const out = ctx && ctx.out;
+  const out = putOut(ctx);
   const subRepo = be.find(join(repo.wt, pfx));
   const subK = store.open(subRepo.storePath, subRepo.project);
   const u = new URI(uri);
@@ -465,7 +481,7 @@ function stageInSub(repo, pfx, uri, ctx) {
     if (dst.indexOf(pfx + "/") === 0) dst = dst.slice(pfx.length + 1);
     subUri = subUri + "#" + dst;
   }
-  if (out && !ctx._putBannerOpen) { ctx._putBannerOpen = true; out.banner("put", "put:", ron.now()); }
+  if (out && !ctx._putBannerOpen) { ctx._putBannerOpen = true; out.raw("put:"); }
   const eng = stage.prep(subRepo, wtlog.open(subRepo), subK);
   const r = stageArg(eng, subRepo, subUri);
   commitOps(subRepo, r.ops, ctx && ctx.T0);
@@ -479,12 +495,14 @@ function stageInSub(repo, pfx, uri, ctx) {
   ctx._putCalls = (ctx._putCalls || 0) + 1;
   if (ctx._putCalls >= (ctx.seededRowCount || 1) && ctx._putStaged === 0) {
     if (ctx._putSkipped > 0) io.log("be put: no eligible paths\n");
+    if (out) out.done();                 // JAB-003: flush the partial hunk on the throw
     throw "PUTNONE";
   }
 }
 
 module.exports = function handle(row, ctx) {
-  const out = ctx && ctx.out;
+  const out = putOut(ctx);
+  if (ctx) ctx._putHandleCalls = (ctx._putHandleCalls || 0) + 1;   // JAB-003: run last-call gate
   const repo = (ctx && ctx.repo) || be.find((row && row.uri) || undefined);
   const k = store.open(repo.storePath, repo.project);
 
@@ -500,14 +518,14 @@ module.exports = function handle(row, ctx) {
   //  This row IS the wire target (the seed stripped its scheme/host to a bare
   //  path) — the push already ran in applyWire; never stage it as a file.
   if (ru.host || ru.authority || (ctx && ctx._putWirePaths &&
-      ctx._putWirePaths[ru.path || ruRaw])) return;
+      ctx._putWirePaths[ru.path || ruRaw])) { putFlush(ctx); return; }
 
   //  A 0-count seed means `row.uri` is the synthetic "." placeholder (a ref-only
   //  or no-arg run), NOT a real path arg — never stage it.  A ref-only run is
   //  done; a true no-arg `be put` is the bare whole-tree walk (PUT-004).
   const placeholder = ctx && ctx.seededRowCount === 0;
   if (placeholder) {
-    if ((ctx.refs || []).length) return;       // ref-only run: nothing to stage
+    if ((ctx.refs || []).length) { putFlush(ctx); return; }  // ref-only run: nothing to stage
     //  PUT-004: bare `be put` — auto-pair moves + tracked-dirty walk, sourced
     //  from the classifier + wtlog (bareStage).  Single in-process whole-tree
     //  fold (one handler invocation, like delete.js's batch sweep), reusing
@@ -515,7 +533,7 @@ module.exports = function handle(row, ctx) {
     //  Open the `put:` header BEFORE the walk (native PUTStage opens its table
     //  before move detection) so a PUTAMBIG refusal carries the same partial
     //  banner native does (the loop edge-catch flushes it on the throw).
-    if (out && !ctx._putBannerOpen) { ctx._putBannerOpen = true; out.banner("put", "put:", ron.now()); }
+    if (out && !ctx._putBannerOpen) { ctx._putBannerOpen = true; out.raw("put:"); }
     const r = bareStage(repo, wtlog.open(repo), k);  // may throw PUTAMBIG
     commitOps(repo, r.ops, ctx && ctx.T0);
     if (out)
@@ -524,6 +542,7 @@ module.exports = function handle(row, ctx) {
           out.row(op.dst ? (op.path + "#" + op.dst) : op.path, "put", 0n);
     //  SUBS-044: then recurse mounted subs (pre-order), staging their interior.
     bareStageSubs(repo, "", ctx);
+    putFlush(ctx);
     return;
   }
 
@@ -531,11 +550,11 @@ module.exports = function handle(row, ctx) {
   //  ([Submodules] §3) — delegate, don't refuse "exists but is not stageable".
   const argPath = normRel(new URI((row && row.uri) || "").path || "");
   const subPfx = argPath ? subMountPrefix(repo, argPath) : "";
-  if (subPfx) return stageInSub(repo, subPfx, (row && row.uri) || "", ctx);
+  if (subPfx) { stageInSub(repo, subPfx, (row && row.uri) || "", ctx); putFlush(ctx); return; }
 
   //  Open the shared `put:` table header ONCE (native opens it for every
   //  PUTStage run; the row lines below carry a BLANK date, native HUNK `.ts=0`).
-  if (out && !ctx._putBannerOpen) { ctx._putBannerOpen = true; out.banner("put", "put:", ron.now()); }
+  if (out && !ctx._putBannerOpen) { ctx._putBannerOpen = true; out.raw("put:"); }
 
   //  Stage this one arg (file / dir / move leaf), write its rows under the
   //  cohort T0, restamp, and push the banner lines (rows + skips) via ctx.out.
@@ -561,6 +580,8 @@ module.exports = function handle(row, ctx) {
   ctx._putCalls = (ctx._putCalls || 0) + 1;
   if (ctx._putCalls >= (ctx.seededRowCount || 1) && ctx._putStaged === 0) {
     if (ctx._putSkipped > 0) io.log("be put: no eligible paths\n");
+    if (out) out.done();                 // JAB-003: flush the partial hunk on the throw
     throw "PUTNONE";                     // non-zero exit (native PUTNONE)
   }
+  putFlush(ctx);
 };

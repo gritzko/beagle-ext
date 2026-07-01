@@ -40,6 +40,9 @@ const store  = require("../../shared/store.js");
 const wtlog  = require("../../shared/wtlog.js");
 const resolve = require("../../core/resolve.js");
 const isFullSha = require("../../shared/util/sha.js").isFullSha;
+//  JAB-003: TRUE-hunk output via the shared columnar→hunk adapter (ctx.sink),
+//  retiring the ctx.out columnar path for this view.
+const hunkrows = require("../../shared/hunkrows.js");
 
 //  Resolve the URI to a full object sha (KEEPResolveTree's sibling, minus the
 //  commit→tree deref).  A hex (full sha or 6..40 short prefix) in EITHER slot
@@ -71,7 +74,6 @@ function resolveObjectSha(k, wtl, query, frag) {
 }
 
 module.exports = function handle(row, ctx) {
-  const out  = ctx && ctx.out;
   const repo = (ctx && ctx.repo) || be.find();
   if (!repo) return;
 
@@ -97,8 +99,12 @@ module.exports = function handle(row, ctx) {
   const obj = k.getObject(sha);
   if (!obj || !obj.type) throw "TYPENONE";
 
-  //  3) emit the type word as ONE raw row (plain == colour: the type word
-  //  carries no THEME SGR, so a verbatim raw row is byte-correct in both).
-  if (out) out.raw(obj.type);
+  //  3) emit the type word as ONE raw row into a TRUE hunk at the canonical
+  //  `type:<uri>` (plain == colour: the type word carries no THEME SGR).
+  if (ctx && ctx.sink) {
+    const out = hunkrows(ctx.sink, "type:" + first);
+    out.raw(obj.type);
+    out.done();
+  }
   //  Read-only leaf: no fan-out.
 };

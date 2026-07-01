@@ -41,6 +41,9 @@ const store   = require("../../shared/store.js");
 const stage   = require("../../shared/stage.js");
 const ulog    = require("../../shared/ulog.js");
 const recurse = require("../../core/recurse.js");     // SUBS-044: mounted-sub walk
+//  JAB-003: TRUE-hunk output via the shared columnar→hunk adapter (ctx.sink),
+//  retiring ctx.out for the `delete:` table.
+const hunkrows = require("../../shared/hunkrows.js");
 
 const DELDIRTY = "DELDIRTY";
 const SNIFFFAIL = "SNIFFFAIL";
@@ -311,7 +314,6 @@ module.exports = function handle(row, ctx) {
 
   const flags = (ctx && ctx.flags) || [];
   const recursive = flags.indexOf("-r") >= 0 || flags.indexOf("--force") >= 0;
-  const out = ctx && ctx.out;
   const repo = (ctx && ctx.repo) || be.find();
   const k = store.open(repo.storePath, repo.project);
 
@@ -343,7 +345,13 @@ module.exports = function handle(row, ctx) {
     const uris = res.rows.map(function (r) { return { verb: "delete", uri: r.uri }; });
     ulog.append(repo.bePath, uris);
   }
-  emitBanner(out, res.banner);          // always (the open `delete:` table)
+  //  JAB-003: route the SAME banner through the hunk adapter (ctx.sink) — the
+  //  canonical `delete:` table hunk; done() flushes before any DELDIRTY throw.
+  if (ctx && ctx.sink) {
+    const out = hunkrows(ctx.sink, "delete:");
+    emitBanner(out, res.banner);        // always (the open `delete:` table)
+    out.done();
+  }
   if (res.dirty) {
     //  JSQUE-014: the loop edge now flushes the partial banner before the throw
     //  propagates (no per-handler flush); just emit the diag + throw.

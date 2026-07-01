@@ -190,16 +190,22 @@ Pager.prototype._viewUri = function () {
 Pager.prototype._resolveSpell = function (spell) {
   const s = spell.trim();
   if (!s) return s;
-  //  A malformed parse (a `verb param` call — spaces/quotes) is not a URI:
-  //  ride it through to the dispatcher (spellCall), never throw here.
-  let u; try { u = uri._parse(s); } catch (e) { return s; }
-  if (u.scheme) return s;                         // schemed → absolute spell
-  //  JAB-003: at a SCHEME view the URI is persistent state — mutate only the
-  //  slot named (scheme/path/?query stay, #frag resets); re-serialize via uri._feed.
+  //  JAB-003: a bare VERB is a CALL, not a URI — it ERASES the current URI
+  //  (`status`/`ls` → `status:`/`ls:`).  Only explicit URI forms inherit.
+  if (/^[a-zA-Z][a-zA-Z0-9]*$/.test(s)) return s + ":";
+  //  Not a URI (a `verb param` call — spaces/quotes) → ride to the dispatcher.
+  let t; try { t = new URI(s); } catch (e) { return s; }
   const cur = new URI(this._viewUri());
+  //  Explicit URI form is RELATIVE to the current URI: a schemed spell INHERITS
+  //  the path/?query it OMITS (`ls:` → `ls:test`); #fragment always resets.
+  if (t.scheme) {
+    if (!t.path) t.path = cur.path;
+    if (t.query === undefined) t.query = cur.query;
+    return t.toString();
+  }
+  //  A scheme-less `./x` / `?x` / `#x` mutates one slot of the current URI.
   if (cur.scheme) {
     cur.fragment = undefined;                     // a fresh command drops #frag
-    if (/^[a-zA-Z][a-zA-Z0-9]*$/.test(s)) { cur.scheme = s; return cur.toString(); }
     if (s[0] === ".") { cur.path = joinPath(cur.path || "", s); return cur.toString(); }
     if (s[0] === "?") { cur.query = s.slice(1); return cur.toString(); }
     if (s[0] === "#") { cur.fragment = s.slice(1); return cur.toString(); }
@@ -390,7 +396,10 @@ Pager.prototype._runSpell = function (spell) {
     const hunks = this.driveSpell ? this.driveSpell(s) : null;
     if (!hunks || hunks.length === 0) { this.message = "no hunks: " + s; return; }
     this.pushView(hunks);
-    this.view.uri = s;                            // track the current URI
+    //  view.uri must stay a VALID URI: a `verb param` / `verb(...)` CALL is not
+    //  one — record the verb's scheme (`post:`); a URI-nav records the URI.
+    const call = /^([a-zA-Z][a-zA-Z0-9]*)(\s|\()/.exec(s);
+    this.view.uri = call ? call[1] + ":" : s;    // JAB-003: track the current URI
   } catch (e) { this.message = "err: " + String(e); }
 };
 

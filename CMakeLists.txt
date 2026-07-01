@@ -1,6 +1,6 @@
 # beagle-ext (`be/`) — the JavaScript beagle extension: the resident dispatch
-# loop (main.js + core/ + verbs/ + views/) run by `jab`, plus its parity test
-# suite (test/, the beagle-ext-tests submodule).
+# loop (main.js + core/ + verbs/ + views/) run by `jab`, plus its golden-
+# snapshot test suite (test/, the beagle-ext-tests submodule; JAB-003).
 #
 # This project builds NOTHING: the toolchain it tests against — `be`, `jab`,
 # `keeper` — is EXTERNAL, produced by the beagle submodule.  So `be/` is pure

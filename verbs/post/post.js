@@ -34,6 +34,9 @@ const shalib   = require("../../shared/util/sha.js");
 const barrier  = require("../../core/barrier.js");
 const subs     = require("../../shared/subs.js");     // DIS-058 D6: sub enum
 const wire     = require("../../shared/wire.js");      // GIT-013: wire push
+//  JAB-003: TRUE-hunk output via the shared columnar->hunk adapter (ctx.sink),
+//  retiring the ctx.out columnar path for post.
+const hunkrows = require("../../shared/hunkrows.js");
 const join = pathlib.join;
 const isFullSha = shalib.isFullSha;
 
@@ -234,7 +237,7 @@ function resolveTarget(query, curBranch) {
 //    * POSTNONE  — target already AT (or ahead containing) cur's tip;
 //    * POSTNOFF  — target's tip is not an ancestor of cur (a non-FF advance).
 //  An ABSENT target branch is CREATED at cur's tip (the FF-from-nothing case).
-function advanceBranch(reader, wtl, info, out, target, curBranch, parent,
+function advanceBranch(reader, wtl, info, ctx, target, curBranch, parent,
                        haveBaseline) {
   if (!haveBaseline || !parent)
     throw "POSTNONE: no cur tip to advance `?" + target + "` to";
@@ -258,10 +261,12 @@ function advanceBranch(reader, wtl, info, out, target, curBranch, parent,
   //  are left untouched (a bare advance makes no commit and does not retie).
   advanceRef(reader, reader.shard, target, expectedOld, parent);
   //  Banner: a `post` row naming the advanced branch at cur's hashlet.
-  if (out) {
+  //  JAB-003: TRUE-hunk via the adapter (canonical uri `post:?<target>#<hashlet>`).
+  if (ctx && ctx.sink) {
     const stamp = ulog.nowAfter(wtlogTail(wtl));
-    out.raw(render0(out, "post", "post:", stamp));
+    const out = hunkrows(ctx.sink, "post:?" + target + "#" + parent.slice(0, 8));
     out.row("?" + target + "#" + parent.slice(0, 8), "post", stamp);
+    out.done();
   }
 }
 
@@ -272,7 +277,7 @@ function advanceBranch(reader, wtl, info, out, target, curBranch, parent,
 //  advert (read the remote's old sha), enforce FF (remote tip must be an
 //  ancestor of `tip` in the LOCAL DAG) BEFORE any wire write, build the thin
 //  pack of objects the remote lacks via `keeper upload-pack`, then push.
-function pushRemote(info, reader, out, remoteUri, branch, tip) {
+function pushRemote(info, reader, ctx, remoteUri, branch, tip) {
   if (!tip || !isFullSha(tip))
     throw "POSTNONE: no cur tip to push (commit first, then `be post //host`)";
   const wireRef = "refs/heads/" + ((branch && branch !== "main") ? branch
@@ -300,11 +305,13 @@ function pushRemote(info, reader, out, remoteUri, branch, tip) {
   const pack = wire.buildPushPack(serve, tip, haves);
   wire.push(remoteUri, [{ ref: wireRef, neu: tip, old: old }], pack);
 
-  if (out) {
+  //  JAB-003: TRUE-hunk via the adapter (canonical uri `post:<remote>?<br>#<tip>`).
+  if (ctx && ctx.sink) {
     const stamp = ulog.nowAfter(0n);
-    out.raw(render0(out, "post", "post:", stamp));
-    out.row(remoteUri + "?" + (branch || "") + "#" + tip.slice(0, 8),
-            "post", stamp);
+    const target = remoteUri + "?" + (branch || "") + "#" + tip.slice(0, 8);
+    const out = hunkrows(ctx.sink, "post:" + target);
+    out.row(target, "post", stamp);
+    out.done();
   }
 }
 
@@ -420,7 +427,6 @@ function postSubs(info, ctx) {
 function postOne(info, ctx, row) {
   const args  = (ctx && ctx.args)  || [];
   const flags = (ctx && ctx.flags) || [];
-  const out   = ctx && ctx.out;
   const force = flags.indexOf("--force") >= 0;
 
   const wtl = wtlog.open(info);
@@ -479,7 +485,7 @@ function postOne(info, ctx, row) {
   //  ships what cur already points at (the descendant cascade / commit-then-
   //  push is out of scope).  The FF gate + pack build live in pushRemote.
   if (slots.host) {
-    pushRemote(info, reader, out, slots.hostUri, target, parent);
+    pushRemote(info, reader, ctx, slots.hostUri, target, parent);
     return;                                  // no commit, no fan-out
   }
 
@@ -489,7 +495,7 @@ function postOne(info, ctx, row) {
   //  barrier path below).  Fires before the change-set classify (it commits
   //  nothing) and before the no-msg guard (a bare advance needs no message).
   if (slots.hasQuery && (m.msg == null || m.msg === "") && !slots.narrow) {
-    advanceBranch(reader, wtl, info, out, target, curBranch, parent,
+    advanceBranch(reader, wtl, info, ctx, target, curBranch, parent,
                   haveBaseline);
     return;                                  // no commit, no fan-out
   }
@@ -612,9 +618,9 @@ function postOne(info, ctx, row) {
     try { io.setMtime(join(info.wt, d.path), stamp); } catch (e) {}
   }
 
-  //  The `post:` banner (POST-018) via ctx.out: a commit confirmation row,
-  //  then the per-file change rows (add/mod/del), matching native's table.
-  emitBanner(out, commit.sha, m.msg, dres.decisions, stamp);
+  //  The `post:` banner (POST-018): a commit confirmation row, then the
+  //  per-file change rows (add/mod/del), matching native's table.
+  emitBanner(ctx, branchKey, commit.sha, m.msg, dres.decisions, stamp);
   //  Commit barrier leaf: no further fan-out.
 }
 
@@ -644,12 +650,15 @@ function wtlogTail(wtl) {
   return wtl.rows.length ? wtl.rows[wtl.rows.length - 1].ts : 0n;
 }
 
-//  Banner via ctx.out: the `post post:` header, the commit row
-//  `post ?<hashlet8>#<subject>`, then per-file `<verb> <path>` rows (ts=0n →
-//  blank-date column, like native).  add->`add`, modify->`mod`, unlink->`del`.
-function emitBanner(out, sha, message, decisions, stamp) {
-  out.raw(render0(out, "post", "post:", stamp));      // dated header
+//  Banner: the commit row `post ?<hashlet8>#<subject>`, then per-file
+//  `<verb> <path>` rows (ts=0n → blank-date column, like native).  add->`add`,
+//  modify->`mod`, unlink->`del`.
+//  JAB-003: TRUE-hunk via the adapter (canonical uri `post:?<branch>#<subject>`).
+function emitBanner(ctx, branchKey, sha, message, decisions, stamp) {
+  if (!(ctx && ctx.sink)) return;
   const subject = subjectOf(message);
+  const out = hunkrows(ctx.sink,
+    "post:?" + (branchKey || "") + (subject ? "#" + subject : ""));
   out.row("?" + sha.slice(0, 8) + (subject ? "#" + subject : ""), "post", stamp);
   for (const d of decisions) {
     let v;
@@ -658,14 +667,7 @@ function emitBanner(out, sha, message, decisions, stamp) {
     else continue;                          // keep rows are not reported
     out.row(d.path, v, 0n);                  // ts=0n → blank-date column
   }
-}
-
-//  The header line `<date7> post post:` — emit.row would columnise `post:` as
-//  a uri; we want the dated header verbatim, so render it with the same
-//  dateCol/verbCol the sink uses and push via out.raw (status's framing path).
-function render0(out, verb, text, ts) {
-  const render = require("../../view/render.js");   // JSQUE-016: render -> view/
-  return render.dateCol(ts) + " " + render.verbCol(verb) + " " + text;
+  out.done();
 }
 
 function subjectOf(msg) {

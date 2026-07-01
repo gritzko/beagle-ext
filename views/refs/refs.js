@@ -10,6 +10,9 @@
 //  `here = process.argv[1]` idiom would scan the wrong dir (JSQUE-002).
 const be = require(__dirname + "/../../core/discover.js");   // JSQUE-016: be.js -> core/
 const wtlog = require(__dirname + "/../../shared/wtlog.js");
+//  JAB-003: TRUE-hunk output via the shared columnar→hunk adapter (ctx.sink),
+//  retiring the io.log fd-1 bypass for this view.
+const hunkrows = require("../../shared/hunkrows.js");
 
 //  handle(row, ctx): row.uri is the worktree path to inspect (empty -> the
 //  loop's cwd via be.find()).  A trivial leaf verb: no fan-out, returns nothing.
@@ -25,15 +28,20 @@ module.exports = function handle(row, ctx) {
   //  `?trunk` — byte-match C `be head` (graf/LOG.c trunk label is `?`).
   const branch = cur.branch || "";
 
-  io.log("project:  " + (repo.project || "(unnamed)") + "\n");
-  io.log("wt:       " + repo.wt + "\n");
-  io.log("store:    " + repo.storePath + "\n");
-  io.log("be:       " + repo.bePath + "\n");
-  io.log("branch:   ?" + branch + "\n");
-  io.log("cur:      " + (cur.sha || "(none)") + "\n");
-  io.log("baseline: " + (base.sha || "(none)") + "\n");
-  io.log("rows:     " + log.rows.length + "\n");
-  io.log("boundary: pd="    + (bnd.pd    == null ? "-" : ron.encode(bnd.pd))
-                  + " patch=" + (bnd.patch == null ? "-" : ron.encode(bnd.patch))
-                  + "\n");
+  //  JAB-003: emit the report as ONE TRUE hunk at the canonical `refs:` uri;
+  //  each raw() line appends its own "\n" (retiring the io.log fd-1 bypass).
+  if (ctx && ctx.sink) {
+    const out = hunkrows(ctx.sink, "refs:");
+    out.raw("project:  " + (repo.project || "(unnamed)"));
+    out.raw("wt:       " + repo.wt);
+    out.raw("store:    " + repo.storePath);
+    out.raw("be:       " + repo.bePath);
+    out.raw("branch:   ?" + branch);
+    out.raw("cur:      " + (cur.sha || "(none)"));
+    out.raw("baseline: " + (base.sha || "(none)"));
+    out.raw("rows:     " + log.rows.length);
+    out.raw("boundary: pd="    + (bnd.pd    == null ? "-" : ron.encode(bnd.pd))
+                    + " patch=" + (bnd.patch == null ? "-" : ron.encode(bnd.patch)));
+    out.done();
+  }
 };

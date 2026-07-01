@@ -43,6 +43,9 @@ const store   = require("../../shared/store.js");
 const wtlog   = require("../../shared/wtlog.js");
 const resolve = require("../../core/resolve.js");
 const isFullSha = require("../../shared/util/sha.js").isFullSha;
+//  JAB-003: emit a TRUE hunk via ctx.sink (retiring ctx.out) through the shared
+//  columnar→HUNK adapter.
+const hunkrows = require("../../shared/hunkrows.js");
 
 //  JS-082: a FULL 40-hex sha passes through verbatim iff the object exists; a
 //  short prefix goes through resolveHexAny ({1,39} prefix scanner rejects 40).
@@ -115,7 +118,6 @@ function treeOf(k, sha) {
 }
 
 module.exports = function handle(row, ctx) {
-  const out  = ctx && ctx.out;
   const repo = (ctx && ctx.repo) || be.find();
   if (!repo) return;
 
@@ -142,9 +144,12 @@ module.exports = function handle(row, ctx) {
   const obj = k.getObject(sha);
   if (!obj) throw "SIZENONE";
 
-  //  3) emit ONE row: the decimal size.  out.raw appends the trailing "\n"; the
-  //     loop edge renders it verbatim (plain == colour for a bare number).
-  if (!out) return;
-  out.raw(String(obj.bytes.length));
+  //  3) emit ONE row: the decimal size, as a TRUE hunk on the canonical
+  //     JAB-003: size:<path> uri.  out.raw appends "\n"; done() flushes to sink.
+  if (ctx && ctx.sink) {
+    const out = hunkrows(ctx.sink, "size:" + first);
+    out.raw(String(obj.bytes.length));
+    out.done();
+  }
   //  Read-only leaf: no fan-out.
 };

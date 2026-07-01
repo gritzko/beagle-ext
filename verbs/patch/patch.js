@@ -42,6 +42,9 @@ const weave     = require("../../shared/weave.js");
 //  spine; submount = fetch the theirs sub-pin when the sub shard lacks it.
 const recurse   = require("../../core/recurse.js");
 const submount  = require("../../shared/submount.js");
+//  JAB-003: TRUE-hunk output via the shared columnar→hunk adapter (ctx.sink),
+//  retiring the ctx.out columnar path for this verb.
+const hunkrows  = require("../../shared/hunkrows.js");
 const join = pathlib.join;
 
 //  A commit id for the weave is the hi64 of its sha1, a 16-char hex hashlet
@@ -356,7 +359,6 @@ function patchRowUri(scope, theirs) {
 //  rides ctx.repo, output goes through ctx.out (ONE flush at the loop edge),
 //  sibling libs via relative ./.  No process.argv read, no self-run tail.
 module.exports = function handle(row, ctx) {
-  const out = ctx && ctx.out;
   const info = (ctx && ctx.repo) || be.find((row && row.uri) || undefined);
   const wtl = (ctx && ctx.resolved && ctx.resolved._wtl) || wtlog.open(info);
   const reader = (ctx && ctx.resolved && ctx.resolved._reader)
@@ -404,7 +406,7 @@ module.exports = function handle(row, ctx) {
   //  POST-011 noop gate: nothing absorbed → no row, no restamp.
   const absorbed = st.takeTheirs + st.merged + st.mergedConflict +
                    st.added + st.deleted + st.modDelKept + st.failed;
-  if (absorbed === 0) { emitBanner(out, sc, rc.rows, 0n); return; }
+  if (absorbed === 0) { emitBanner(ctx, sc, rc.rows, 0n); return; }
 
   //  THE PROVENANCE-FOLD BARRIER: cohort-T0 — ONE ts for the single `patch`
   //  row AND every file restamp (the stamp-set invariant).  Exactly ONE row
@@ -440,7 +442,7 @@ module.exports = function handle(row, ctx) {
     try { io.setMtime(join(info.wt, p), stamp); } catch (e) {}
   }
 
-  emitBanner(out, sc, rc.rows, ts);
+  emitBanner(ctx, sc, rc.rows, ts);
 };
 
 //  DIS-058 D17 (POST-ORDER sub descent, mirrors post.js postSubs): for each
@@ -499,15 +501,17 @@ function runSubPatch(info, ctx, subRepo, job) {
   //  empty fork (root-pinned sub) drops to the no-base degenerate merge.
   const subTriple = { scope: "NAMED", branch: "", ours: job.ours,
                       theirs: job.theirs, fork: job.fork };
-  const subCtx = { repo: subRepo, out: ctx && ctx.out, triple: subTriple,
+  const subCtx = { repo: subRepo, sink: ctx && ctx.sink, triple: subTriple,
                    flags: (ctx && ctx.flags) || [] };
   module.exports({ uri: subRepo.wt }, subCtx);
 }
 
-//  Banner via ctx.out: a `patch:` header (raw framing) then the per-file status
-//  rows (applied / merged / cnf / del / modl) at ts=0n (blank-date column).
-//  DIS-057 untied JS patch output from native (conf→cnf, pat/mrg/cnf stamps).
-function emitBanner(out, sc, rows, ts) {
-  out.row("patch:", "patch", ts);
+//  Banner as a TRUE hunk: the canonical `patch:<rowUri>` hunk header, then the
+//  per-file status rows (applied / merged / cnf / del / modl) at ts=0n.
+//  JAB-003: route the SAME rows through the ctx.sink adapter, retiring ctx.out.
+function emitBanner(ctx, sc, rows, ts) {
+  if (!(ctx && ctx.sink)) return;
+  const out = hunkrows(ctx.sink, "patch:" + patchRowUri(sc.scope, sc.theirs));
   for (const r of rows) out.row(r.path, r.status, 0n);
+  out.done();
 }
