@@ -118,7 +118,9 @@ function parseSlots(args) {
       //  branch query; the push runs in postOne after cur's tip resolves.
       slots.host = true;
       slots.hostUri = a;
-      if (u.query) { slots.hasQuery = true; slots.query = u.query; }
+      //  GIT-015 defect B: a `?` marker (even empty `?` = trunk) means a branch
+      //  WAS selected; only a `?`-less host URI is the "no branch" refusal case.
+      if (a.indexOf("?") >= 0) { slots.hasQuery = true; slots.query = u.query || ""; }
       continue;
     }
     //  Query slot: a non-empty query (`?branch`/`?..`/`?other`) OR the bare
@@ -277,11 +279,21 @@ function advanceBranch(reader, wtl, info, ctx, target, curBranch, parent,
 //  advert (read the remote's old sha), enforce FF (remote tip must be an
 //  ancestor of `tip` in the LOCAL DAG) BEFORE any wire write, build the thin
 //  pack of objects the remote lacks via `keeper upload-pack`, then push.
-function pushRemote(info, reader, ctx, remoteUri, branch, tip) {
+function pushRemote(info, reader, ctx, remoteUri, branch, tip, hasQuery) {
   if (!tip || !isFullSha(tip))
     throw "POSTNONE: no cur tip to push (commit first, then `be post //host`)";
-  const wireRef = "refs/heads/" + ((branch && branch !== "main") ? branch
-                                                                  : "main");
+  //  GIT-015 defect B: no `?` slot = no branch selected — never silently push
+  //  cur onto the umbrella `main`; refuse (use `?/PROJ` to pick a trunk).
+  if (!hasQuery)
+    throw "POSTNOREF: no branch selected — use `?/PROJ` to pick a trunk";
+  //  GIT-015 defect A: `?/project` is the absolute trunk; strip the leading
+  //  absolute-marker `/` so it resolves to refs/heads/project, not //project.
+  const bare = (branch && branch[0] === "/") ? branch.slice(1) : branch;
+  const wireRef = "refs/heads/" + ((bare && bare !== "main") ? bare : "main");
+  //  GIT-015 defect A guard: an empty path segment (`refs/heads//…`, trailing
+  //  `/`) is a funny ref — refuse in jab BEFORE the wire write, never send it.
+  if (/\/\//.test(wireRef) || wireRef[wireRef.length - 1] === "/")
+    throw "POSTREF: empty ref segment in `" + wireRef + "` — bad branch target";
   //  Drain the remote receive-pack advert to learn its current tip (old sha).
   //  classify() picks ssh/local/http from the URI; push() returns its refs.
   const adv = wire.advertRefs(remoteUri, "receive-pack");
@@ -308,7 +320,10 @@ function pushRemote(info, reader, ctx, remoteUri, branch, tip) {
   //  JAB-003: TRUE-hunk via the adapter (canonical uri `post:<remote>?<br>#<tip>`).
   if (ctx && ctx.sink) {
     const stamp = ulog.nowAfter(0n);
-    const target = remoteUri + "?" + (branch || "") + "#" + tip.slice(0, 8);
+    //  GIT-015: remoteUri already carries the `?branch` slot (POSTNOREF gate
+    //  guarantees it) — append only the `#tip` pin, never re-add `?branch`
+    //  (that doubled it to `?main?main`).
+    const target = remoteUri + "#" + tip.slice(0, 8);
     const out = hunkrows(ctx.sink, "post:" + target);
     out.row(target, "post", stamp);
     out.done();
@@ -334,7 +349,11 @@ module.exports = function handle(row, ctx) {
 //  postTree(info, ctx, row): recurse mounted subs (post-order), then postOne.
 function postTree(info, ctx, row) {
   const flags = (ctx && ctx.flags) || [];
-  if (flags.indexOf("--nosub") < 0) postSubs(info, ctx);
+  //  GIT-015: a Host-slot wire push (`post //host?ref`) is a single-repo wire
+  //  op — it must NOT fan out over submodules (a sub's cur is not the super's
+  //  tip; pushing it to the super's remote is a spurious non-FF → POSTNOFF).
+  const isPush = parseSlots((ctx && ctx.args) || []).host;
+  if (!isPush && flags.indexOf("--nosub") < 0) postSubs(info, ctx);
   return postOne(info, ctx, row);
 }
 
@@ -485,7 +504,7 @@ function postOne(info, ctx, row) {
   //  ships what cur already points at (the descendant cascade / commit-then-
   //  push is out of scope).  The FF gate + pack build live in pushRemote.
   if (slots.host) {
-    pushRemote(info, reader, ctx, slots.hostUri, target, parent);
+    pushRemote(info, reader, ctx, slots.hostUri, target, parent, slots.hasQuery);
     return;                                  // no commit, no fan-out
   }
 
