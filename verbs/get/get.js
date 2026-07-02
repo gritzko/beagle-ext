@@ -5,8 +5,8 @@
 //  rows — a per-dir Merkle-pruned reconcile that emits per-file write/merge
 //  leaves + per-path delete rows + recursive subdir rows.  Output goes via
 //  ctx.out (one flush at the loop edge).  A dirty-overlap PRE-PASS barrier
-//  guards the seed; a del-sweep BARRIER folds the delete leaves (core/barrier.js
-//  over the live queue ULog).  Pure JS over JABC + ./lib/* (libdog+abc).
+//  guards the seed; a del-sweep terminal follows the delete leaves (JSQUE-020:
+//  was a back-scan barrier).  Pure JS over JABC + ./lib/* (libdog+abc).
 //
 //  ROW VOCABULARY (all under the `get` verb so this handler owns the tree):
 //    get <remote>                  SEED: fetch/redirect, anchor, enqueue root
@@ -33,7 +33,6 @@ const ingest   = require("../../shared/ingest.js");
 const pathlib  = require("../../shared/util/path.js");
 const ulog     = require("../../shared/ulog.js");
 const sha      = require("../../shared/util/sha.js");
-const barrier  = require("../../core/barrier.js");
 const be       = require("../../core/discover.js");
 //  JAB-003: get emits a TRUE hunk (accumulated across dispatches, flushed once).
 const hunkrows = require("../../shared/hunkrows.js");
@@ -864,27 +863,12 @@ function extOf(path) {
   return dot <= 0 ? "" : base.slice(dot + 1);
 }
 
-//  del-sweep BARRIER (get_drain_unlinks, GET.c:668): the trailing fold over the
-//  delete leaves.  Back-scans the live queue ULog from this fold row to the
-//  newest delete-bearing reconcile boundary, RE-READING the `get <p>?#<old>`
-//  delete rows in range (core/barrier.js) — a durable, idempotent aggregate.
-//  JS has no rmdir leaf (checkout.js note), so the empty-dir collapse is a
-//  no-op; the per-path `del` rows ARE the durable effect (already emitted).
+//  del-sweep terminal (get_drain_unlinks, GET.c:668): the post-order sweep
+//  point after the reconcile fans out its delete leaves.  JS has no rmdir leaf
+//  (checkout.js note), so the empty-dir collapse is a no-op; the per-path `del`
+//  rows ARE the durable effect (already emitted).  JSQUE-020: the former
+//  back-scan barrier only tallied an UNREAD ctx._get.delSwept — dropped.
 function delSweep(row, ctx) {
-  const q = ctx && ctx.queue;
-  if (q && q.path && row.offset != null) {
-    //  Fold ALL rows before this fold row, counting the delete leaves
-    //  (`get <p>?#<old>`: empty query + a fragment).  A sentinel markerVerb that
-    //  never appears makes seekBack miss, so the fold spans the whole queue head
-    //  → here (core/barrier.js).  Report-only: JS has no rmdir leaf, so the
-    //  empty-dir collapse is a no-op; the per-path `del` rows are the effect.
-    const res = barrier.fold(q.path, row.offset, "::root", function (acc, r) {
-      const u = new URI(r.uri);
-      if ((u.query || "") === "" && (u.fragment || "") !== "") acc++;   // a delete
-      return acc;
-    }, 0);
-    ctx._get.delSwept = res.acc;
-  }
 }
 
 //  Edge flush comparator (native get layout): pulled-commit `post` rows first

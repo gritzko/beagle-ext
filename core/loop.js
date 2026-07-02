@@ -1,11 +1,10 @@
 //  JSQUE-002: the resident dispatch loop.  ONE long-running process pulls
-//  `<verb> <uri>` rows off the core/job.js queue and dispatches each to a
+//  `<verb> <uri>` rows off an IN-MEMORY work queue and dispatches each to a
 //  resident handler via O(1) registry lookup; a handler may enqueue child
 //  rows (fan-out, consume-while-append).  Replaces fork-per-verb: the JSC
 //  arena + require cache are paid ONCE for the whole run.  See JSQUE-001/003.
 "use strict";
 
-const job = require("core/job.js");
 const registry = require("core/registry.js");
 //  JSQUE-008: the integration seam — the real seed (resolution-at-entry) and
 //  emit sink (output-as-ULog) replace the JSQUE-002 stubs in the CLI entry.
@@ -29,9 +28,6 @@ const pager = require(_here + "/views/bro/pager.js");
 //    opts.seedRows : [{verb, uri}]   the seed job list (argv lowered; JSQUE-004
 //                    delivers the real resolution-at-entry seed — here a stub
 //                    just forwards the rows).
-//    opts.queuePath: where the queue ULOG lives.  cli() ALWAYS passes a
-//                    per-process /tmp path (see _tmpQueue); the bare ".be/queue"
-//                    default here only bites a direct run() call with no path.
 //    opts.repo     : the opened repo handle (forwarded in ctx; loop is agnostic).
 //    opts.out      : the emit sink (JSQUE-005); a no-op stub is used if absent.
 //    opts.require  : the be-relative require of the caller (so the registry's
@@ -41,14 +37,14 @@ const pager = require(_here + "/views/bro/pager.js");
 function run(opts) {
   opts = opts || {};
   const seedRows = opts.seedRows || [];
-  const queuePath = opts.queuePath || ".be/queue";
   const req = opts.require || require;
 
   //  Resolve every distinct seed verb to a handler ONCE (warm cache).  A child
   //  verb a handler enqueues is resolved lazily on first sight (same cache).
   const handlers = registry.build(seedRows.map(function (r) { return r.verb; }), req);
 
-  const q = job.openOrResume(queuePath, seedRows);
+  //  JSQUE-020: the queue is now an IN-MEMORY FIFO (was a `.be/queue` ULOG).
+  const q = _memQueue(seedRows);
 
   //  ctx: the per-run context every handler shares (re-entrant — handlers keep
   //  no module-global accumulators; per-row state rides `row`).  This is the
@@ -116,14 +112,30 @@ function run(opts) {
     if (ctx.out && ctx.out.flush) ctx.out.flush(ctx.outSort || null);
     throw e;                           // re-propagate: process exit + stderr
   }
-  q.markDone();
-  q.close(true);                       // clean exit: trim + unlink the queue
   //  JAB-003: a handler may register ctx._finalize to emit ONE accumulated hunk
   //  after the whole queue drains (get: fan-out rows collected across dispatches).
   if (ctx._finalize) ctx._finalize(ctx);
   //  A handler may set ctx.outSort (a flush comparator) to own its render
   //  order at the edge — GET: new+upd lex, then del lex (JSQUE-009).
   return { dispatched: dispatched, order: order, outSort: ctx.outSort };
+}
+
+//  JSQUE-020: the in-memory work queue — a plain FIFO replacing the file-backed
+//  `.be/queue` ULOG (the durable-log/crash-resume machinery earned nothing once
+//  the barrier/fold was gone).  Exact consume-while-append semantics: `rows` is
+//  the seed batch; a monotonic `read` cursor walks it; a handler's {enqueue:[...]}
+//  appends at the TAIL and the cursor keeps draining (BFS/FIFO) until it hits the
+//  live end — identical order to the old ULOG read cursor over the fed watermark.
+function _memQueue(seedRows) {
+  const rows = seedRows.slice();
+  let read = 0;
+  return {
+    next: function () {
+      if (read >= rows.length) return undefined;   // reached the live tail
+      return rows[read++];
+    },
+    append: function (more) { for (const r of more) rows.push(r); return this; },
+  };
 }
 
 //  JAB-029: the in-memory HUNK sink — a grow-on-full HUNK ram log a content
@@ -198,11 +210,10 @@ function _viewDefault(token, here) {
 //  args into branch-free seed rows; run() drives the loop with the REAL emit
 //  sink; ONE out.flush(sort) at the edge renders the collected rows.  Replaces
 //  the 002 `_nullSink`/`opts.seedRows` stubs.
-//  opts2 (optional): an in-process re-entry override (JAB-028).  bro's address
-//  bar re-enters cli() to drive a spell; opts2.queuePath gives that SUB-run its
-//  OWN /tmp queue so it never shares — and unlinks on close — the OUTER loop's
-//  PID-keyed queue (that shared-unlink was the `No such file or directory`
-//  crash).  Absent (the normal CLI entry), the per-process queue stands.
+//  opts2 (optional): an in-process re-entry marker (JAB-028 / JSQUE-020).  bro's
+//  address bar re-enters cli() to drive a spell; each cli() now gets its OWN
+//  in-memory queue (run() builds one per call), so no queue path is threaded —
+//  opts2.reentry only gates the pager (a re-entry must NEVER open a nested one).
 function cli(argv, opts2) {
   opts2 = opts2 || {};
   //  Split flags (a leading '-') from the positional args — flags are seed
@@ -296,23 +307,12 @@ function cli(argv, opts2) {
           })
         : [{ verb: verb, uri: "." }];
 
-  //  JOBQ: the queue ALWAYS lives in /tmp keyed by PID — never in-repo.  A
-  //  PID-keyed name means a fresh run (new PID) can never RESUME a DEAD
-  //  process's leftover queue (the stale-dispatch / `verb '0'` bug); the path
-  //  is per-process, so two concurrent runs get distinct files (no collision).
-  //  A repo-less GET (fresh clone) keys off cwd; a repo run keys off its bePath.
-  //  JAB-028: a re-entry sub-run takes opts2.queuePath so it never shares the
-  //  outer loop's PID+bePath-keyed queue (whose close-unlink crashed the outer).
-  const queuePath = opts2.queuePath ? opts2.queuePath
-        : repo ? _queuePath(repo)
-        : _tmpQueue(io.cwd());
-
   const out = emit.create({ color: color });   // JAB-025: tty/--color gate
   //  JAB-029: the content-view HUNK sink (cat/grep/spot/regex feed it, no fd 1);
   //  cli OWNS the one renderHunkLog(sink.log, mode) -> fd 1 edge write below.
   const sink = _hunkSink();
   const res = run({
-    seedRows: seedRows, queuePath: queuePath, repo: repo, require: require,
+    seedRows: seedRows, repo: repo, require: require,
     out: out, sink: sink, flags: flags, refs: seeded.refs, resolved: sctx,
     mode: mode,              // the shared color/tlv/plain output mode (ctx.mode)
     triple: seeded.triple,   // JSQUE-013: forward the seed-pinned PATCH triple
@@ -324,9 +324,9 @@ function cli(argv, opts2) {
   //  JAB-030: the UNIVERSAL pager edge.  ONE output gate picks the render by the
   //  tty: on a TTY the interactive bro Pager over the run's hunk stream; on a
   //  PIPE/redirect (or --plain/--tlv, or an in-process re-entry) the plain dump.
-  //  An in-process re-entry (opts2.queuePath — bro's driveSpell capturing --tlv)
+  //  An in-process re-entry (opts2.reentry — bro's driveSpell capturing --tlv)
   //  must NEVER open a nested pager: it stays the plain/tlv dump it captures.
-  const wantPager = io.isatty(1) && mode !== "tlv" && !opts2.queuePath &&
+  const wantPager = io.isatty(1) && mode !== "tlv" && !opts2.reentry &&
                     flags.indexOf("--plain") < 0;
   if (wantPager) {
     //  Gather the run's hunks for the viewport: the content-view sink (cat/grep/
@@ -374,41 +374,8 @@ function _openPager(hunks) {
   } finally { if (own) { try { io.close(fd); } catch (e) {} } }
 }
 
-//  JOBQ: this process's PID, for the per-process queue name (the portable POSIX
-//  `io.getpid()` leaf — no /proc, no platform-specifics).  The PID makes the
-//  queue path unique per run, so a dead process's queue is NEVER resumed and
-//  two concurrent (forked-worker) runs never collide.
-function _pid() {
-  return String(io.getpid());
-}
-
-//  JOBQ: the queue ALWAYS lives in /tmp, keyed by USER + PID + a path key.  No
-//  in-repo `.be/queue` (that file leaked into the working tree and, PID-less,
-//  was resumed across runs).  PID-keyed ⇒ no stale resume, no fork collision.
-function _tmpQueue(key) {
-  return "/tmp/.bequeue." + (io.getenv("USER") || "x") + "." + _pid() +
-         "." + String(key).split("/").join("_");
-}
-
-//  The per-process /tmp queue path keyed by the repo's bePath — replaces the
-//  old in-repo `.be/queue` (primary) / un-PID'd /tmp scratch (secondary): both
-//  now route through _tmpQueue so EVERY case is PID-keyed and unlinked on exit.
-function _queuePath(repo) {
-  return _tmpQueue(repo.bePath || "");
-}
-
-//  JAB-028: a DISTINCT /tmp queue path for an in-process re-entry (driveSpell).
-//  Same PID + bePath as the outer queue would collide — a clean-exit close
-//  unlinks it out from under the still-live outer loop (the ENOENT crash).  A
-//  per-process monotonic counter makes every sub-run's queue its own file.
-let _subSeq = 0;
-function subQueuePath(key) {
-  _subSeq++;
-  return _tmpQueue((key || "") + ".sub" + _subSeq);
-}
-
 //  JSQUE-016: always required (via the be/main.js entry shim), so export
 //  run/cli; the shim self-runs cli() when invoked directly.
 if (typeof module !== "undefined")
-  module.exports = { run: run, cli: cli, subQueuePath: subQueuePath };
+  module.exports = { run: run, cli: cli };
 else cli(process.argv);

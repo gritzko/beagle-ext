@@ -122,13 +122,12 @@ function driveSpell(spell) {
     if (fd === 1) { chunks.push(b.data().slice()); return; }
     return orig(fd, b);
   };
-  //  JAB-028 crash fix: the re-entrant cli MUST NOT reuse the outer loop's
-  //  PID+bePath queue (its clean-exit close unlinks it → outer ENOENT).  Hand
-  //  it a DISTINCT per-call /tmp queue (subQueuePath) so only its own file is
-  //  unlinked.  (fd-1 capture stays interim; JAB-029 retires the monkey-patch.)
+  //  JSQUE-020: each cli() now builds its OWN in-memory queue, so the re-entrant
+  //  sub-run no longer needs a distinct queue path (the old file-queue shared-
+  //  unlink crash is gone); opts2.reentry only marks it so no nested pager opens.
   const argv = call ? ["jab", "loop.js"].concat(call, ["--tlv"])
                     : ["jab", "loop.js", spell, "--tlv"];
-  try { loop.cli(argv, { queuePath: loop.subQueuePath(spell) }); }
+  try { loop.cli(argv, { reentry: true }); }
   finally { io.writeAll = orig; }
   let total = 0; for (const c of chunks) total += c.length;
   const tlv = new Uint8Array(total);

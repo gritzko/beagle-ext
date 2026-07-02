@@ -1,7 +1,7 @@
 //  post.js — `be post` as a loop HANDLER (JSQUE-012; was the JS-051 one-shot).
 //  Converted from `main();` to `module.exports = handle(row, ctx)`: the commit
-//  is a BARRIER (core/barrier.js) — a boundary marker + the decision leaf rows
-//  + a fold row, back-scanned and folded post-order (blobs->subtrees->root
+//  is a JOIN over the whole in-memory decision set (JSQUE-020: was a durable
+//  back-scan barrier), built post-order (blobs->subtrees->root
 //  tree->commit->ref-advance).  The refuse PRE-FLIGHT runs as a pre-loop gate
 //  BEFORE the first store write (no orphans).  Output via ctx.out; sibling libs
 //  via relative ./ requires (JSQUE-008).  Pure JS over libabc+libdog ONLY.
@@ -11,7 +11,7 @@
 //  (the unified classifier reads a patch-derived file as pat/mrg/cnf, the
 //  consumer commits its merged content) — no more POSTSCOPE throw.
 //  PARALLEL/RESUME follow-up: the keeper-pack idempotency guard (no double
-//  pack-write on a barrier re-fold) is NOT built here.
+//  pack-write on a re-run) is NOT built here.
 //
 //  Usage:  jab be/loop.js post '#msg' | post msg… | post -m msg  (SUT=loop)
 
@@ -31,7 +31,6 @@ const dag      = require("../../shared/dag.js");
 const ulog     = require("../../shared/ulog.js");
 const pathlib  = require("../../shared/util/path.js");
 const shalib   = require("../../shared/util/sha.js");
-const barrier  = require("../../core/barrier.js");
 const subs     = require("../../shared/subs.js");     // DIS-058 D6: sub enum
 const wire     = require("../../shared/wire.js");      // GIT-013: wire push
 const relate   = require("../../shared/relate.js");    // GIT-016: verdict spine
@@ -507,7 +506,7 @@ function postOne(info, ctx, row) {
   //  DIS-054 Query bare-advance (`?branch`/`?..`/`?` with NO commit content):
   //  FF-advance the target branch's REFS tip to cur's tip — no new commit, cur
   //  untouched.  A message present makes it a cross-branch COMMIT instead (the
-  //  barrier path below).  Fires before the change-set classify (it commits
+  //  commit path below).  Fires before the change-set classify (it commits
   //  nothing) and before the no-msg guard (a bare advance needs no message).
   if (slots.hasQuery && (m.msg == null || m.msg === "") && !slots.narrow) {
     advanceBranch(reader, wtl, info, ctx, target, curBranch, parent,
@@ -554,8 +553,8 @@ function postOne(info, ctx, row) {
   }
 
   //  6. Empty-commit refuse (POSTNONE): the new root tree equals baseline's.
-  //  Pre-build the tree (no store write yet) to compare; the barrier re-folds
-  //  the SAME decisions durably below.
+  //  Pre-build the tree (no store write yet) to compare; the commit re-builds
+  //  the SAME decisions below.
   const pre = commitM.buildTree(dres.decisions);
   const rootTreeSha = pre.rootTreeSha || commitM.EMPTY_TREE_SHA;
   if (haveBaseline && dres.haveBase && dres.baseTreeSha &&
@@ -566,18 +565,12 @@ function postOne(info, ctx, row) {
   if (m.msg == null || m.msg === "")
     throw "POSTNOMSG: a commit message is required (`be post '#msg'`)";
 
-  //  ===== COMMIT BARRIER (core/barrier.js: marker + back-scan fold) ======
-  //  The commit needs the WHOLE decision set at once (root tree depends on
-  //  every leaf), so it is a JOIN, not a per-unit job.  Emit a boundary
-  //  marker + one leaf row per decision + a `commit` fold row into a scratch
-  //  barrier ULOG (post-order: the fold sits after all its inputs), then
-  //  back-scan (marker, here) and fold the leaves bottom-up into the tree +
-  //  commit + ref-advance.  Durable re-read => idempotent over the range.
-  const tail = wtlogTail(wtl);
-  const stamp = ulog.nowAfter(tail);
+  //  JSQUE-020: the commit is a JOIN over the WHOLE decision set held in
+  //  memory (dres.decisions); the former durable back-scan barrier only
+  //  re-derived a leaf count, so assert it in-memory instead.
+  const stamp = ulog.nowAfter(wtlogTail(wtl));
   const author = authorIdent(info.storePath);
 
-  const bpath = barrierPath(info);
   const leaves = dres.decisions.map(function (d) {
     //  Each leaf is a branch-free decision row `<verb> path[?<old>]#<sha>`.
     let uri = d.path;
@@ -585,24 +578,13 @@ function postOne(info, ctx, row) {
     else if (d.verb === "keep") uri += "#" + d.sha;
     return { verb: d.verb, uri: uri };
   });
-  barrier.emit(bpath, "postmark", "?" + branchKey, leaves,
-               "commit", "?" + branchKey + "#" + stamp.toString());
-  const foldOff = lastFoldOffset(bpath, "commit");
+  if (leaves.length !== dres.decisions.length)
+    throw "POSTFOLD: leaf/decision count mismatch (" + leaves.length + " != " +
+          dres.decisions.length + ")";
 
-  //  The fold folds the (marker, here) leaf range into the commit.  We carry
-  //  the already-classified decisions (the durable leaf rows mirror them);
-  //  the fold re-reads the range to confirm the count, then builds the tree
-  //  post-order (blobs->subtrees->root) + the commit object.
-  const folded = barrier.fold(bpath, foldOff, "postmark",
-    function (acc, leaf) { acc.count++; return acc; }, { count: 0 });
-  if (folded.count !== leaves.length)
-    throw "POSTFOLD: barrier range mismatch (" + folded.count + " != " +
-          leaves.length + ")";
-
-  //  Build the tree (post-order bodies) + the commit object from the folded
-  //  decision set, then drop the scratch barrier ULOG.
+  //  Build the tree (post-order bodies) + the commit object from the
+  //  in-memory decision set.
   const tb = commitM.buildTree(dres.decisions);
-  cleanupBarrier(bpath);
 
   const commit = commitM.buildCommit({
     treeSha: tb.rootTreeSha || commitM.EMPTY_TREE_SHA,
@@ -613,7 +595,7 @@ function postOne(info, ctx, row) {
   });
 
   //  Write the keeper pack-log (+ idx) — the FIRST store mutation.  PARALLEL
-  //  follow-up: an idempotency guard (skip a re-pack on a barrier re-fold).
+  //  follow-up: an idempotency guard (skip a re-pack on a re-run).
   commitM.writePack(reader.shard, info.wt,
                     commit.body, tb.rootTreeSha, tb.bodies, dres.decisions);
 
@@ -636,28 +618,7 @@ function postOne(info, ctx, row) {
   //  The `post:` banner (POST-018): a commit confirmation row, then the
   //  per-file change rows (add/mod/del), matching native's table.
   emitBanner(ctx, branchKey, commit.sha, m.msg, dres.decisions, stamp);
-  //  Commit barrier leaf: no further fan-out.
-}
-
-//  --- barrier scratch ULOG (the commit JOIN) ----------------------------
-//  A primary `.be/` dir hosts `.be/post.barrier`; a secondary `.be` FILE has
-//  no dir, so scratch under /tmp keyed by bePath (unlinked after the fold).
-function barrierPath(info) {
-  const bp = info.bePath || "";
-  if (bp.slice(-6) === "/wtlog") return bp.slice(0, -6) + "/post.barrier";
-  const key = bp.split("/").join("_");
-  return "/tmp/.bepost.barrier." + (io.getenv("USER") || "x") + "." + key;
-}
-
-//  The offset of the newest `verb` row in the barrier ULOG (the fold row).
-function lastFoldOffset(path, verb) {
-  let off = -1;
-  ulog.each(path, function (log) { if (log.verb === verb) off = log.offset; });
-  return off;
-}
-
-function cleanupBarrier(path) {
-  try { io.unlink(path); } catch (e) {}
+  //  Commit leaf: no further fan-out.
 }
 
 //  The wtlog tail ts (for the monotonic stamp bump) — the last row's ts.

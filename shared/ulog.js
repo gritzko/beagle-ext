@@ -196,32 +196,10 @@ function _book(path, growRows) {
 //  Trim the booked file to its live write head and drop the mapping pin.
 function _trim(c) { abc.close(c); }
 
-//  appendInPlace(path, rows, ts): STREAMING tail-append — grow a file-backed
-//  ULOG without `append`'s O(N^2) whole-file drain+rewrite.  Each call books,
-//  feeds new rows at the watermark with monotonic ts (>= the optional `ts`
-//  floor, strictly past the tail), trims down, and closes.  The resident loop
-//  (core/job.js) instead holds ONE container open across appends; this is the
-//  crash-safe one-shot primitive it is built on.
-function appendInPlace(path, rows, ts) {
-  const o = _book(path, rows.length);
-  feedRows(o.c, rows, o.tail, ts);
-  _trim(o.c);
-}
+//  JSQUE-020: appendInPlace + feedRows retired with core/job.js (their sole
+//  callers).  _book/_trim stay as the crash-safe booked-file primitives.
 
-//  Feed `rows` onto an open container at its watermark, strictly past `tail`
-//  (and any explicit `floor` ts).  Each row's own ts is honoured if >= the
-//  running stamp; the container's monotonic guard keeps same-ms rows distinct.
-function feedRows(c, rows, tail, floor) {
-  let stamp = nowAfter(tail || 0n);
-  if (floor != null) { const f = BigInt(floor); if (f > stamp) stamp = f; }
-  for (const r of rows) {
-    const t = (r.ts != null && BigInt(r.ts) >= stamp) ? BigInt(r.ts) : stamp;
-    c.feed(r.verb, r.uri, t);
-    stamp = t + 1n;
-  }
-}
-
-//  --- REVERSE SEEK WRAPPERS (JSQUE-003, for the JSQUE-006 barrier fold) ----
+//  --- REVERSE SEEK WRAPPERS (JSQUE-003; JSQUE-020 dropped seekBack) --------
 
 //  Expose a RO ULOG with its whole length visible, run `fn(log)`, close.  The
 //  cursor is held only inside the frame (rule #4).
@@ -235,20 +213,6 @@ function _withRO(path, fn) {
 //  Read the row currently under a positioned cursor into a plain object.
 function _row(log) {
   return { offset: log.offset, ts: log.time, verb: log.verb, uri: log.uri };
-}
-
-//  seekBack(path, verb [, fromOffset]): REVERSE-scan from `fromOffset` (or the
-//  tail) back to the newest row with `verb` — the boundary marker a barrier
-//  folds from.  Wraps the binding's seekVerbRev (cont.cpp).  Returns the row
-//  (+ fromOffset) or undefined.
-function seekBack(path, verb, fromOffset) {
-  return _withRO(path, function (log) {
-    const from = (fromOffset != null) ? fromOffset : log.end;
-    const o = log.seekVerbRev(from, verb);
-    if (o < 0) return undefined;
-    const row = _row(log); row.fromOffset = from;
-    return row;
-  });
 }
 
 //  prevRow(path, offset): the row immediately preceding `offset` (its start is
@@ -266,8 +230,7 @@ function prevRow(path, offset) {
 
 module.exports = { each: each, drain: drain,
                    write: write, append: append, _stage: _stage,
-                   appendInPlace: appendInPlace, feedRows: feedRows,
                    _book: _book, _trim: _trim,
-                   seekBack: seekBack, prevRow: prevRow,
+                   prevRow: prevRow,
                    nowAfter: nowAfter, buildUlog: buildUlog,
                    ronToMs: ronToMs, ronStepMs: ronStepMs, CLOCKBAD: CLOCKBAD };

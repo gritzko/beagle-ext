@@ -2,7 +2,7 @@
 //  ONE handler, the VERB is the parameter: `ls` lists ONE directory as ONE
 //  hunk; `lsr` is the SAME listing plus a fan-out — it enqueues an `lsr:<child>`
 //  row per immediate subdir AND per mounted submodule, so the resident loop's
-//  job queue (core/job.js) drives the recursion BFS, ONE HUNK PER DIRECTORY,
+//  in-memory FIFO queue (JSQUE-020) drives the recursion BFS, ONE HUNK PER DIR,
 //  crossing store boundaries into submodules.  verbs/lsr/lsr.js is a one-line
 //  re-export of this module — same code, `row.verb` selects recurse.
 //
