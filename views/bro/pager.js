@@ -464,6 +464,11 @@ Pager.prototype._applySpell = function (cmd) {
   let verb = cur.verb, uristr = s;
   const m = /^([a-zA-Z][a-zA-Z0-9]*)(?:\s+([\s\S]*))?$/.exec(s);
   if (m) { verb = m[1]; uristr = m[2] || ""; }
+  //  DIS-060: a NON-URI arg — whitespace or quotes ⇒ a #fragment/message
+  //  (`post 'small fixes'`), NOT a slot edit — DRIVE the raw `verb args` spell so
+  //  the loop tokenizer + the verb classify the message (recomposing it as a URI
+  //  DROPPED it → POSTNOMSG).  See [URI]: a whitespace token is a fragment.
+  if (m && /[\s'"]/.test(uristr)) return this._driveApply(s, verb, "");
   const cu = this._parse(cur.uri), tu = this._parse(uristr);
   let path = tu.path;                            // relative path joins the view dir
   if (path !== undefined && path[0] !== "/") path = joinPath(dirOf(cu.path), path);
@@ -480,12 +485,18 @@ Pager.prototype._applySpell = function (cmd) {
   if (auth !== undefined && cpath !== undefined && cpath[0] !== "/") cpath = "/" + cpath;
   const newUri = URI.make(scheme, auth, cpath, query, frag);
   const spell  = (verb ? verb + " " : "") + newUri;
+  this._driveApply(spell, verb, newUri);
+};
+
+//  DIS-060: drive a resolved spell + track the view's (verb, uri).  Shared by the
+//  slot-edit path (a recomposed URI) and the message-call path (a raw spell).
+Pager.prototype._driveApply = function (spell, verb, uri) {
   try {
     const hunks = this.driveSpell ? this.driveSpell(spell) : null;
     if (!hunks || hunks.length === 0) { this.message = "no hunks: " + spell; return; }
     this.pushView(hunks);
     this.view.verb = verb;
-    this.view.uri  = newUri;
+    this.view.uri  = uri;
   } catch (e) { this.message = "err: " + String(e); }
 };
 

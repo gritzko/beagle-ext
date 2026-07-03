@@ -171,6 +171,22 @@ function resolveSlot(k, repo, parsed) {
   return (sha && isFullSha(sha)) ? { sha: sha, bannerHex: sha } : undefined;
 }
 
+//  DIS-060: the sub commit PINNED at parsed.path by the BASE tree gitlink —
+//  resolve the base ref (path IGNORED) in baseK, read the 160000 entry's sha.
+function subGitlinkPin(baseK, repo, parsed) {
+  const base = resolveSlot(baseK, repo, { query: parsed.query, fragment:
+    parsed.fragment, path: "", emptyFrag: parsed.emptyFrag, hasQuery: parsed.hasQuery });
+  if (!base) return undefined;
+  const treeSha = baseK.commitTree(base.sha);
+  const ent = treeSha ? baseK.descendPath(treeSha, parsed.path.split("/")) : undefined;
+  return (ent && ent.kind === "commit") ? ent.sha : undefined;
+}
+
+//  DIS-060: a full-sha target as a slot record (a `#` fragment hashlet).
+function pinFrag(sha) {
+  return { query: "", fragment: sha, path: "", emptyFrag: false, hasQuery: false };
+}
+
 //  --- the metadata hunk body (KEEPProjCommit bytes, PROJ.c:431-507) ---------
 //  Build the hunk body bytes + the per-field tok32 spans for --color.  The body
 //  is `commit <sha>\n` + the raw object's ordered headers + blank + message,
@@ -360,13 +376,20 @@ function commitOne(arg, ctx) {
   //  `?#<hex>` is a FRAGMENT slot (the `?` is empty), not an empty-query fail.
   if (parsed.fragment) parsed.hasQuery = false;
 
-  //  SUBS-045: a `commit:<sub>?<sha>` link from a descended log re-enters the
-  //  sub — DESCEND the mount prefix (shared splitter) so the sha resolves in
-  //  the SUB store, not the sub-blind base.  `rest` is "" for a pure mount
-  //  prefix (query/frag then names the target); a non-sub path is unchanged.
+  //  SUBS-045/DIS-060: `commit:<sub>?<ref>` descends into the mounted sub.  A
+  //  BASE ref (typed nav) names the sub commit PINNED by the base gitlink at
+  //  <sub>; a SUB ref (descended-log `?<sub-sha>` click) resolves in the sub.
+  //  Try the base pin first; on miss the sub-sha resolves in the sub (disjoint).
   if (parsed.path && parsed.path !== ".") {
+    const baseK = store.open(repo.storePath, repo.project);
+    const pin = (parsed.hasQuery || parsed.fragment)
+              ? subGitlinkPin(baseK, repo, parsed) : undefined;
     const d = recurse.resolveRepoForPath(repo, parsed.path);
-    if (d.prefix) { repo = d.repo; parsed.path = d.rest; }
+    if (d.prefix) {
+      repo = d.repo;
+      if (pin) Object.assign(parsed, pinFrag(pin));  // retarget to the pinned sub sha
+      else parsed.path = d.rest;                 // else keep the ref for the sub
+    }
   }
 
   const k = store.open(repo.storePath, repo.project);

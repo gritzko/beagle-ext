@@ -180,12 +180,14 @@ function ls() {
   const rdCache = {};
   const argv = arguments.length ? arguments : ["."];
   for (let i = 0; i < argv.length; i++) {
-    let arg = String(argv[i] || "");
-    let verb = "ls";
-    if (arg.indexOf("lsr:") === 0) { verb = "lsr"; arg = arg.slice(4); }
-    else if (arg.indexOf("ls:") === 0) { verb = "ls"; arg = arg.slice(3); }
+    //  DIS-060: PARSE the arg URI (never string-slice it) — ls is a FILESYSTEM
+    //  lister: only the scheme (lsr → recurse) + the PATH slot drive it, a
+    //  `?ref`/`#frag` is IGNORED (a committed-tree ref is tree:'s job).
+    let p; try { p = uri._parse(String(argv[i] || "")); } catch (e) { p = {}; }
+    const verb = p.scheme === "lsr" ? "lsr" : "ls";
+    const path = p.path || ".";
     const queue = verb === "lsr" ? [] : null;
-    lsOne(arg, verb, null, queue, rdCache);
+    lsOne(path, verb, null, queue, rdCache);
     while (queue && queue.length) lsOne(queue.shift(), "lsr", null, queue, rdCache);
   }
 }

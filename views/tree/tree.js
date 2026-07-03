@@ -35,6 +35,7 @@ const store  = require("../../shared/store.js");
 const wtlog  = require("../../shared/wtlog.js");
 const ambient = require("../../shared/ambient.js");   // JAB-004: ctx→be bridge
 const resolve = require("../../core/resolve.js");
+const recurse = require("../../core/recurse.js");   // DIS-060: gitlink → sub store
 
 //  BRO-006: a content-HUNK row carries a hidden `U`-tagged nav URI so a bro
 //  pager left-click on the entry NAME opens it — mirroring native `be tree:
@@ -185,7 +186,7 @@ function treeOne(arg, ctx) {
   //  collapse to the root; below-root ⇒ a leading `..` row.  A missing segment
   //  → TREENONE; a non-tree LEAF (file-as-tree) → TREEFAIL.
   const segs = path.split("/").filter(function (s) { return s !== "" && s !== "."; });
-  const leaf = k.descendPath(rootTree, segs);
+  let leaf = k.descendPath(rootTree, segs);
   if (!leaf) {
     //  descendPath returns undefined for BOTH a missing segment (PROJNONE) and a
     //  can't-descend-through-non-tree mid-path (PROJFAIL).  Native distinguishes
@@ -193,10 +194,23 @@ function treeOne(arg, ctx) {
     //  parity (the dog exit code split is not reproduced; see header).
     throw "TREENONE";
   }
+
+  //  DIS-060: a gitlink leaf (`tree <sub>?<ref>`) CROSSES into the mounted
+  //  submodule — list the tree of its PINNED commit (leaf.sha), mirroring the
+  //  commit: pin descent.  `treeK` is the sub store below a gitlink, else base.
+  let treeK = k;
+  if (leaf.kind === "commit") {
+    const d = recurse.resolveRepoForPath(repo, segs.join("/"));
+    if (!d.prefix) throw "TREEFAIL";            // gitlink not mounted → can't cross
+    treeK = store.open(d.repo.storePath, d.repo.project);
+    const st = commitOrTree(treeK, leaf.sha);
+    if (!st) throw "TREENONE";                  // pin absent from the sub store
+    leaf = { sha: st, mode: 0o40000, kind: "tree" };
+  }
   if (leaf.kind !== "tree") throw "TREEFAIL";   // file-as-tree / non-tree leaf
 
   const belowRoot = segs.length > 0;
-  const entries = k.readTree(leaf.sha);
+  const entries = treeK.readTree(leaf.sha);
   if (!entries) throw "TREEFAIL";               // leaf sha not a readable tree
 
   //  3) emit.  COLOUR leads with the banner band; PLAIN has no banner.  The
