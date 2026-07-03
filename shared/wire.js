@@ -553,12 +553,49 @@ function advertRefs(remoteUri, verb) {
     const reader = pkt.Reader(rfd);
     return drainRecvAdvert(reader, false);
   } finally {
-    //  We only wanted the advert; closing both ends + reaping aborts the peer
-    //  cleanly (a flush would also do, but the peer tolerates a hangup here).
+    //  GIT-019: a flush-pkt (0000) BEFORE close = zero commands + clean no-op
+    //  exit, so git-receive-pack does NOT print "remote end hung up".
+    try { io.writeAll(wfd, pkt.flushPkt()); } catch (e) {}
     try { io.close(wfd); } catch (e) {}
     try { io.close(rfd); } catch (e) {}
     try { io.reap(pid); } catch (e) {}
   }
+}
+
+//  GIT-019: open ONE git-receive-pack session (ssh/local spawn), drain its
+//  advert, and expose { adv, send(updates, pack), close() } so the caller can
+//  run the FF verdict off `adv`, build the pack, and send on the SAME child
+//  fds — no second advert, no reconnect.  http push stays stateless (pushHttp).
+//  `send` writes buildPushBody on the live wfd + parses report-status; `close`
+//  flush-closes (clean no-op exit) for the advert-only / non-FF refusal path.
+function pushSession(remoteUri) {
+  const sp = classify(remoteUri, "receive-pack");
+  if (sp.http) throw "wire.pushSession: http push is stateless — use push()";
+  const child = io.spawn(sp.bin, sp.argv);
+  const wfd = child.stdin, rfd = child.stdout, pid = child.pid;
+  const reader = pkt.Reader(rfd);
+  const adv = drainRecvAdvert(reader, false);
+  let done = false;
+  function reap() {
+    try { io.close(rfd); } catch (e) {}
+    try { io.reap(pid); } catch (e) {}
+  }
+  return {
+    adv: adv,
+    send: function (updates, packBytes) {
+      const body = buildPushBody(updates, adv.refs, packBytes);
+      io.writeAll(wfd, body);
+      io.close(wfd);
+      try { parseReportStatus(reader); } finally { done = true; reap(); }
+    },
+    //  GIT-019: flush-close = clean no-op exit (no hangup) on the refusal path.
+    close: function () {
+      if (done) return; done = true;
+      try { io.writeAll(wfd, pkt.flushPkt()); } catch (e) {}
+      try { io.close(wfd); } catch (e) {}
+      reap();
+    }
+  };
 }
 
 //  push(remoteUri, updates, packBytes): FF-advance a remote branch.
@@ -589,5 +626,5 @@ function push(remoteUri, updates, packBytes) {
   return result;
 }
 
-module.exports = { fetch, push, advertRefs, buildPushPack, classify,
-                   parseAdvLine, pickWant, isFullSha };
+module.exports = { fetch, push, pushSession, advertRefs, buildPushPack,
+                   classify, parseAdvLine, pickWant, isFullSha };

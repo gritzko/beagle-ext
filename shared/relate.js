@@ -39,12 +39,14 @@ function resolveRef(branch) {
 //  no branch selected (GIT-015 defect B) -> POSTNOREF.  The FF gate is a LOCAL
 //  walk from cur (tip) seeking the advertised old; a remote wh128 index, when
 //  present, lets that walk cross remote-only commits (pull side).
-function relate(keeper, remoteUri, branch, tip, hasQuery, remoteIx) {
+//  GIT-019: `adv` is INJECTABLE (mirrors `remoteIx`) — a caller holding a live
+//  push session's advert feeds it in; when absent we advertise internally (pull).
+function relate(keeper, remoteUri, branch, tip, hasQuery, remoteIx, adv) {
   if (!hasQuery)
     throw { code: "POSTNOREF",
             msg: "POSTNOREF: no branch selected — use `?/PROJ` to pick a trunk" };
   const wireRef = resolveRef(branch);
-  const adv = wire.advertRefs(remoteUri, "receive-pack");
+  if (!adv) adv = wire.advertRefs(remoteUri, "receive-pack");
   const cur = adv.refs.find(function (r) { return r.name === wireRef; });
   const old = cur ? cur.sha : "";
 

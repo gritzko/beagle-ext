@@ -283,23 +283,41 @@ function advanceBranch(reader, wtl, info, ctx, target, curBranch, parent,
 function pushRemote(info, reader, ctx, remoteUri, branch, tip, hasQuery) {
   if (!tip || !isFullSha(tip))
     throw "POSTNONE: no cur tip to push (commit first, then `be post //host`)";
+  //  GIT-019: ssh/local push runs on ONE receive-pack session — advertise once,
+  //  verdict off that advert, send on the SAME fds.  http is stateless (no
+  //  session): fall back to the classic advertRefs-inside-relate + wire.push.
+  const isHttp = !!wire.classify(remoteUri, "receive-pack").http;
+  let session = null;
+  if (!isHttp) {
+    try { session = wire.pushSession(remoteUri); }
+    catch (e) { throw (e && e.msg) ? e.msg : e; }
+  }
+  const sessAdv = session ? session.adv : undefined;
+
   //  GIT-016: the advertise->resolve->verdict spine (shared/relate.js) does the
   //  POSTNOREF gate + GIT-015 ref resolution + the LOCAL-DAG FF verdict.  A
   //  {code,msg} throw is re-raised as the SAME string message post always used.
+  //  GIT-019: feed the session advert in so relate does NOT re-advertise.
   let rel;
-  try { rel = relate.relate(reader, remoteUri, branch, tip, hasQuery); }
-  catch (e) { throw (e && e.msg) ? e.msg : e; }
+  try { rel = relate.relate(reader, remoteUri, branch, tip, hasQuery,
+                            undefined, sessAdv); }
+  catch (e) { if (session) session.close(); throw (e && e.msg) ? e.msg : e; }
   const wireRef = rel.wireRef, old = rel.old, adv = rel.adv;
 
   //  FF gate (POST stays FF-only), behaviour-preserving over the spine verdict.
+  //  GIT-019: a refusal flush-closes the session first (clean no-op exit).
   if (old) {
-    if (rel.verdict.eq)
+    if (rel.verdict.eq) {
+      if (session) session.close();
       throw "POSTNONE: remote `" + wireRef + "` already at cur's tip";
+    }
     //  GIT-016: honest non-FF refusal — post is FF-only, so no force hint; the
     //  remote ancestry is unknown here (no fetch) so no diverged/unrelated guess.
-    if (!rel.verdict.ff)
+    if (!rel.verdict.ff) {
+      if (session) session.close();
       throw "POSTNOFF: remote `" + wireRef + "` is not an ancestor of cur — " +
             "non-FF push refused";
+    }
   }
 
   //  Build the thin pack (objects the remote lacks) from the local store via
@@ -307,7 +325,11 @@ function pushRemote(info, reader, ctx, remoteUri, branch, tip, hasQuery) {
   const serve = info.storePath + "?/" + (info.project || "");
   const haves = adv.refs.map(r => r.sha).filter(isFullSha);
   const pack = wire.buildPushPack(serve, tip, haves);
-  wire.push(remoteUri, [{ ref: wireRef, neu: tip, old: old }], pack);
+  const updates = [{ ref: wireRef, neu: tip, old: old }];
+  //  GIT-019: send on the SAME session (ssh/local); http stays the stateless
+  //  GET-advert-then-POST-pack shape.
+  if (session) session.send(updates, pack);
+  else wire.push(remoteUri, updates, pack);
   //  GIT-016: SAVE the just-advanced remote tip as a remote-tracking refs row
   //  (ingest.saveRemoteRef, the get/clone row shape) so `be head //origin` reads it.
   ingest.saveRemoteRef(reader.shard, remoteUri, tip);
