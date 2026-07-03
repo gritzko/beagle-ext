@@ -28,6 +28,7 @@ const commitM  = require("./fold-commit.js");
 const conflict = require("../../shared/conflict.js");
 const dag      = require("../../shared/dag.js");
 const ulog     = require("../../shared/ulog.js");
+const uri      = require("../../shared/uri.js");   // JAB-005: total arg parse
 const pathlib  = require("../../shared/util/path.js");
 const shalib   = require("../../shared/util/sha.js");
 const subs     = require("../../shared/subs.js");     // DIS-058 D6: sub enum
@@ -112,7 +113,10 @@ function parseSlots(args) {
                   narrow: "", fragment: undefined };
   for (const a of args || []) {
     if (!a || a[0] === "#" || a[0] === "-") continue;   // #msg / -flag
-    const u = new URI(a);
+    //  JAB-005: total parse — a non-URI arg (spaces) is free-form message
+    //  text, not a slot; post's message picks it up.
+    const u = uri.parse(a);
+    if (typeof u === "string") continue;
     if (u.host) {
       //  GIT-013: a Host slot is a wire PUSH target (`//host?br`,
       //  `ssh://host?br`, `https://host?br`).  Capture the raw URI + its
@@ -187,7 +191,8 @@ function parseMessage(args, flags, slotFrag) {
 //  Is `a` a URI-slot arg (Query / Host / Path) rather than a message word?
 function isSlotArg(a) {
   if (!a || a[0] === "#" || a[0] === "-") return false;
-  const u = new URI(a);
+  const u = uri.parse(a);                   // JAB-005: total — non-URI => not a slot
+  if (typeof u === "string") return false;
   if (u.host || u.query) return true;
   if (a === "?") return true;               // bare trunk
   return isPathSlot(u.path);
