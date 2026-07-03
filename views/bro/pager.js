@@ -29,7 +29,8 @@ const SHORTCUTS = [
   [": ", "open the address bar (type any URI spell)"],
   [". # ? /", "open the address bar pre-filled with that char"],
   ["Enter", "follow the URI of the row at the cursor"],
-  ["- / BS", "back — pop to the previous view"],
+  ["- / BS", "back — pop to the previous view (refreshed)"],
+  ["R / r", "refresh — re-run the current view (keep the scroll pos)"],
   ["h", "this help screen"],
 ];
 
@@ -158,9 +159,10 @@ Pager.prototype.pushView = function (hunks) {
   this.setHunks(hunks);
 };
 Pager.prototype.popView = function () {
-  if (!this.stack.length) { this.message = "(no prev view)"; return; }
+  if (!this.stack.length) { this.message = "(no prev view)"; return false; }
   this.view = this.stack.pop();
   this.view.rows = null;                         // re-index for the live width
+  return true;                                   // DIS-060: back caller refreshes
 };
 
 //  JAB-030: the CURRENT view's base path — the first hunk's URI path — so a
@@ -387,8 +389,12 @@ Pager.prototype._keyScroll = function (b) {
     //  JAB-030: Enter FOLLOWS the URI of the hunk at the cursor row (its banner
     //  URI is itself a spell) — a mouse click follows the same path (_followRow).
     case 0x0d: case 0x0a: this._followRow(v.scroll); break;          // Enter
-    //  JAB-030: the BACK key POPS the view stack (a spell/follow pushed it).
-    case 0x2d: case 0x7f: case 0x08: this.popView(); break;          // - / BS
+    //  JAB-030/DIS-060: the BACK key POPS the view stack (a spell/follow pushed
+    //  it) and REFRESHES the restored prev view (re-run its spell, keep its pos).
+    case 0x2d: case 0x7f: case 0x08: if (this.popView()) this._refresh(); break;  // - / BS
+    //  DIS-060: `R`/`r` REFRESH — re-run the current view's spell IN PLACE (no
+    //  push), keeping the scroll pos, so a changed store/wt re-renders live.
+    case 0x52: case 0x72: this._refresh(); break;                    // R/r refresh
     //  BRO-007: `h` runs the `help:` spell — pushes views/help/help.js as a
     //  normal view (scrollable, `-`/BS backs out).  SHORTCUTS (above) is the
     //  single source the help: view mirrors; keep both in sync.
@@ -497,6 +503,25 @@ Pager.prototype._driveApply = function (spell, verb, uri) {
     this.pushView(hunks);
     this.view.verb = verb;
     this.view.uri  = uri;
+  } catch (e) { this.message = "err: " + String(e); }
+};
+
+//  DIS-060: REFRESH the current view — re-run its (verb, uri) spell and swap the
+//  hunks IN PLACE (no pushView, no back-stack entry), keeping the scroll pos so a
+//  changed store/wt re-renders where the user was.  render() clamps a now-shorter
+//  scroll.  Reconstructs the spell from _verbUri (tracked, else hunk-decoded).
+Pager.prototype._refresh = function () {
+  const v = this.view;
+  if (!v) return;
+  const vu = this._verbUri();
+  const spell = (vu.verb ? vu.verb + " " : "") + vu.uri;
+  if (!spell.trim()) { this.message = "(nothing to refresh)"; return; }
+  const scroll = v.scroll;
+  try {
+    const hunks = this.driveSpell ? this.driveSpell(spell) : null;
+    if (!hunks || hunks.length === 0) { this.message = "no hunks: " + spell; return; }
+    v.hunks = hunks; v.rows = null; v.scroll = scroll;   // re-index, keep the pos
+    this.message = "refreshed";
   } catch (e) { this.message = "err: " + String(e); }
 };
 
