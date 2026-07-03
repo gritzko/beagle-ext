@@ -23,6 +23,7 @@ const wtlog  = require("../../shared/wtlog.js");
 const resolve = require("../../core/resolve.js");
 const shalib = require("../../shared/util/sha.js");
 const recurse = require("../../core/recurse.js");
+const ambient = require("../../shared/ambient.js");   // JAB-004: ctx→be bridge
 const isFullSha = shalib.isFullSha;
 
 const LOG_MAX_WALK = 1 << 20;   // GRAF LOG_MAX_WALK cyclic-DAG bound
@@ -402,16 +403,21 @@ function appendRow(sha, k, textParts, spans, baseOff, nonspine, subPrefix) {
 //  prefix commit: links need; log + commit share it.
 
 //  --- the handler -------------------------------------------------------
-function handle(row, ctx) {
-  const sink = ctx && ctx.sink;
+//  JAB-004: log ONE arg (`log:<uri>`) — self-parse the scheme arg, read
+//  be.repo/be.sink, feed the SAME content hunk (renderHunkLog at the edge
+//  paints plain/color/tlv); `ctx` = the legacy direct-handler fallback (no be).
+//  A single-hunk content view (like cat): all modes feed be.sink, NO out.row
+//  split — plain output IS the rendered hunk, so there is no be.out columniser.
+function logOne(arg, ctx) {
+  const _be = (typeof be !== "undefined") ? be : null;
+  const sink = (_be && _be.sink) || (ctx && ctx.sink) || null;
   if (!sink) return;
-  let repo = (ctx && ctx.repo) || null;
+  let repo = (_be && _be.repo) || (ctx && ctx.repo) || null;
   if (!repo) return;
 
-  //  The full `log:<uri>` rides ctx.args[0] (the one-shot scheme:uri lowering);
-  //  a fragment-only seed can't survive the queue, so never trust row.uri.
-  const rawArgs = (ctx && ctx.args && ctx.args.length) ? ctx.args : [row.uri];
-  let first = String(rawArgs[0] || "");
+  //  Self-parse the full `log:<uri>` scheme arg (re-scheme when the prefix was
+  //  stripped by a caller); the legacy ctx.args[0] path is honoured too.
+  let first = String(arg || "");
   if (first.indexOf("log:") !== 0) first = "log:" + first;
   const parsed = parseArg(first);
 
@@ -470,7 +476,7 @@ function handle(row, ctx) {
   //  the accumulated rows, the per-column tok32 spans.  HUNKu8sFeedText adds
   //  the SINGLE trailing blank line for the whole log.
   sink.feed(bannerUri, body, toks, "", 0n);
-};
+}
 
 //  Concatenate a list of Uint8Array chunks into one buffer of length `total`.
 function concat(parts, total) {
@@ -480,9 +486,19 @@ function concat(parts, total) {
   return all;
 }
 
-//  The loop dispatches the module AS the handler (registry.js); test code
-//  reaches the internal walk via the attached named exports (LOG-001 repro).
-module.exports = handle;
+//  JAB-004: PLAIN verb (`.jab="args"`) — run() calls log(...args) ONCE reading
+//  `be`; no {enqueue} (log builds ONE hunk in one pass, self-driving its own
+//  history FIFOs).  No positional (`jab log`) defaults to `log:` (the seed's
+//  whole-repo "." row).
+function log() {
+  const argv = arguments.length ? arguments : ["log:"];
+  for (let i = 0; i < argv.length; i++) logOne(argv[i]);
+}
+log.jab = "args";
+
+//  The registry routes plain dispatch off `.jab`; test code reaches the
+//  internal walk via the attached named exports (LOG-001 repro).
+module.exports = log;
 module.exports.branchHistory = branchHistory;
 module.exports.appendRow = appendRow;
 module.exports.tok = tok;

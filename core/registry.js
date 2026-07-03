@@ -1,28 +1,35 @@
-//  JSQUE-002: the verb->handler registry.  build() resolves each distinct
-//  verb to its handler ONCE via require(verb) (warm process-resident cache,
-//  keyed by abspath), so a thousand-row run pays the require/eval cost per
-//  DISTINCT verb, never per row.  A handler is `(row, ctx) -> {enqueue?}`.
+//  core/registry.js — the verb->handler registry.  build() resolves each
+//  distinct verb to its handler ONCE via require(verb) (warm process-resident
+//  cache, keyed by abspath), so the require/eval cost is paid per DISTINCT verb.
 "use strict";
 
-//  HANDLER CONTRACT (JSQUE-002):
-//    module.exports = function handle(row, ctx) { ...; return result; }
-//      row : { ts, verb, uri, offset }   (a queue row; uri is the args)
-//      ctx : { repo, T0, out, queue }    (see be/loop.js for the fields)
-//      result (optional): { enqueue: [{verb, uri}, ...] }  -> child rows
-//        fanned out onto ctx.queue (consume-while-append).  Any other return
-//        (undefined/null) enqueues nothing.  A THROW propagates to the top
-//        (the loop never catches per-row) so it becomes the process exit code.
-//    A handler module must NOT also run `main();` — the cache evals the body
-//    ONCE at require time, so a tail call would fire at load, not per row.
+//  VERB CONTRACT (JAB-004): a verb is a PLAIN-ARGS function.
+//    module.exports = function verb(...args) { ... }; verb.jab = "args";
+//      args : the tokenizer's plain JS values (strings / safe-scalars / evaled).
+//      ambient repo/sink/out/format/force/verb ride the global `be` (mintBe).
+//      the verb parses its own URIs, owns its own fan-out, feeds be.sink/be.out;
+//      a THROW propagates to the loop edge (jab maps it to the non-zero exit).
+//    (Object form `module.exports = { args:true, run:verb }` is also accepted.)
+//    A verb module must NOT run `main();` — the cache evals the body ONCE.
+
+//  JAB-004: opt-in marker — a verb exports a fn with `.jab==="args"` (or
+//  `{args:true,run:fn}`).  An unmarked module has no plain-args handler.
+function convention(mod) {
+  if (mod && typeof mod === "object" && mod.args === true && typeof mod.run === "function")
+    return { how: "args", fn: mod.run };
+  if (typeof mod === "function")
+    return { how: mod.jab === "args" ? "args" : "legacy", fn: mod };
+  return null;                              // not a handler module
+}
 
 //  GIT-016: verbs register by FILE — a bareword resolves to verbs/<verb>/<verb>.js
 //  here (no explicit list); `head` (verbs/head/head.js) is picked up automatically.
 //  build(verbs, requireFn): map each distinct verb name to its handler.
 //  `requireFn` is the be-relative require of the CALLING module (so the
 //  upward be/-scan finds the shard nearest loop.js, not cwd); default the
-//  global require.  A verb whose module does not export a function is left
-//  ABSENT from the table — loop.js falls back to the old one-shot script for
-//  any verb the table does not resolve (incremental migration, JSQUE-001).
+//  global require.  A verb whose module does not export a handler is left
+//  ABSENT (null) from the table — cli() then refuses the verb.
+//  JAB-004: a converted entry is `{jab:"args",fn}` so cli() routes plain dispatch.
 function build(verbs, requireFn) {
   const req = requireFn || require;
   const table = {};
@@ -40,9 +47,11 @@ function build(verbs, requireFn) {
       try { mod = req("verbs/" + verb + "/" + verb + ".js"); }
       catch (e2) { table[verb] = null; continue; }
     }
-    table[verb] = (typeof mod === "function") ? mod : null;
+    const c = convention(mod);
+    if (c == null) { table[verb] = null; continue; }
+    table[verb] = c.how === "args" ? { jab: "args", fn: c.fn } : c.fn;
   }
   return table;
 }
 
-module.exports = { build: build };
+module.exports = { build: build, convention: convention };

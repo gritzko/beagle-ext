@@ -31,9 +31,9 @@
 
 "use strict";
 
-const be     = require("../../core/discover.js");
 const store  = require("../../shared/store.js");
 const wtlog  = require("../../shared/wtlog.js");
+const ambient = require("../../shared/ambient.js");   // JAB-004: ctx→be bridge
 const resolve = require("../../core/resolve.js");
 
 //  BRO-006: a content-HUNK row carries a hidden `U`-tagged nav URI so a bro
@@ -149,23 +149,25 @@ function commitOrTree(k, sha) {
   return null;                                  // a blob/tag is not a tree
 }
 
-module.exports = function handle(row, ctx) {
-  const out  = ctx && ctx.out;
-  const sink = ctx && ctx.sink;
-  const mode = (ctx && ctx.mode) || "plain";
+//  JAB-004: emit ONE tree URI's entries — self-parse `tree:<path>[?rev]`, read
+//  be.repo/out/sink + ambient.format(); `ctx` = direct-handler fallback (no be).
+//  A read-only LEAF: no fan-out (the drained tree is one hunk / one row block).
+function treeOne(arg, ctx) {
+  const _be  = (typeof be !== "undefined") ? be : null;
+  const out  = (_be && _be.out)  || (ctx && ctx.out)  || null;
+  const sink = (_be && _be.sink) || (ctx && ctx.sink) || null;
+  const mode = ambient.format();
   const color = mode === "color";
   //  BRO-006: color/tlv emit the U-target content hunk (pager + --tlv parity);
   //  plain keeps the byte-identical hand-painted `out.raw` rows (the content
   //  hunk's HUNKu8sFeedText render lacks tree's bespoke plain shape).
   const wantU = sink && mode !== "plain";
-  const repo = (ctx && ctx.repo) || be.find();
+  const repo = (_be && _be.repo) || (ctx && ctx.repo) || (_be ? _be.find() : null);
   if (!repo) return;
 
-  //  The whole projector URI rides ctx.args (a fragment-only URI lowers to a "."
-  //  placeholder in the queue row), exactly like cat:/spot:.  Strip the
-  //  `tree:` scheme so the URI binding sees the bare body.
-  const rawArgs = (ctx && ctx.args && ctx.args.length) ? ctx.args : [row.uri];
-  let first = String(rawArgs[0] || "");
+  //  Self-parse the projector URI (the whole `tree:<path>[?rev]`); strip the
+  //  `tree:` scheme so the URI binding sees the bare body.  Empty → root/cur-tip.
+  let first = String(arg || "");
   if (first.indexOf("tree:") === 0) first = first.slice("tree:".length);
   const u = new URI(first);
   const path  = u.path || "";
@@ -248,7 +250,16 @@ module.exports = function handle(row, ctx) {
     out.raw(entryRow(prefix, e.sha, name, color));
   }
   //  Read-only leaf: no fan-out.
-};
+}
+
+//  JAB-004: PLAIN verb (`.jab="args"`) loops its STRING URI args reading `be`.
+//  Zero positional → `[""]` (empty URI = root/cur-tip, the seed's ".").
+function tree() {
+  const argv = arguments.length ? arguments : [""];
+  for (let i = 0; i < argv.length; i++) treeOne(argv[i]);
+}
+tree.jab = "args";
+module.exports = tree;
 
 //  BRO-006: expose the U-target hunk builders for the repro test.
 module.exports.tok = tok;

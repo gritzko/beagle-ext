@@ -21,7 +21,6 @@
 //  resolved against this module's own dir — robust under the resident loop.
 //  JSQUE-016: by-verb reorg — shared/ kernel + core/ via ../../ ; post's OWN
 //  fold helpers (decide/commit) are siblings renamed fold-* (leaf-vs-fold).
-const be       = require("../../core/discover.js");
 const wtlog    = require("../../shared/wtlog.js");
 const store    = require("../../shared/store.js");
 const decideM  = require("./fold-decide.js");
@@ -38,6 +37,7 @@ const ingest   = require("../../shared/ingest.js");    // GIT-016: remote-track 
 //  JAB-003: TRUE-hunk output via the shared columnar->hunk adapter (ctx.sink),
 //  retiring the ctx.out columnar path for post.
 const hunkrows = require("../../shared/hunkrows.js");
+const ambient  = require("../../shared/ambient.js");   // JAB-004: ctx→be bridge
 const join = pathlib.join;
 const isFullSha = shalib.isFullSha;
 
@@ -336,10 +336,23 @@ function pushRemote(info, reader, ctx, remoteUri, branch, tip, hasQuery) {
 //  gitlink (a synthesised `put <sub>#<newsha>` bump → the existing fold-decide
 //  gitlink-add path), then runs the single-repo body `postOne` on the parent.
 //  A `--nosub` flag (out of D-scope but cheap) suppresses the descent.
-module.exports = function handle(row, ctx) {
-  const info = (ctx && ctx.repo) || be.find((row && row.uri) || undefined);
-  return postTree(info, ctx, row);
-};
+//  JAB-004: plain-args POST — args ARE the commit MESSAGE (ride ctx.args verbatim,
+//  no classifyArg to URI-split a `T: log: msg`).
+function post() {
+  const _be = (typeof be !== "undefined") ? be : null;
+  const repo = (_be && _be.repo) || be.find();
+  //  Message + slots ride ctx.args as PLAIN args (put's synthetic-ctx pattern);
+  //  `-m` and the like ride ctx.flags off be (loop split them out of args).
+  const argv = [];
+  for (let i = 0; i < arguments.length; i++) argv.push(String(arguments[i]));
+  const ctx = {
+    repo: repo, sink: _be && _be.sink,
+    args: argv, flags: (_be && _be.flags) || [],
+  };
+  return postTree(repo, ctx, { uri: argv.length ? argv[0] : "" });
+}
+post.jab = "args";
+module.exports = post;
 
 //  postTree(info, ctx, row): recurse mounted subs (post-order), then postOne.
 function postTree(info, ctx, row) {
@@ -440,8 +453,8 @@ function postSubs(info, ctx) {
 //  postOne(info, ctx, row): the single-repo commit body (the former handler).
 function postOne(info, ctx, row) {
   const args  = (ctx && ctx.args)  || [];
-  const flags = (ctx && ctx.flags) || [];
-  const force = flags.indexOf("--force") >= 0;
+  const flags = (ctx && ctx.flags) || [];   // JAB-004: kept for parseMessage (msg flags)
+  const force = ambient.force();   // JAB-004: force off be
 
   const wtl = wtlog.open(info);
   const reader = store.open(info.storePath, info.project);

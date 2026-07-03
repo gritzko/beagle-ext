@@ -23,11 +23,11 @@
 //    walk + ctx-window + coalesce + emit are mode-AGNOSTIC.
 "use strict";
 
-const be       = require("../../core/discover.js");
 const wtlog    = require("../../shared/wtlog.js");
 const store    = require("../../shared/store.js");
 const classify = require("../../shared/classify.js");
 const join     = require("../../shared/util/path.js").join;
+const ambient  = require("../../shared/ambient.js");   // JAB-004: ctx→be bridge
 const match    = require("./match.js");
 const ext2lang = require("./ext.js");
 const EMPTY32  = new Uint32Array(0);   // JAB-029: hunks feed ctx.sink; cli renders
@@ -229,7 +229,7 @@ function readFileBytes(full) {
 
 //  --- the handler ----------------------------------------------------------
 module.exports = function handle(row, ctx) {
-  const mode = (ctx && ctx.mode) || "plain";   // shared color/tlv/plain gate
+  const mode = ambient.format();   // JAB-004
   const repo = (ctx && ctx.repo) || null;
   if (!repo) return;
 

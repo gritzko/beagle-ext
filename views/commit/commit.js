@@ -20,10 +20,9 @@
 //  COLOUR spans (field=R/blue, sha=L/cyan, author|committer=G/green, subject=
 //  N/bold) are layered on top for --color.
 //
-//  handle(row, ctx): the seed lowered `commit:<uri>` to a "." placeholder row
-//  (classifyArg can't model a fragment-only URI — see cat.js/log.js); the
-//  handler re-parses the WHOLE `commit:<uri>` off ctx.args[0], never row.uri.
-//  Output is ONE content HUNK fed to ctx.sink (EMPTY uri → no banner line, so
+//  JAB-004: a PLAIN-args verb — commit(...args) loops, commitOne(arg) self-parses
+//  the WHOLE `commit:<uri>` string, reads be.repo/be.sink/ambient.format (ctx =
+//  direct-handler fallback).  Output is ONE content HUNK fed to be.sink (EMPTY uri → no banner line, so
 //  --plain matches the C keeper which elides the `commit:?<sha>` URI as a
 //  U-span; the loop edge renders plain/color/tlv via view/bro.js renderHunkLog
 //  — the view never writes fd 1).
@@ -33,6 +32,7 @@
 const store   = require("../../shared/store.js");
 const wtlog   = require("../../shared/wtlog.js");
 const shalib  = require("../../shared/util/sha.js");
+const ambient = require("../../shared/ambient.js");   // JAB-004: ctx→be bridge
 //  COMMIT-006: reuse the diff GENERATOR (graf weave + tree-vs-ref) directly —
 //  call its handler with a pinned `views` spec; the inert diff VIEW routing
 //  (ctx.views unset, JS-071) is bypassed.  See inlineDiff() below.
@@ -289,42 +289,56 @@ function diffSpecRow(sha, parentSha) {
   return { row: row, spec: spec };
 }
 
+//  JAB-004: diff is a PURE plain-args verb — it reads be.out/be.sink/be.views/
+//  be.uri/be.flags/be.format off the GLOBAL only.  So SWAP those globals (incl.
+//  be.views pinning ds.spec at ds.row.uri) around the call, call diffView(uri)
+//  PLAIN with the diff-uri STRING, then RESTORE.  Commit always runs with a be.
+function runDiff(repo, ds, mode, out, sink, flags) {
+  const uri = ds.row.uri;
+  const views = {}; views[uri] = ds.spec;
+  //  JAB-004: swap be.repo too — a `commit:<sub>?<sha>` descend gives us the SUB
+  //  repo; diff reads be.repo, so it must point at the sub, not the base.
+  const s = { repo: be.repo, out: be.out, sink: be.sink, views: be.views,
+              uri: be.uri, flags: be.flags, format: be.format };
+  be.repo = repo; be.out = out; be.sink = sink; be.views = views; be.uri = uri;
+  be.flags = flags; be.format = mode;
+  try { diffView(uri); }
+  finally { be.repo = s.repo; be.out = s.out; be.sink = s.sink;
+            be.views = s.views; be.uri = s.uri; be.flags = s.flags;
+            be.format = s.format; }
+}
+
 //  Capture the diff's PLAIN rendered text (out.chunk) for the metadata-fold.
 function diffPlainText(repo, sha, parentSha) {
-  const ds = diffSpecRow(sha, parentSha);
   const chunks = [];
-  const dctx = { repo: repo, flags: ["--plain"], mode: "plain", views: {},
-                 out: { chunk: function (t) { chunks.push(t); } },
-                 sink: { feed: function () {} } };
-  dctx.views[ds.row.uri] = ds.spec;
-  diffView(ds.row, dctx);
+  runDiff(repo, diffSpecRow(sha, parentSha), "plain",
+          { chunk: function (t) { chunks.push(t); } },
+          { feed: function () {} }, ["--plain"]);
   return chunks.join("");
 }
 
 //  Feed the diff's own HUNK records (color/tlv) into the commit sink, so they
 //  follow the metadata record exactly like the C graf relay.
 function diffFeedRecords(repo, sha, parentSha, mode, sink) {
-  const ds = diffSpecRow(sha, parentSha);
-  const dctx = { repo: repo, flags: mode === "color" ? ["--color"] : [],
-                 mode: mode, views: {},
-                 out: { chunk: function () {} }, sink: sink };
-  dctx.views[ds.row.uri] = ds.spec;
-  diffView(ds.row, dctx);
+  runDiff(repo, diffSpecRow(sha, parentSha), mode,
+          { chunk: function () {} }, sink,
+          mode === "color" ? ["--color"] : []);
 }
 
-//  --- the handler -----------------------------------------------------------
-module.exports = function handle(row, ctx) {
-  const sink = ctx && ctx.sink;
+//  --- commit ONE arg --------------------------------------------------------
+//  JAB-004: self-parse `commit:<uri>` from the STRING arg, read be.repo/be.sink
+//  + ambient.format(), feed the same sink; `ctx` = direct-handler fallback (no be).
+function commitOne(arg, ctx) {
+  const _be = (typeof be !== "undefined") ? be : null;
+  const sink = (_be && _be.sink) || (ctx && ctx.sink) || null;
   if (!sink) return;
   //  SUBS-045: `let` so a `commit:<sub>?<sha>` link can swap to the sub repo.
-  let repo = (ctx && ctx.repo) || null;
+  let repo = (_be && _be.repo) || (ctx && ctx.repo) || null;
   if (!repo) return;
 
-  //  The whole `commit:<uri>` rides ctx.args[0] (the seed lowered it to a "."
-  //  placeholder — a fragment-only URI can't survive a queue row; cf.
-  //  cat.js/log.js).  Never trust row.uri.
-  const rawArgs = (ctx && ctx.args && ctx.args.length) ? ctx.args : [row.uri];
-  let first = String(rawArgs[0] || "");
+  //  The whole `commit:<uri>` is the STRING arg (a fragment-only URI can't
+  //  survive a queue row; cf. cat.js/log.js).  Never trust a row.uri.
+  let first = String(arg || "");
   if (first.indexOf("commit:") !== 0) first = "commit:" + first;
   const u = new URI(first);
   //  URI collapses `commit:?` (empty query) into query "" — recover the
@@ -386,7 +400,7 @@ module.exports = function handle(row, ctx) {
   //  BRO-006: color/tlv feed the U-bearing body+toks (tree/parent sha links);
   //  plain feeds the U-free body so the hidden URI bytes never leak (no toks to
   //  elide them in the empty-toks plain path).
-  const mode = (ctx && ctx.mode) || "plain";
+  const mode = ambient.format();   // JAB-004
   const bytes = mode === "plain" ? hunk.bytes : hunk.bytesU;
   const toks  = mode === "plain" ? new Uint32Array(0) : hunk.toksU;
 
@@ -416,4 +430,12 @@ module.exports = function handle(row, ctx) {
   //  COMMIT-006: color/tlv relay the diff's own HUNK records after the metadata
   //  (no separator added in those modes) — the C `diff:?<sha>` graf relay twin.
   if (inline) diffFeedRecords(repo, sha, inline, mode, sink);
-};
+}
+
+//  JAB-004: PLAIN verb (`.jab="args"`) — loops its args reading `be` (own
+//  `(row,ctx)` entry fallback removed; commit is now purely plain-args).
+function commit() {
+  for (let i = 0; i < arguments.length; i++) commitOne(arguments[i]);
+}
+commit.jab = "args";
+module.exports = commit;

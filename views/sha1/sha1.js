@@ -50,11 +50,10 @@
 
 "use strict";
 
-const be     = require("../../core/discover.js");
 const store  = require("../../shared/store.js");
 const shalib = require("../../shared/util/sha.js");
 const isFullSha = shalib.isFullSha;
-//  JAB-003: TRUE-hunk output via the shared columnar→hunk adapter (ctx.sink),
+//  JAB-003: TRUE-hunk output via the shared columnar→hunk adapter (be.sink),
 //  retiring the ctx.out columnar path for this view.
 const hunkrows = require("../../shared/hunkrows.js");
 
@@ -113,15 +112,16 @@ function commitOrTree(k, sha) {
   return undefined;
 }
 
-module.exports = function handle(row, ctx) {
-  const repo = (ctx && ctx.repo) || be.find();
+//  JAB-004: sha1 ONE arg — self-parse the projector URI, read be.repo/be.sink,
+//  feed the same sink; `ctx` = direct-handler fallback (no global be).
+function sha1One(arg, ctx) {
+  const _be = (typeof be !== "undefined") ? be : null;
+  const repo = (_be && _be.repo) || (ctx && ctx.repo) || null;
+  const sink = (_be && _be.sink) || (ctx && ctx.sink) || null;
   if (!repo) return;
 
-  //  The whole projector URI rides ctx.args (a fragment-only URI lowers to a "."
-  //  placeholder in the queue row), exactly like cat:/tree:.  Strip the `sha1:`
-  //  scheme so the URI binding sees the bare body.
-  const rawArgs = (ctx && ctx.args && ctx.args.length) ? ctx.args : [row.uri];
-  let first = String(rawArgs[0] || "");
+  //  Strip the `sha1:` scheme so the URI binding sees the bare body.
+  let first = String(arg || "");
   if (first.indexOf("sha1:") === 0) first = first.slice("sha1:".length);
   const u = new URI("sha1:" + first);   // re-scheme so URI splits path/query/frag
   const path  = u.path || "";
@@ -171,9 +171,16 @@ module.exports = function handle(row, ctx) {
 
   //  Emit the 41-byte line as ONE raw row into a TRUE hunk at the canonical
   //  `sha1:<path>` (verbatim in plain AND colour; out.raw appends the '\n').
-  if (ctx && ctx.sink) {
-    const out = hunkrows(ctx.sink, "sha1:" + first);
+  if (sink) {
+    const out = hunkrows(sink, "sha1:" + first);
     out.raw(target);
     out.done();
   }
-};
+}
+
+//  JAB-004: PLAIN verb (`.jab="args"`) loops its STRING args reading `be`.
+function sha1() {
+  for (let i = 0; i < arguments.length; i++) sha1One(arguments[i]);
+}
+sha1.jab = "args";
+module.exports = sha1;

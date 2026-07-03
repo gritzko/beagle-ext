@@ -24,7 +24,6 @@
 
 "use strict";
 
-const be   = require("./discover.js");
 const subs = require("../shared/subs.js");
 
 //  YES iff `<wt>/<subpath>/.be` is a regular file (a live mount).

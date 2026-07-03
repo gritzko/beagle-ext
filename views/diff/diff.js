@@ -6,18 +6,16 @@
 //  graf/DIFFREF.c (GRAFDiff2Layer / GRAFDiffWtTree / GRAFDiffTreeRefs) +
 //  GRAF.exe.c's URI shape table + be bediff sub pin-range relay.
 //
-//  handle(row, ctx): JS-071 — the loop NEVER sets ctx.views, so the handler
-//  RE-PARSES the whole `diff:<uri>` off ctx.args[0] (the loop's one-shot
-//  scheme:uri form), exactly like log.js/commit.js/tree.js.  parseDiffArg
-//  builds the spec (mode range|wt, from/to/baseline shas, navver, path) in
-//  the SAME shape :278-302 consume.  A caller (commit.js, COMMIT-006) that
-//  pins ctx.views[row.uri] still wins — pinned spec ?? reparse.  Output is
-//  HUNK bytes via ctx.out.chunk (the HUNK `.plain`/`.color` cursor's diff:-
-//  scheme line render — NOT bro's pager).
+//  JAB-004: a PURE plain-args verb — diffOne(arg) self-parses the whole
+//  `diff:<uri>` string, reads be.repo/be.sink/be.out/be.flags/ambient.format
+//  off the GLOBAL `be` only (no ctx).  A caller (commit.js, COMMIT-006) that
+//  pins be.views[be.uri] to a spec still wins — pinned spec ?? reparse; a normal
+//  CLI call has empty be.views so it reparses.  Output is HUNK bytes via
+//  be.out.chunk (the HUNK `.plain`/`.color` cursor's diff:-scheme line render —
+//  NOT bro's pager).
 
 "use strict";
 
-const be      = require("../../core/discover.js");
 const store   = require("../../shared/store.js");
 const wtlog   = require("../../shared/wtlog.js");
 const shalib  = require("../../shared/util/sha.js");
@@ -28,6 +26,7 @@ const classify = require("../../shared/classify.js");
 //  DIFF-010: the shared grow-on-"out full" WEAVE/HUNK fold retry (mirrors
 //  loop.js:128-142) — a large diff fold no longer throws "out full".
 const weave   = require("../../shared/weave.js");
+const ambient = require("../../shared/ambient.js");   // JAB-004: ctx→be bridge
 
 const isFullSha = shalib.isFullSha;
 const frameSha  = shalib.frameSha;
@@ -365,9 +364,9 @@ function diffOut(ctxOut, sink, mode) {
   };
 }
 
-//  --- JS-071: re-parse the `diff:` URI off ctx.args[0] -------------------
-//  The loop NEVER sets ctx.views; re-parse the one-shot `diff:<uri>` like
-//  log/commit/tree.  Resolve a ref (branch-FIRST, then full-sha / hashlet) to
+//  --- JS-071: re-parse the `diff:` URI off the plain arg -----------------
+//  Empty be.views ⇒ re-parse the one-shot `diff:<uri>` like log/commit/tree.
+//  Resolve a ref (branch-FIRST, then full-sha / hashlet) to
 //  a commit sha via the store reader.  Returns undefined for a bare sha that
 //  is no commit (the caller treats a null tree as the empty side).
 function resolveCommit(k, ref) {
@@ -435,21 +434,29 @@ function parseDiffArg(k, repo, raw) {
 }
 
 //  --- the handler -------------------------------------------------------
-module.exports = function handle(row, ctx) {
-  const out = diffOut(ctx && ctx.out, ctx && ctx.sink, (ctx && ctx.mode) || "plain");
-  const flags = (ctx && ctx.flags) || [];
-  const color = flags.indexOf("--color") >= 0;
+//  JAB-004: diff ONE arg — self-parse `diff:<uri>`, read be repo/sink/out/flags +
+//  ambient.format() PURELY off the global `be` (no ctx param).
+function diffOne(arg) {
+  const _be = (typeof be !== "undefined") ? be : null;
+  const dmode = ambient.format();
+  //  JAB-004: be.out is the guarded chunk sink (no-op at the loop edge — output
+  //  flows via be.sink.feed); be.sink is the HUNK feed the edge renders.
+  const out = diffOut(_be && _be.out, _be && _be.sink, dmode);
+  const flags = (_be && _be.flags) || [];     // JAB-004: --nosub off be
+  const fctx = { flags: flags };
+  const color = dmode === "color";
 
-  const repo = (ctx && ctx.repo) || be.find();
+  const repo = (_be && _be.repo) || be.find();
   const k = store.open(repo.storePath, repo.project);
 
-  //  JS-071: a pinned ctx.views spec (commit.js / COMMIT-006) wins; else
-  //  re-parse the one-shot `diff:<uri>` off ctx.args[0] (never row.uri).
-  //  DIFF-012: a no-arg `jab diff` has empty ctx.args — default to the whole-wt
-  //  `diff:` spec (path "") so it reaches diffWtTree, not a single-file `diff:.`.
-  let spec = (ctx && ctx.views && ctx.views[row.uri]) || null;
+  //  JS-071: a pinned be.views spec (commit.js / COMMIT-006, keyed by be.uri =
+  //  the diff URI) wins; else re-parse `diff:<uri>` off the arg.  DIFF-012: a
+  //  no-arg `jab diff` defaults to the whole-wt `diff:` spec (path "").  A normal
+  //  CLI `diff:` call has empty be.views, so it always reparses the arg.
+  let spec = (_be && _be.views && _be.views[_be.uri]) || null;
   if (!spec) {
-    const raw = (ctx && ctx.args && ctx.args.length) ? ctx.args[0] : "diff:";
+    const raw = (arg !== undefined && arg !== null && String(arg).length)
+              ? String(arg) : "diff:";
     spec = parseDiffArg(k, repo, raw);
   }
   if (!spec) return;                                  // unresolvable / no spec
@@ -473,7 +480,7 @@ module.exports = function handle(row, ctx) {
       const tB = blobAtTree(k, toTree, spec.path);
       diffFile(spec.path, fB, tB, true, navver, color, out);
     } else {
-      diffTreeRefs(k, fromTree, toTree, navver, color, ctx, repo, "", out);
+      diffTreeRefs(k, fromTree, toTree, navver, color, fctx, repo, "", out);
     }
   } else {
     //  wt-vs-base: baseline tree from the seed-pinned baseline sha.
@@ -485,11 +492,11 @@ module.exports = function handle(row, ctx) {
     if (spec.path && dir) {
       //  DIFF-012: a DIR path scopes the wt diff to that subtree (the classifier
       //  dirty set under `<dir>/`), not a single-file read.
-      diffWtTree(k, baseTree, repo, color, ctx, rel + "/", out);
+      diffWtTree(k, baseTree, repo, color, fctx, rel + "/", out);
     } else if (spec.path) {
       //  DIFF-011: a file UNDER a mounted sub reads its FROM side from the sub's
       //  own baseline tree (the parent tree has only the gitlink).
-      const m = subMountSplit(k, baseTree, repo, spec.path, ctx);
+      const m = subMountSplit(k, baseTree, repo, spec.path, fctx);
       let fB;
       if (m) {
         const subBase = (wtlog.open(m.subRepo).baselineTip() || {}).sha || "";
@@ -501,10 +508,21 @@ module.exports = function handle(row, ctx) {
       const tB = readWtFile(join(repo.wt, spec.path));
       diffFile(spec.path, fB, tB, true, "", color, out);
     } else {
-      diffWtTree(k, baseTree, repo, color, ctx, "", out);
+      diffWtTree(k, baseTree, repo, color, fctx, "", out);
     }
   }
-};
+}
+
+//  JAB-004: PURE plain-args verb (`.jab="args"`) — loops args reading `be` only;
+//  diff recurses in-process (direct calls, NOT {enqueue}) so run() once suffices.
+function diff() {
+  //  DIFF-012: no-positional `jab diff` defaults to the whole-wt `diff:` spec
+  //  (the legacy seed's "." row) — diffOne maps "" to the whole-wt path.
+  const argv = arguments.length ? arguments : [""];
+  for (let i = 0; i < argv.length; i++) diffOne(argv[i]);
+}
+diff.jab = "args";
+module.exports = diff;
 
 //  --- DIFF-011: mount-aware scoped-path resolution ---------------------
 //  `diff:<sub>/<file>` (a file UNDER a mounted submodule) must read its

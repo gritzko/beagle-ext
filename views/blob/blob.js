@@ -35,9 +35,9 @@
 
 "use strict";
 
-const be    = require("../../core/discover.js");
 const store = require("../../shared/store.js");
 const wtlog = require("../../shared/wtlog.js");
+const ambient = require("../../shared/ambient.js");   // JAB-004: ctx→be bridge
 const bro   = require("../../view/bro.js");
 const resolve = require("../../core/resolve.js");
 const isFullSha = require("../../shared/util/sha.js").isFullSha;
@@ -94,16 +94,17 @@ function commitOrTree(k, o) {
   return null;
 }
 
-module.exports = function handle(row, ctx) {
-  const mode = (ctx && ctx.mode) || "plain";
-  const repo = (ctx && ctx.repo) || be.find();
+//  JAB-004: blob ONE arg — self-parse blob:<uri>, read be.repo/be.sink +
+//  ambient.format(); `ctx` = direct-handler fallback (no global be).
+function blobOne(arg, ctx) {
+  const _be = (typeof be !== "undefined") ? be : null;
+  const mode = ambient.format();
+  const repo = (_be && _be.repo) || (ctx && ctx.repo) || null;
   if (!repo) return;
 
-  //  The whole projector URI rides ctx.args (a fragment-only URI lowers to a "."
-  //  placeholder in the queue row), exactly like cat:/tree:.  Strip the `blob:`
-  //  scheme so the URI binding sees the bare body.
-  const rawArgs = (ctx && ctx.args && ctx.args.length) ? ctx.args : [row.uri];
-  let first = String(rawArgs[0] || "");
+  //  Self-parse the STRING arg; strip the `blob:` scheme so the URI binding sees
+  //  the bare body (the analogue of cat's `cat:` strip).
+  let first = String(arg || "");
   if (first.indexOf("blob:") === 0) first = first.slice("blob:".length);
   const u = new URI(first);
   const path  = u.path || "";
@@ -164,7 +165,7 @@ module.exports = function handle(row, ctx) {
   //  and the SAME chunking/CAP cat: uses (1 MiB/hunk, backed up to a line bound so
   //  a line never splits; a #L<n> rebanner per chunk).  The banner verb is "blob"
   //  so a hunk reads `blob <bannerKey>#L<n>` — the cat: `cat <path>#L<n>` twin.
-  const sink = ctx && ctx.sink;
+  const sink = (_be && _be.sink) || (ctx && ctx.sink) || null;
   if (!sink) return;
   const ext = bro.pathExt(bannerKey);           // "js"/"" — drives tok.parse (path form)
   let off = 0, line = 1;
@@ -182,5 +183,12 @@ module.exports = function handle(row, ctx) {
     for (let i = off; i < end; i++) if (bytes[i] === 10) line++;
     off = end;
   }
-  //  Read-only leaf: no fan-out.
-};
+  //  Read-only leaf: no fan-out (per-arg; the dispatcher fans out over args).
+}
+
+//  JAB-004: PLAIN verb (`.jab="args"`) loops its STRING args reading `be`.
+function blob() {
+  for (let i = 0; i < arguments.length; i++) blobOne(arguments[i]);
+}
+blob.jab = "args";
+module.exports = blob;

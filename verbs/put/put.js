@@ -28,7 +28,6 @@
 //  JSQUE-010: sibling libs via relative require ("./lib/X.js"), resolved against
 //  this module's own dir — robust under the resident loop (not argv[1]/__dirname).
 //  JSQUE-016: by-verb reorg — core/discover + shared/ kernel via ../../ .
-const be      = require("../../core/discover.js");
 const wtlog   = require("../../shared/wtlog.js");
 const store   = require("../../shared/store.js");
 const stage   = require("../../shared/stage.js");
@@ -43,6 +42,10 @@ const isFullSha = require("../../shared/util/sha.js").isFullSha;
 //  JAB-003: TRUE-hunk output via the shared columnar→HUNK adapter (ctx.sink),
 //  retiring ctx.out for this verb (scheme "put:" opens the banner/sub hunks).
 const hunkrows = require("../../shared/hunkrows.js");
+//  JAB-004: plain-args PUT owns its arg parse (classifyArg/seedCtx retired) —
+//  keeps resolve only for isHexish + resolveHex; ambient bridges be↔ctx.
+const resolve = require("../../core/resolve.js");
+const ambient = require("../../shared/ambient.js");
 
 //  JSQUE-010: the `put:` banner + per-row lines now render through the emit sink
 //  (ctx.out, JSQUE-005), not a local render.js call — the loop does ONE flush.
@@ -56,13 +59,6 @@ function putOut(ctx) {
   if (!ctx._putOut) ctx._putOut = hunkrows(ctx.sink, null, "put:");
   return ctx._putOut;
 }
-//  JAB-003: flush the run's ONE put: hunk on its LAST handle call (put has no
-//  fan-out: one call per seed row, or one call for a 0-row placeholder run).
-function putFlush(ctx) {
-  if (!ctx || !ctx._putOut) return;
-  if ((ctx._putHandleCalls || 0) >= (ctx.seededRowCount || 1)) ctx._putOut.done();
-}
-
 //  Normalise a bareword arg: `.`/`./` → "" (reporoot), strip a leading
 //  `./` (mirrors put_stage_named's reporoot normalisation).
 function normRel(raw) {
@@ -499,67 +495,23 @@ function stageInSub(repo, pfx, uri, ctx) {
       if (it.type === "skip") out.raw(skipText({ path: pfx + "/" + it.path, reason: it.reason, whole: it.whole }));
       else { const op = r.ops[it.opIdx]; out.row(pfx + "/" + (op.dst ? op.path + "#" + op.dst : op.path), "put", 0n); }
     }
+  //  JAB-004: tallies accumulate on ctx; the driver (putRun) owns the final
+  //  all-skip PUTNONE decision after the whole arg batch (no per-arg throw).
   ctx._putStaged = (ctx._putStaged || 0) + r.ops.filter(function (o) { return o.path !== null; }).length;
   ctx._putSkipped = (ctx._putSkipped || 0) + r.items.filter(function (it) { return it.type === "skip"; }).length;
-  ctx._putCalls = (ctx._putCalls || 0) + 1;
-  if (ctx._putCalls >= (ctx.seededRowCount || 1) && ctx._putStaged === 0) {
-    if (ctx._putSkipped > 0) io.log("be put: no eligible paths\n");
-    if (out) out.done();                 // JAB-003: flush the partial hunk on the throw
-    throw "PUTNONE";
-  }
 }
 
-module.exports = function handle(row, ctx) {
+//  --- per-row STAGE (was the legacy handle body) -------------------------
+//  Stage ONE path-arg uri: sub-crossing delegate, else the file/dir/move leaf.
+//  `ctx` is the synthetic run state.  Tallies ride ctx._putStaged/_putSkipped;
+//  the caller decides PUTNONE after the whole arg batch.
+function putOne(repo, k, ctx, uri) {
   const out = putOut(ctx);
-  if (ctx) ctx._putHandleCalls = (ctx._putHandleCalls || 0) + 1;   // JAB-003: run last-call gate
-  const repo = (ctx && ctx.repo) || be.find((row && row.uri) || undefined);
-  const k = store.open(repo.storePath, repo.project);
-
-  //  Ref-write forms first (no banner), once per run.
-  applyRefs(repo, k, ctx);
-
-  //  GIT-014: wire PUSH forms (`//host` / `ssh://host?br` / `https://host?br`)
-  //  ride ctx.args (a host URI the queue uri can't carry whole); run them ONCE.
-  //  A wire-form ROW (this arg's seedRow) must NOT be staged — return early.
-  applyWire(repo, k, ctx);
-  const ruRaw = (row && row.uri) || "";
-  const ru = new URI(ruRaw);
-  //  This row IS the wire target (the seed stripped its scheme/host to a bare
-  //  path) — the push already ran in applyWire; never stage it as a file.
-  if (ru.host || ru.authority || (ctx && ctx._putWirePaths &&
-      ctx._putWirePaths[ru.path || ruRaw])) { putFlush(ctx); return; }
-
-  //  A 0-count seed means `row.uri` is the synthetic "." placeholder (a ref-only
-  //  or no-arg run), NOT a real path arg — never stage it.  A ref-only run is
-  //  done; a true no-arg `be put` is the bare whole-tree walk (PUT-004).
-  const placeholder = ctx && ctx.seededRowCount === 0;
-  if (placeholder) {
-    if ((ctx.refs || []).length) { putFlush(ctx); return; }  // ref-only run: nothing to stage
-    //  PUT-004: bare `be put` — auto-pair moves + tracked-dirty walk, sourced
-    //  from the classifier + wtlog (bareStage).  Single in-process whole-tree
-    //  fold (one handler invocation, like delete.js's batch sweep), reusing
-    //  commitOps for the row-write + restamp and ctx.out for the `put:` banner.
-    //  Open the `put:` header BEFORE the walk (native PUTStage opens its table
-    //  before move detection) so a PUTAMBIG refusal carries the same partial
-    //  banner native does (the loop edge-catch flushes it on the throw).
-    if (out && !ctx._putBannerOpen) { ctx._putBannerOpen = true; out.raw("put:"); }
-    const r = bareStage(repo, wtlog.open(repo), k);  // may throw PUTAMBIG
-    commitOps(repo, r.ops, ctx && ctx.T0);
-    if (out)
-      for (const op of r.ops)
-        if (op.path !== null && !op.silent)
-          out.row(op.dst ? (op.path + "#" + op.dst) : op.path, "put", 0n);
-    //  SUBS-044: then recurse mounted subs (pre-order), staging their interior.
-    bareStageSubs(repo, "", ctx);
-    putFlush(ctx);
-    return;
-  }
-
   //  SUBS-039/PUT: a path arg crossing a mounted submodule stages INSIDE the sub
   //  ([Submodules] §3) — delegate, don't refuse "exists but is not stageable".
-  const argPath = normRel(new URI((row && row.uri) || "").path || "");
+  const argPath = normRel(new URI(uri || "").path || "");
   const subPfx = argPath ? subMountPrefix(repo, argPath) : "";
-  if (subPfx) { stageInSub(repo, subPfx, (row && row.uri) || "", ctx); putFlush(ctx); return; }
+  if (subPfx) { stageInSub(repo, subPfx, uri || "", ctx); return; }
 
   //  Open the shared `put:` table header ONCE (native opens it for every
   //  PUTStage run; the row lines below carry a BLANK date, native HUNK `.ts=0`).
@@ -568,7 +520,7 @@ module.exports = function handle(row, ctx) {
   //  Stage this one arg (file / dir / move leaf), write its rows under the
   //  cohort T0, restamp, and push the banner lines (rows + skips) via ctx.out.
   const eng = stage.prep(repo, wtlog.open(repo), k);
-  const r = stageArg(eng, repo, (row && row.uri) || "");
+  const r = stageArg(eng, repo, uri || "");
   commitOps(repo, r.ops, ctx && ctx.T0);
   if (out) {
     for (const it of r.items) {
@@ -580,17 +532,129 @@ module.exports = function handle(row, ctx) {
       }
     }
   }
-  //  JSQUE-014: tally staged/skipped across the per-arg fan-out (no enqueue, so
-  //  one call per seed row).  On the LAST named row, an all-skip run is PUTNONE:
-  //  emit the diag + throw so the loop edge flushes the partial banner + skips
-  //  before the non-zero exit (native PUT.c put_stage_named, PUTNONE).
   ctx._putStaged = (ctx._putStaged || 0) + r.ops.filter(function (o) { return o.path !== null; }).length;
   ctx._putSkipped = (ctx._putSkipped || 0) + r.items.filter(function (it) { return it.type === "skip"; }).length;
-  ctx._putCalls = (ctx._putCalls || 0) + 1;
-  if (ctx._putCalls >= (ctx.seededRowCount || 1) && ctx._putStaged === 0) {
-    if (ctx._putSkipped > 0) io.log("be put: no eligible paths\n");
+}
+
+//  JAB-004: plain-args PUT — `put(...args)` off global `be`, called ONCE so the
+//  fold spans the whole arg batch.
+function put() {
+  const _be = (typeof be !== "undefined") ? be : null;
+  const repo = _be && _be.repo;
+  //  JAB-004: synthetic run ctx mirroring the loop ctx the helpers read.
+  const ctx = {
+    repo: repo, sink: _be && _be.sink,
+    T0: ron.now(), force: ambient.force(),
+    args: [], refs: [], seededRowCount: null,
+  };
+  const argv = [];
+  for (let i = 0; i < arguments.length; i++) argv.push(String(arguments[i]));
+  ctx.args = argv;
+  return putRun(ctx, argv, argv.length ? argv[0] : "");
+}
+
+//  JAB-004: put's OWN terse 3-way (not classifyArg) — URI-arg ref-writes
+//  `?#<hex>`/`?<40hex>`/`?br`/`?br#<hex>`, `path#dst` move, else plain path.
+function classifyPutArg(arg, k, curQuery) {
+  const u = new URI(arg);
+  const q = u.query || "", path = u.path || "", frag = u.fragment || "",
+        auth = u.authority || "", data = u.href || "";
+  const hasQ = q !== "", hasPath = path !== "", hasFrag = frag !== "",
+        hasAuth = auth !== "";
+  //  Trunk reset: `?#<sha>` — empty query, hex fragment, no path/auth.
+  if (!hasQ && !hasPath && !hasAuth && hasFrag && data[0] === "?" && resolve.isHexish(frag)) {
+    const full = resolve.resolveHex(k, frag);
+    if (!full) throw "RESOLVE: cannot resolve ?#" + frag;
+    return { kind: "ref", op: "set", branch: "", sha: full };
+  }
+  //  `?<40hex>` (no fragment) — set cur's ABSOLUTE branch to this sha.
+  if (hasQ && !hasPath && !hasAuth && !hasFrag && isFullSha(q)) {
+    const full = resolve.resolveHex(k, q);
+    if (!full) throw "RESOLVE: cannot resolve ?" + q;
+    return { kind: "ref", op: "set", branch: curQuery || "", sha: full };
+  }
+  //  `?br` / `?br#<sha>`.
+  if (hasQ && !hasPath && !hasAuth) {
+    if (resolve.isHexish(frag)) {
+      const full = resolve.resolveHex(k, frag);
+      if (!full) throw "RESOLVE: cannot resolve ?" + q + "#" + frag;
+      return { kind: "ref", op: "set", branch: q, sha: full };
+    }
+    return { kind: "ref", op: "create", branch: q };
+  }
+  //  Move-form: non-empty path AND fragment (frag is the DEST path slot).
+  if (hasPath && hasFrag) return { kind: "path", path: path, dst: frag };
+  //  Plain path / dir / bareword.
+  return { kind: "path", path: path || q };
+}
+
+//  JAB-004: the run driver — classify argv into ctx.refs + path rows, apply
+//  refs+wire ONCE, then fold (bare-walk or per-arg stage loop).
+function putRun(ctx, argv, firstUri) {
+  const repo = ctx.repo || be.find(firstUri || undefined);
+  ctx.repo = repo;
+  const k = store.open(repo.storePath, repo.project);
+  const out = putOut(ctx);
+
+  //  JAB-004: PLAIN owns the fan-out — read cur ONCE (inline seed read; seedCtx
+  //  retired), split each arg via the inline classifyPutArg.  Only curQuery is
+  //  needed — it pins `?<40hex>`'s target branch.
+  const cur = wtlog.open(repo).curTip();
+  const curQuery = (cur && cur.query) || "";
+  ctx.refs = [];
+  let pathUris = [];
+  for (const arg of argv) {
+    const c = classifyPutArg(arg, k, curQuery);
+    if (c.kind === "ref") ctx.refs.push({ op: c.op, branch: c.branch, sha: c.sha });
+    else if (c.path || c.dst) pathUris.push(c.dst ? (c.path + "#" + c.dst) : c.path);
+  }
+  ctx.seededRowCount = pathUris.length;
+
+  //  Ref-write forms first (no banner), once per run.
+  applyRefs(repo, k, ctx);
+
+  //  GIT-014: wire PUSH forms (`//host` / `ssh://host?br` / `https://host?br`)
+  //  ride ctx.args (a host URI); run them ONCE.  A wire-form ROW must NOT be
+  //  staged — filter it out of the path rows below (its push already ran).
+  applyWire(repo, k, ctx);
+  pathUris = pathUris.filter(function (uri) {
+    const ru = new URI(uri || "");
+    return !(ru.host || ru.authority ||
+             (ctx._putWirePaths && ctx._putWirePaths[ru.path || uri]));
+  });
+
+  //  No real path arg (a ref-only / wire-only run, or a bare `be put`).
+  if (pathUris.length === 0) {
+    if ((ctx.refs || []).length || ctx._putWireRan) { if (out) out.done(); return; }
+    //  PUT-004: bare `be put` — auto-pair moves + tracked-dirty walk (bareStage),
+    //  one whole-tree fold; open the `put:` header BEFORE the walk (native
+    //  PUTStage opens its table before move detection) so a PUTAMBIG refusal
+    //  carries the same partial banner (the edge-catch flushes it on the throw).
+    if (out && !ctx._putBannerOpen) { ctx._putBannerOpen = true; out.raw("put:"); }
+    const r = bareStage(repo, wtlog.open(repo), k);  // may throw PUTAMBIG
+    commitOps(repo, r.ops, ctx.T0);
+    if (out)
+      for (const op of r.ops)
+        if (op.path !== null && !op.silent)
+          out.row(op.dst ? (op.path + "#" + op.dst) : op.path, "put", 0n);
+    //  SUBS-044: then recurse mounted subs (pre-order), staging their interior.
+    bareStageSubs(repo, "", ctx);
+    if (out) out.done();
+    return;
+  }
+
+  //  Stage each path arg (file / dir / move leaf); tallies accumulate on ctx.
+  for (const uri of pathUris) putOne(repo, k, ctx, uri);
+
+  //  All-skip run is PUTNONE: emit the diag + throw so the loop edge flushes the
+  //  partial banner + skips before the non-zero exit (native put_stage_named).
+  if ((ctx._putStaged || 0) === 0) {
+    if ((ctx._putSkipped || 0) > 0) io.log("be put: no eligible paths\n");
     if (out) out.done();                 // JAB-003: flush the partial hunk on the throw
     throw "PUTNONE";                     // non-zero exit (native PUTNONE)
   }
-  putFlush(ctx);
-};
+  if (out) out.done();
+}
+
+put.jab = "args";
+module.exports = put;

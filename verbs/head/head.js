@@ -23,7 +23,6 @@
 
 "use strict";
 
-const be       = require("../../core/discover.js");
 const wtlog    = require("../../shared/wtlog.js");
 const store    = require("../../shared/store.js");
 const wire     = require("../../shared/wire.js");
@@ -45,15 +44,27 @@ function keyFor(h60) { return (h60 << 4n) | BigInt(T_COMMIT); }
 function h60(sha) { return hashlet60FromBytes(hexDecode(sha)); }
 
 //  --- the handler --------------------------------------------------------
-//  head's arg is a whole REMOTE URI (like get) — it rides the row verbatim; the
-//  handler resolves the remote at entry.  A repo MUST exist (cur is the compare
-//  baseline); a fresh clone-target has no cur, so head refuses cleanly there.
-module.exports = function handle(row, ctx) {
-  //  The seed carries "." for a NO-ARG `be head` (a ULOG row needs a non-empty
-  //  uri; loop.cli plants "." then the handler prefers ctx.repo) — treat it as
-  //  bare.  A real arg (`?br`, `//origin`, `ssh://origin?br`) rides row.uri.
-  const raw = (row && row.uri) || "";
-  const uri = (raw === ".") ? "" : raw;
+//  JAB-004: head's arg is a whole REMOTE URI (like get) — a READ/query verb, so
+//  it SELF-PARSES its URI (cat-style, NOT classifyArg) and reads be.repo (may be
+//  null, repo-less) / be.sink off the global.  head peeks ONE target at a time;
+//  the plain fn loops its args, one peek each.
+function head() {
+  //  Bare `be head` (zero args) is the STATUS check — one peek with no target.
+  if (arguments.length === 0) return headOne("", null);
+  for (let i = 0; i < arguments.length; i++) headOne(arguments[i], null);
+}
+
+//  JAB-004: peek ONE target — self-parse the remote-URI arg, read be.repo/be.sink
+//  (fallback ctx for the legacy direct-handler test), then advertise→resolve→
+//  verdict→report exactly as the legacy handler did.  A `head:` scheme prefix is
+//  shed first (cat-style); NEVER routes through resolve.classifyArg / seed.
+function headOne(arg, ctx) {
+  const _be = (typeof be !== "undefined") ? be : null;
+  const repo = (_be && _be.repo) || (ctx && ctx.repo) || null;
+
+  let raw = String(arg || "");
+  if (raw.indexOf("head:") === 0) raw = raw.slice(5);   // JAB-004: shed own scheme
+  const uri = (raw === ".") ? "" : raw;                 // loop's "." placeholder → bare
   const u = new URI(uri);
   const hasScheme = u.scheme !== undefined;
   const hasAuth   = u.authority !== undefined;
@@ -61,11 +72,14 @@ module.exports = function handle(row, ctx) {
 
   //  GIT-016: bare `be head` ≡ bare `be` — the local STATUS check (cur vs its
   //  parent/trunk, or its cached remote when cur IS the trunk).  No net, no
-  //  writes: DELEGATE to the status view (do NOT reinvent status), passing the
-  //  same row/ctx so it emits the same `status:` hunk this run's sink renders.
-  if (!hasScheme && !hasAuth && !branch) return status(row, ctx);
+  //  writes: DELEGATE to the status view (do NOT reinvent status).  Plain path
+  //  reads be off the global.
+  if (!hasScheme && !hasAuth && !branch)
+    return status();
 
-  const info = (ctx && ctx.repo) || be.find(io.cwd());
+  //  JAB-004: repo-less guard — head may run with be.repo=null (a fresh clone
+  //  dir has no cur to compare); refuse cleanly instead of dereferencing null.
+  const info = repo || be.find(io.cwd());
   const k = store.open(info.storePath, info.project);
   const cur = wtlog.open(info).curTip();
   const curSha = (cur && cur.sha && isFullSha(cur.sha)) ? cur.sha : "";
@@ -80,7 +94,9 @@ module.exports = function handle(row, ctx) {
             : /* local ?br */   peekLocal(k, branch, curSha);
   report(ctx, uri || "?" + branch, branch, res.rel, res.ahead, res.behind,
          res.tip, res.paths);
-};
+}
+head.jab = "args";
+module.exports = head;
 
 //  GIT-016 LOCAL `?branch`: cur vs a LOCAL branch tip — resolve `?branch` to its
 //  local ref sha (store.resolveRef), a pull-side verdict with NO remote index
@@ -196,12 +212,15 @@ function stripLeadRef(q) {
 //  GIT-016: the changed-PATHS diff (shared/changedpaths.js — cur's tree vs the
 //  tip's tree) follows, one `chg` row per differing FILE path (lex order).
 function report(ctx, uri, branch, rel, ahead, behind, tip, paths) {
-  if (!(ctx && ctx.sink)) return;
+  //  JAB-004: emit sink off global `be` (plain path), falling back to ctx (legacy).
+  const _be = (typeof be !== "undefined") ? be : null;
+  const sink = (_be && _be.sink) || (ctx && ctx.sink) || null;
+  if (!sink) return;
   //  Header row: the target ref (any `?ref`/`#pin` slot the uri already carries
   //  is shed) + the relation verb; the ahead/behind commit rows follow.
   const q = uri.indexOf("?"), base = q >= 0 ? uri.slice(0, q) : uri;
   const target = base + "?" + (branch || "") + "#" + (tip ? tip.slice(0, 8) : "");
-  const out = hunkrows(ctx.sink, "head:" + target);
+  const out = hunkrows(sink, "head:" + target);
   out.row(target, relVerb(rel), 0n);
   for (const c of ahead)
     out.row("?" + (c.hashlet || "") + (c.subject ? "#" + c.subject : ""),

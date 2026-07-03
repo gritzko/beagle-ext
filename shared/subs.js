@@ -58,7 +58,6 @@ function libDir() {
 //  SUBSDirty: open the sibling sub shard (be.find on the sub wt resolves
 //  store+title), read R4 (sub-wt cur tip), then compare by ancestry.
 function classifyMount(parentRepo, subPath, pin) {
-  const be    = require(libDir() + "/../core/discover.js");   // JSQUE-016: be.js -> core/
   const wtlog = require(libDir() + "/wtlog.js");
   const store = require(libDir() + "/store.js");
   const dag   = require(libDir() + "/dag.js");

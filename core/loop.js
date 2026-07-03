@@ -6,17 +6,19 @@
 "use strict";
 
 const registry = require("core/registry.js");
+//  JAB-004: the shared tokenizer — cli() coerces each already-split CLI argv
+//  token via argline.scalar() (the shape-2 rule) before PLAIN dispatch.
+const argline = require("core/../shared/argline.js");
 //  JSQUE-008: the integration seam — the real seed (resolution-at-entry) and
 //  emit sink (output-as-ULog) replace the JSQUE-002 stubs in the CLI entry.
 //  JSQUE-016: the entry shim (be/main.js) requires this, so argv[1] is the
 //  shim path; _here is the be/ ROOT (where core/ + shared/ live).
 const _self = process.argv[1];
 const _here = _self.slice(0, _self.lastIndexOf("/"));
-const resolve = require("core/resolve.js");
 const emit = require("core/emit.js");
-const be = require(_here + "/core/discover.js");
-const wtlog = require(_here + "/shared/wtlog.js");
-const store = require(_here + "/shared/store.js");
+//  JAB-004: the discover module stays intact + required; its API is folded onto
+//  the unified global `be` at loop entry (mintBe), and loop.js reads that global.
+const discover = require(_here + "/core/discover.js");
 //  JAB-029: the edge render — cli() turns the collected HUNK sink into fd-1
 //  bytes via bro.renderHunkLog (the ONE place mode plain/color/tlv is applied).
 const bro = require(_here + "/view/bro.js");
@@ -36,106 +38,15 @@ const pager = require(_here + "/views/bro/pager.js");
 //  (the proof the loop drove the queue; the real run cares only about effects).
 function run(opts) {
   opts = opts || {};
-  const seedRows = opts.seedRows || [];
-  const req = opts.require || require;
-
-  //  Resolve every distinct seed verb to a handler ONCE (warm cache).  A child
-  //  verb a handler enqueues is resolved lazily on first sight (same cache).
-  const handlers = registry.build(seedRows.map(function (r) { return r.verb; }), req);
-
-  //  JSQUE-020: the queue is now an IN-MEMORY FIFO (was a `.be/queue` ULOG).
-  const q = _memQueue(seedRows);
-
-  //  ctx: the per-run context every handler shares (re-entrant — handlers keep
-  //  no module-global accumulators; per-row state rides `row`).  This is the
-  //  interface JSQUE-004 (seed/resolve) and JSQUE-005 (emit) integrate against.
-  const ctx = {
-    repo: opts.repo || null,           // opened repo (JSQUE-004 resolves it)
-    T0: opts.T0 != null ? opts.T0 : ron.now(),  // cohort timestamp (one per run)
-    out: opts.out || _nullSink(),      // emit sink (JSQUE-005 supplies the real)
-    queue: q,                          // the live queue (for direct enqueue)
-    //  JSQUE-008: seed-pinned constants threaded to every handler — the flag
-    //  set + the resolved ref ops (resolution-at-entry; the queue round-trip
-    //  carries only ts/verb/uri, so these ride ctx, not the row).
-    flags: opts.flags || [],
-    refs: opts.refs || [],
-    resolved: opts.resolved || null,   // seedCtx's pinned coordinates
-    //  JSQUE-011: the whole seed-row batch (one entry per path arg) so a
-    //  batch verb (delete) can fold all its path forms in one handler pass —
-    //  the queue round-trip carries rows singly, but DELETE's `delete:` table,
-    //  dir-preflight barrier, and batch dirty-abort span the full arg list.
-    seedRows: seedRows,
-    //  JSQUE-013: PATCH's (ours, theirs, fork) commit-triple, pinned ONCE at
-    //  seed (resolve.seed); the per-file weave leaves read it off ctx.
-    triple: opts.triple || null,
-    //  JSQUE-010: real-path-arg seed count (0 ⇒ the "." row is a placeholder).
-    seededRowCount: opts.seededRowCount != null ? opts.seededRowCount : null,
-    //  JSQUE-012: the raw positional args (POST's commit message rides here,
-    //  seed-pinned — a non-path arg the queue uri can't carry).
-    args: opts.args || [],
-    //  the shared output mode (color|tlv|plain) — a view renders its hunk
-    //  stream through view/bro.js renderHunkLog in this mode.
-    mode: opts.mode || "plain",
-    //  JAB-029: the in-memory HUNK sink every content view feeds (no fd 1).
-    //  cli() owns ONE renderHunkLog(sink.log, mode) -> fd 1 at the edge; an
-    //  in-process caller (bro) passes its OWN sink and reads sink.log direct.
-    sink: opts.sink || _hunkSink(),
-  };
-
-  const order = [];
-  let dispatched = 0;
-  let row;
-  //  JSQUE-014: ONE loop-edge catch is the single source of truth for a refusal
-  //  — a handler `throw` (DELDIRTY/PUTNONE/POSTNONE/GETOVRL) jumps past the clean
-  //  edge-flush, so FLUSH the partial banner here (same outSort the clean edge
-  //  uses) THEN re-propagate to the top (jab maps it to the non-zero exit +
-  //  stderr diag; no process.exit in handlers — JS-026).  Handlers no longer
-  //  flush-before-throw (delete.js/post.js); the loop owns it.
-  try {
-    while ((row = q.next())) {
-      order.push(row.verb);
-      const handle = handlers[row.verb];
-      if (handle == null) {            // unconverted verb: resolve lazily once
-        const lazy = registry.build([row.verb], req);
-        handlers[row.verb] = lazy[row.verb];
-        if (handlers[row.verb] == null)
-          throw "loop: no handler for verb '" + row.verb + "' (one-shot fallback NYI)";
-      }
-      const result = handlers[row.verb](row, ctx);
-      dispatched++;
-      //  Fan-out: a handler returns { enqueue: [...] } to append child rows at
-      //  the tail; the cursor re-reads the watermark so they are seen this loop.
-      if (result && result.enqueue && result.enqueue.length)
-        q.append(result.enqueue);
-    }
-  } catch (e) {
-    if (ctx.out && ctx.out.flush) ctx.out.flush(ctx.outSort || null);
-    throw e;                           // re-propagate: process exit + stderr
-  }
-  //  JAB-003: a handler may register ctx._finalize to emit ONE accumulated hunk
-  //  after the whole queue drains (get: fan-out rows collected across dispatches).
-  if (ctx._finalize) ctx._finalize(ctx);
-  //  A handler may set ctx.outSort (a flush comparator) to own its render
-  //  order at the edge — GET: new+upd lex, then del lex (JSQUE-009).
-  return { dispatched: dispatched, order: order, outSort: ctx.outSort };
-}
-
-//  JSQUE-020: the in-memory work queue — a plain FIFO replacing the file-backed
-//  `.be/queue` ULOG (the durable-log/crash-resume machinery earned nothing once
-//  the barrier/fold was gone).  Exact consume-while-append semantics: `rows` is
-//  the seed batch; a monotonic `read` cursor walks it; a handler's {enqueue:[...]}
-//  appends at the TAIL and the cursor keeps draining (BFS/FIFO) until it hits the
-//  live end — identical order to the old ULOG read cursor over the fed watermark.
-function _memQueue(seedRows) {
-  const rows = seedRows.slice();
-  let read = 0;
-  return {
-    next: function () {
-      if (read >= rows.length) return undefined;   // reached the live tail
-      return rows[read++];
-    },
-    append: function (more) { for (const r of more) rows.push(r); return this; },
-  };
+  const out = opts.out || _nullSink();
+  //  JAB-004: PLAIN dispatch is the ONLY dispatch — a converted verb runs ONCE
+  //  as fn(...args) reading `be` (the legacy resolve.seed→queue→handle(row,ctx)
+  //  path is retired).  ONE edge-catch flushes the partial banner on a handler
+  //  throw (DELDIRTY/PUTNONE/…) then re-propagates (jab maps it to the non-zero
+  //  exit; no process.exit in handlers — JS-026).
+  try { opts.plain.fn.apply(null, opts.plain.args); }
+  catch (e) { if (out.flush) out.flush(null); throw e; }
+  return { dispatched: 1, order: [opts.plain.verb], outSort: null };
 }
 
 //  JAB-029: the in-memory HUNK sink — a grow-on-full HUNK ram log a content
@@ -203,6 +114,12 @@ function _viewDefault(token, here) {
   return "ls";                              // a dir, or an unresolvable path
 }
 
+//  JAB-004: mint/refresh the unified global `be`.  Folds the (intact) discover
+//  module's API onto globalThis.be, then overlays this run's ambient fields.
+function mintBe(ambient) {
+  return Object.assign(globalThis.be || (globalThis.be = {}), discover, ambient);
+}
+
 //  --- JSQUE-008: the canonical CLI entry (argv -> seed -> run -> flush) ---
 //  The SHARED integrated entry every later verb reuses: argv lowers to a verb +
 //  positional args + flags; the repo + its ambient coordinates are pinned ONCE
@@ -216,6 +133,26 @@ function _viewDefault(token, here) {
 //  opts2.reentry only gates the pager (a re-entry must NEVER open a nested one).
 function cli(argv, opts2) {
   opts2 = opts2 || {};
+  //  JAB-004: a driveSpell re-entry overlays its ambient onto the shared `be`;
+  //  snapshot the outer run's fields so the finally restores them (verbs read be.*).
+  const beSaved = opts2.reentry ? _snapBe() : null;
+  try {
+  return _cli(argv, opts2);
+  } finally { if (beSaved) _restoreBe(beSaved); }
+}
+
+//  JAB-004: snapshot/restore the `be` ambient (repo/sink/format/force/flags) —
+//  the fields the re-entrant driveSpell run overwrites on the shared global.
+function _snapBe() {
+  const b = globalThis.be || {};
+  return { repo: b.repo, sink: b.sink, format: b.format, force: b.force, flags: b.flags };
+}
+function _restoreBe(s) { Object.assign(globalThis.be || (globalThis.be = {}), s); }
+
+function _cli(argv, opts2) {
+  //  JAB-004: mint the `be` API up front so repo discovery's be.find (loop's +
+  //  every alias file's) resolves against the global; ambient overlaid below.
+  mintBe({});
   //  Split flags (a leading '-') from the positional args — flags are seed
   //  globals (pinned in ctx), positionals become seed rows.  The first
   //  positional is the parse SUBJECT (verb-or-URI); the rest are its args.
@@ -273,53 +210,31 @@ function cli(argv, opts2) {
              : io.isatty(1)                  ? "color"
              : "plain";
   const color = mode === "color";
+  //  JAB-004: the boolean force flag → its own be field (the get!/--force sugar).
+  const force = flags.indexOf("--force") >= 0;
 
-  //  Pin the repo + ambient coordinates ONCE at entry (JSQUE-004).  A fresh
-  //  GET clone targets an EMPTY dir (no `.be` yet) — be.find throws there, so
-  //  GET runs repo-less: the seed is the raw remote URI; the handler creates
-  //  the anchor itself (JSQUE-009).  Other verbs require an existing wt.
-  let repo = null, sctx = null, seeded;
-  try {
-    repo = be.find();
-    const wtl = wtlog.open(repo);
-    const k = store.open(repo.storePath, repo.project);
-    sctx = resolve.seedCtx(repo, wtl, k, { skipIgnore: true });
-    seeded = resolve.seed(verb, args, sctx, repo);
-  } catch (e) {
-    //  bro is a file viewer — runs with no/empty .be, like get.
-    if (verb !== "get" && verb !== "bro") throw e;   // GET/bro run repo-less
-    seeded = { rows: args.map(function (a) { return { path: a }; }), refs: [] };
-  }
-
-  //  argv -> branch-free seed rows.  No positional args (status) -> ONE self
-  //  row so the verb fires once; path/ref verbs fan to one row per arg + the
-  //  pinned ref ops.  resolve.seed never re-resolves a ref per row (JSQUE-004).
-  //  A ULog row needs a non-empty uri (an empty one is not materialised), so a
-  //  no-arg seed carries "." (cwd) — the handler prefers ctx.repo regardless.
-  //  JSQUE-012: a `#msg` arg seeds an EMPTY-path row (the message rides ctx.args);
-  //  filter those so a fold verb (post) fires once over its change-set, not per word.
-  const realRows = seeded.rows.filter(function (r) { return r.path; });
-  const seedRows = realRows.length
-        ? realRows.map(function (r) {
-            //  JSQUE-010: a move-form pin carries a dst (fragment) — emit the
-            //  full `path#dst` uri so the handler re-parses both slots.
-            return { verb: verb, uri: r.dst ? (r.path + "#" + r.dst) : r.path };
-          })
-        : [{ verb: verb, uri: "." }];
-
+  //  JAB-004: the DUAL-CONVENTION fork — a CONVERTED verb (`{jab:"args"}`) runs
+  //  the PLAIN path; a LEGACY verb keeps resolve.seed→queue; BOTH share the edge.
+  const conv = registry.build([verb], require)[verb];
   const out = emit.create({ color: color });   // JAB-025: tty/--color gate
   //  JAB-029: the content-view HUNK sink (cat/grep/spot/regex feed it, no fd 1);
   //  cli OWNS the one renderHunkLog(sink.log, mode) -> fd 1 edge write below.
   const sink = _hunkSink();
-  const res = run({
-    seedRows: seedRows, repo: repo, require: require,
-    out: out, sink: sink, flags: flags, refs: seeded.refs, resolved: sctx,
-    mode: mode,              // the shared color/tlv/plain output mode (ctx.mode)
-    triple: seeded.triple,   // JSQUE-013: forward the seed-pinned PATCH triple
-    //  JSQUE-010: count of REAL path-arg rows (vs the "." placeholder); a
-    //  ref-only run has 0, so the handler applies ctx.refs without staging ".".
-    seededRowCount: seeded.rows.length,
-    args: args,   // JSQUE-012: raw positional args (POST commit message)
+  let repo = null, res;
+
+  //  JAB-004: EVERY verb is a plain-args handler now — the legacy resolve.seed →
+  //  queue → handle(row,ctx) path is retired.  Open the repo (repo-less on throw,
+  //  e.g. a fresh GET clone or bro file view), mint `be`, coerce each split CLI
+  //  token via scalar(), and run() calls fn(...args) ONCE reading `be`.
+  if (!(conv && conv.jab === "args"))
+    throw "loop: verb '" + verb + "' has no plain-args handler";
+  try { repo = be.find(); } catch (e) { /* repo-less verb reads be.repo=null */ }
+  mintBe({ repo: repo, sink: sink, out: out, format: mode, force: force, flags: flags, verb: verb });
+  const pargs = args.map(function (t) { return argline.scalar(t); });
+  res = run({
+    repo: repo, require: require, out: out, sink: sink, flags: flags,
+    mode: mode, args: args,
+    plain: { verb: verb, fn: conv.fn, args: pargs },
   });
   //  JAB-030: the UNIVERSAL pager edge.  ONE output gate picks the render by the
   //  tty: on a TTY the interactive bro Pager over the run's hunk stream; on a

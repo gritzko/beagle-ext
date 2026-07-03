@@ -38,13 +38,13 @@
 
 "use strict";
 
-const be      = require("../../core/discover.js");
 const store   = require("../../shared/store.js");
 const wtlog   = require("../../shared/wtlog.js");
 const resolve = require("../../core/resolve.js");
 const isFullSha = require("../../shared/util/sha.js").isFullSha;
-//  JAB-003: emit a TRUE hunk via ctx.sink (retiring ctx.out) through the shared
-//  columnar→HUNK adapter.
+const ambient = require("../../shared/ambient.js");   // JAB-004: ctx→be bridge
+//  JAB-003: emit a TRUE hunk via the shared sink (retiring ctx.out) through the
+//  shared columnar→HUNK adapter.
 const hunkrows = require("../../shared/hunkrows.js");
 
 //  JS-082: a FULL 40-hex sha passes through verbatim iff the object exists; a
@@ -117,15 +117,19 @@ function treeOf(k, sha) {
   return null;
 }
 
-module.exports = function handle(row, ctx) {
-  const repo = (ctx && ctx.repo) || be.find();
-  if (!repo) return;
+//  JAB-004: size ONE arg — self-parse size:<uri>, read be.repo/be.sink.
+//  ambient.format() is read for parity with the sibling views though a bare
+//  decimal has no token to theme.
+function sizeOne(arg) {
+  const _be = (typeof be !== "undefined") ? be : null;
+  ambient.format();                              // JAB-004: mode read (plain==color here)
+  const repo = (_be && _be.repo) || ((_be && _be.find) ? _be.find() : null);
+  const sink = (_be && _be.sink) || null;
+  if (!repo || !sink) return;
 
-  //  The whole projector URI rides ctx.args (a fragment-only URI lowers to a "."
-  //  placeholder in the queue row), exactly like the landed tree:/cat: views.
-  //  Strip the `size:` scheme so the URI binding sees the bare body.
-  const rawArgs = (ctx && ctx.args && ctx.args.length) ? ctx.args : [row.uri];
-  let first = String(rawArgs[0] || "");
+  //  Self-parse the STRING arg; strip the `size:` scheme so the URI binding sees
+  //  the bare body (the analogue of cat's/blob's scheme strip).
+  let first = String(arg || "");
   if (first.indexOf("size:") === 0) first = first.slice("size:".length);
   const u = new URI(first);
   const path  = u.path || "";
@@ -146,10 +150,15 @@ module.exports = function handle(row, ctx) {
 
   //  3) emit ONE row: the decimal size, as a TRUE hunk on the canonical
   //     JAB-003: size:<path> uri.  out.raw appends "\n"; done() flushes to sink.
-  if (ctx && ctx.sink) {
-    const out = hunkrows(ctx.sink, "size:" + first);
-    out.raw(String(obj.bytes.length));
-    out.done();
-  }
-  //  Read-only leaf: no fan-out.
-};
+  const out = hunkrows(sink, "size:" + first);
+  out.raw(String(obj.bytes.length));
+  out.done();
+  //  Read-only leaf: no fan-out (per-arg; the dispatcher fans out over args).
+}
+
+//  JAB-004: PLAIN verb (`.jab="args"`) loops its args reading `be`.
+function size() {
+  for (let i = 0; i < arguments.length; i++) sizeOne(arguments[i]);
+}
+size.jab = "args";
+module.exports = size;

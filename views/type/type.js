@@ -35,12 +35,11 @@
 
 "use strict";
 
-const be     = require("../../core/discover.js");
 const store  = require("../../shared/store.js");
 const wtlog  = require("../../shared/wtlog.js");
 const resolve = require("../../core/resolve.js");
 const isFullSha = require("../../shared/util/sha.js").isFullSha;
-//  JAB-003: TRUE-hunk output via the shared columnar→hunk adapter (ctx.sink),
+//  JAB-003: TRUE-hunk output via the shared columnar→hunk adapter (be.sink),
 //  retiring the ctx.out columnar path for this view.
 const hunkrows = require("../../shared/hunkrows.js");
 
@@ -73,15 +72,16 @@ function resolveObjectSha(k, wtl, query, frag) {
   return (cur && cur.sha) || null;
 }
 
-module.exports = function handle(row, ctx) {
-  const repo = (ctx && ctx.repo) || be.find();
+//  JAB-004: type ONE arg — self-parse type:<uri>, read be.repo/be.sink, feed the
+//  same sink; `ctx` = direct-handler fallback (no global be).
+function typeOne(arg, ctx) {
+  const _be = (typeof be !== "undefined") ? be : null;
+  const repo = (_be && _be.repo) || (ctx && ctx.repo) || (_be && _be.find && _be.find()) || null;
+  const sink = (_be && _be.sink) || (ctx && ctx.sink) || null;
   if (!repo) return;
 
-  //  The whole projector URI rides ctx.args (a fragment-only URI lowers to a
-  //  "." placeholder in the queue row), exactly like tree:/cat:.  Strip the
-  //  `type:` scheme so the URI binding sees the bare body.
-  const rawArgs = (ctx && ctx.args && ctx.args.length) ? ctx.args : [row.uri];
-  let first = String(rawArgs[0] || "");
+  //  Strip the `type:` scheme so the URI binding sees the bare body (cat-style).
+  let first = String(arg || "");
   if (first.indexOf("type:") === 0) first = first.slice("type:".length);
   const u = new URI(first);
   const query = u.query || "";
@@ -101,10 +101,17 @@ module.exports = function handle(row, ctx) {
 
   //  3) emit the type word as ONE raw row into a TRUE hunk at the canonical
   //  `type:<uri>` (plain == colour: the type word carries no THEME SGR).
-  if (ctx && ctx.sink) {
-    const out = hunkrows(ctx.sink, "type:" + first);
+  if (sink) {
+    const out = hunkrows(sink, "type:" + first);
     out.raw(obj.type);
     out.done();
   }
   //  Read-only leaf: no fan-out.
-};
+}
+
+//  JAB-004: PLAIN verb (`.jab="args"`) loops its STRING args reading `be`.
+function type() {
+  for (let i = 0; i < arguments.length; i++) typeOne(arguments[i]);
+}
+type.jab = "args";
+module.exports = type;

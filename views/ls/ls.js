@@ -17,11 +17,11 @@
 //  re-discovers that shard via be.find, so `jab ls <path-in-sub>/` lists it.
 "use strict";
 
-const be       = require("../../core/discover.js");
 const wtlog    = require("../../shared/wtlog.js");
 const store    = require("../../shared/store.js");
 const classify = require("../../shared/classify.js");
 const join     = require("../../shared/util/path.js").join;
+const ambient  = require("../../shared/ambient.js");   // JAB-004: ctx→be bridge
 const render   = require("../../view/render.js");
 const theme    = require("../../view/theme.js");
 
@@ -107,71 +107,58 @@ function relDir(base, abs) {
   return abs.indexOf(pfx) === 0 ? abs.slice(pfx.length) + "/" : "";
 }
 
-//  The store + wtlog readers for a repo, memoised on ctx so an `lsr` run opens
-//  each shard (and builds its pack index) ONCE, reused across every per-dir
-//  hunk of that repo — the cross-dir saving the old whole-repo classify cache
-//  gave, without the whole-repo classify.
-function repoReaders(ctx, repo) {
-  const cache = ctx._lsReaders || (ctx._lsReaders = {});
+//  JAB-004: repo readers memoised in `cache` (was ctx._lsReaders; now a plain obj
+//  the fn owns for the recursion) so an lsr run opens each shard's index ONCE.
+function repoReaders(cache, repo) {
   if (cache[repo.wt]) return cache[repo.wt];
   return (cache[repo.wt] = { log: wtlog.open(repo),
                              k: store.open(repo.storePath, repo.project) });
 }
 
-module.exports = function handle(row, ctx) {
-  const recurse = row.verb === "lsr";
-  const out     = ctx && ctx.out;
-  const sink    = ctx && ctx.sink;
-  //  BRO-006: the U-target content hunk feeds the bro pager (color/TTY) AND the
-  //  --tlv wire (byte-parity with native `be ls: --tlv`, which carries the same
-  //  content hunk + U toks).  PLAIN stays the columnar `out` render: the loop's
-  //  non-TTY plain dump runs HUNKu8sFeedText, which lacks ls's htbl_trim, so the
-  //  content hunk would gain a trailing blank vs native ls --plain.  Gate on
-  //  mode: feed the sink (with U) for color/tlv, else the columnar `out`.
-  const wantU   = sink && (ctx && ctx.mode) !== "plain";
-  const topWt   = (ctx && ctx.repo && ctx.repo.wt) || ".";
+//  JAB-004: list ONE scope dir as ONE hunk; `queue` self-drives the lsr BFS (the
+//  plain path drops {enqueue}, so ls fans out itself). `be` else `ctx` (legacy).
+function lsOne(uri, verb, ctx, queue, rdCache) {
+  const _be   = (typeof be !== "undefined") ? be : null;
+  const out   = (_be && _be.out)  || (ctx && ctx.out)  || null;
+  const sink  = (_be && _be.sink) || (ctx && ctx.sink) || null;
+  //  BRO-006: color/tlv feed the U-target hunk; PLAIN keeps the columnar `out`
+  //  (the loop's plain dump lacks ls's htbl_trim → the hunk gains a trailing nl).
+  const wantU = sink && ambient.format() !== "plain";
+  const topWt = (_be && _be.repo && _be.repo.wt) || (ctx && ctx.repo && ctx.repo.wt) || ".";
 
-  //  Resolve the scope to an ABSOLUTE dir.  The seed row carries "." (the cwd
-  //  placeholder → the top wt), a wt-relative path (`sub/`), or — for an
-  //  enqueued child / sub-wt — an absolute path.
+  //  Resolve the scope to an ABSOLUTE dir: "." (cwd → top wt), a wt-relative
+  //  path (`sub/`), or an absolute path (a self-driven recursion child).
   let absScope;
-  if (!row.uri || row.uri === ".") absScope = topWt;
-  else if (row.uri[0] === "/")     absScope = row.uri;
-  else                             absScope = join(topWt, row.uri);
+  if (!uri || uri === ".") absScope = topWt;
+  else if (uri[0] === "/")  absScope = uri;
+  else                      absScope = join(topWt, uri);
   absScope = noSlash(absScope);
 
-  //  The OWNING repo of the scope dir — be.find re-discovers a submodule's
-  //  shard when the scope is inside a mount (the cross-store seam), else the
-  //  top repo.  A path anchoring nowhere falls back to the top repo.
+  //  The OWNING repo of the scope — be.find re-discovers a submodule's shard
+  //  when the scope is inside a mount (cross-store seam), else the top repo.
   let repo;
-  try { repo = be.find(absScope); } catch (e) { repo = (ctx && ctx.repo) || null; }
+  try { repo = _be ? _be.find(absScope) : be.find(absScope); }
+  catch (e) { repo = (_be && _be.repo) || (ctx && ctx.repo) || null; }
   if (!repo) return;
 
   const scopePfx = relDir(repo.wt, absScope);               // rel to OWNING wt
   const navPfx   = relDir(topWt, absScope);                 // rel to TOP wt
-  const banner   = row.verb + ":" + navPfx;                  // the hunk URI
-  const rd        = repoReaders(ctx, repo);
+  const banner   = verb + ":" + navPfx;                     // the hunk URI
+  const rd        = repoReaders(rdCache, repo);
   const res       = classify.classifyDir(repo, rd.log, rd.k, scopePfx);
 
-  //  Merge files + dirs into ONE lex-ordered entry list.  Sort key: a file by
-  //  its name, a dir by `<name>/` — so a file `deep.txt` sorts before a dir
-  //  `deep/`, exactly as native ls: orders the full paths.  A dir row's date is
-  //  BLANK (ts 0n): native ls: dates no directory, and a recursive newest-mtime
-  //  was never asked for (computing it was the whole O(repo) cost).
+  //  Merge files + dirs into ONE lex-ordered entry list (a file `deep.txt` sorts
+  //  before a dir `deep/`, as native ls: orders full paths).  A dir row's date
+  //  is BLANK (ts 0n): native ls: dates no directory.
   const entries = [];
-  for (const f of res.files) {
-    //  DIS-057 RULING 2026-06-29: a rename lists as the `rmv`(src)+`mov`(dst)
-    //  pair (untied from native's `mov src -> dst` + `new dst`) — each is a plain
-    //  `<bucket> <name>` row, no `-> dst` arrow.
+  for (const f of res.files)
+    //  DIS-057: a rename lists as the `rmv`(src)+`mov`(dst) pair, no `-> dst`.
     entries.push({ key: f.name, dir: false, text: f.name, verb: f.bucket, ts: f.ts });
-  }
   for (const name of res.dirs)
     entries.push({ key: name + "/", dir: true, name: name });
   entries.sort(function (a, b) { return a.key < b.key ? -1 : a.key > b.key ? 1 : 0; });
 
-  //  BRO-006: color/tlv emit ONE content HUNK (text + tok32) with a hidden `U`
-  //  click-target per row — mirroring sniff/LS.c.  PLAIN keeps the byte-identical
-  //  columnar `out` render (the loop's plain dump lacks ls's htbl_trim).
+  //  BRO-006: color/tlv → ONE U-target content HUNK; PLAIN → the columnar `out`.
   if (wantU) emitHunk(sink, banner, navPfx, entries);
   else if (out) {
     out.raw(banner);
@@ -180,15 +167,30 @@ module.exports = function handle(row, ctx) {
       else       out.row(e.text, e.verb, e.ts);
   }
 
-  //  lsr: fan out — one `lsr:<child>` row per immediate subdir / mount, in lex
-  //  order (BFS via the FIFO queue).  ls: is a leaf (no enqueue).
-  if (recurse) {
-    const enqueue = [];
-    for (const e of entries) if (e.dir)
-      enqueue.push({ verb: row.verb, uri: join(absScope, e.name) });
-    if (enqueue.length) return { enqueue: enqueue };
+  //  lsr: push one `lsr:<child>` abspath per subdir/mount (lex) onto the FIFO ls
+  //  drains itself (was a {enqueue} the plain path drops).  ls: is a leaf.
+  if (queue)
+    for (const e of entries) if (e.dir) queue.push(join(absScope, e.name));
+}
+
+//  JAB-004: PLAIN verb (`.jab="args"`) loops args reading `be`.
+function ls() {
+  //  JAB-004: each arg is a URI token — its `lsr:`/`ls:` scheme (stripped) drives
+  //  recursion; no positional lists "." (the legacy seed's "." row).
+  const rdCache = {};
+  const argv = arguments.length ? arguments : ["."];
+  for (let i = 0; i < argv.length; i++) {
+    let arg = String(argv[i] || "");
+    let verb = "ls";
+    if (arg.indexOf("lsr:") === 0) { verb = "lsr"; arg = arg.slice(4); }
+    else if (arg.indexOf("ls:") === 0) { verb = "ls"; arg = arg.slice(3); }
+    const queue = verb === "lsr" ? [] : null;
+    lsOne(arg, verb, null, queue, rdCache);
+    while (queue && queue.length) lsOne(queue.shift(), "lsr", null, queue, rdCache);
   }
-};
+}
+ls.jab = "args";
+module.exports = ls;
 
 //  BRO-006: expose the U-target hunk builders for the repro test (the dog/HUNK
 //  tok-build model — same idea as log.js's exported tok()/appendRow).

@@ -10,6 +10,7 @@
 
 const store = require("../../shared/store.js");
 const join  = require("../../shared/util/path.js").join;
+const ambient = require("../../shared/ambient.js");   // JAB-004: ctx→be bridge
 const bro   = require("../../view/bro.js");
 const EMPTY32 = new Uint32Array(0);
 
@@ -112,15 +113,16 @@ function readRefBytes(k, ref, path) {
   return found;
 }
 
-module.exports = function handle(row, ctx) {
-  const mode = (ctx && ctx.mode) || "plain";
-  const repo = (ctx && ctx.repo) || null;
-  if (!repo) return;
+//  JAB-004: cat ONE arg — self-parse cat:<path>[?ref], read be.repo/be.sink +
+//  ambient.format(), feed the same sink.
+function catOne(arg) {
+  const _be = (typeof be !== "undefined") ? be : null;
+  const mode = ambient.format();
+  const repo = _be && _be.repo;
+  const sink = _be && _be.sink;
+  if (!repo || !sink) return;
 
-  //  Parse cat:<path>[?ref] off the raw arg (ctx.args carries the whole URI;
-  //  a fragment-only seed row lowers to a "." placeholder — see search.js).
-  const rawArgs = (ctx && ctx.args && ctx.args.length) ? ctx.args : [row.uri];
-  let first = String(rawArgs[0] || "");
+  let first = String(arg || "");
   if (first.indexOf("cat:") === 0) first = first.slice(4);
   const u = new URI(first);
   const path = u.path || "";
@@ -134,10 +136,8 @@ module.exports = function handle(row, ctx) {
   if (bytes == null || bytes.length === 0) return;
 
   const ext = bro.pathExt(path);            // "js" / "" — drives tok.parse
-  //  JAB-029: feed each hunk into the caller-owned in-memory HUNK sink (ctx.sink)
-  //  — NO fd 1 here; the loop edge (cli) renders sink.log to fd 1 in the mode.
-  const sink = ctx && ctx.sink;
-  if (!sink) return;
+  //  JAB-029: feed each hunk into the shared in-memory HUNK sink (be.sink) — NO
+  //  fd 1 here; the loop edge (cli) renders sink.log to fd 1 in the mode.
   let off = 0, line = 1;
   while (off < bytes.length) {
     //  1 MiB hunk, backed up to the last line boundary so a line never splits.
@@ -158,4 +158,12 @@ module.exports = function handle(row, ctx) {
     for (let i = off; i < end; i++) if (bytes[i] === 10) line++;
     off = end;
   }
-};
+}
+
+//  JAB-004: PLAIN verb (`.jab="args"`) loops its args reading `be`; the legacy
+//  `cat(row, ctx)` shape (row `.uri` + ctx `.sink`, no global be) still routes via catOne.
+function cat() {
+  for (let i = 0; i < arguments.length; i++) catOne(arguments[i]);
+}
+cat.jab = "args";
+module.exports = cat;

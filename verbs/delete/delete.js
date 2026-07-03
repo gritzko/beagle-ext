@@ -35,7 +35,6 @@
 //  against this module's own dir — robust under the resident loop (NOT
 //  argv[1]/__dirname; the handler is require'd, never the entry script).
 //  JSQUE-016: by-verb reorg — core/discover + shared/ kernel via ../../ .
-const be      = require("../../core/discover.js");
 const wtlog   = require("../../shared/wtlog.js");
 const store   = require("../../shared/store.js");
 const stage   = require("../../shared/stage.js");
@@ -44,6 +43,9 @@ const recurse = require("../../core/recurse.js");     // SUBS-044: mounted-sub w
 //  JAB-003: TRUE-hunk output via the shared columnar→hunk adapter (ctx.sink),
 //  retiring ctx.out for the `delete:` table.
 const hunkrows = require("../../shared/hunkrows.js");
+const ambient  = require("../../shared/ambient.js");   // JAB-004: ctx→be bridge
+//  JAB-004: plain-args DELETE owns its fan-out INLINE via classifyArgLocal — a
+//  `?br` tombstone vs a path/dir row, no resolve.*/hex (delBranch drops by name).
 
 const DELDIRTY = "DELDIRTY";
 const SNIFFFAIL = "SNIFFFAIL";
@@ -300,63 +302,85 @@ function emitBanner(out, banner) {
   }
 }
 
-//  JSQUE-011: `be delete` as a loop HANDLER.  Folds the WHOLE batch on its
-//  FIRST row (ctx._delDone guard) — branch tombstones (ctx.refs) are the
-//  pre-loop barrier, then DELStage runs the bare/path/dir forms; output via
-//  ctx.out (ONE flush at the loop edge).  A DELDIRTY refusal throws past the
-//  loop (process exit code) AFTER emitting the partial banner, matching native.
-module.exports = function handle(row, ctx) {
-  //  Batch-fold guard: the seed lowers each path arg to its own row, but
-  //  DELETE's `delete:` table / dir-preflight / dirty-abort span the full arg
-  //  list — process once, no-op on every later row.
-  if (ctx._delDone) return;
-  ctx._delDone = true;
+//  JAB-004: delete's OWN arg test (replaces resolve.classifyArg) — delete is a
+//  FILE-LIST verb, so an arg is EITHER a `?br` branch tombstone (non-empty query,
+//  no path) OR a plain path/dir.  No sha/hex resolution: delBranch drops the
+//  label by NAME (its tombstone is `?br#0…0`), so tests use only the bare `?feat`
+//  form — the trunk-reset / `?<40hex>` / `?br#sha` / move forms are put/get's, not
+//  delete's.  Returns { branch } for a tombstone or { path } for a file/dir.
+function classifyArgLocal(arg) {
+  const u = new URI(arg);
+  const q = u.query || "", path = u.path || "";
+  if (q !== "" && path === "") return { branch: q };   // `?br` tombstone
+  return { path: path || q };                           // path / dir / bareword
+}
 
-  const flags = (ctx && ctx.flags) || [];
-  const recursive = flags.indexOf("-r") >= 0 || flags.indexOf("--force") >= 0;
-  const repo = (ctx && ctx.repo) || be.find();
+//  JAB-004: plain-args DELETE — `delete(...args)` off global `be`, called ONCE
+//  so the fold spans the whole arg batch (no per-row `_delDone` re-entry guard).
+function deleteVerb() {
+  const _be = (typeof be !== "undefined") ? be : null;
+  const flags = (_be && _be.flags) || [];
+  //  JAB-004: synthetic run ctx mirroring the loop ctx the helpers read.
+  const ctx = { repo: _be && _be.repo, sink: _be && _be.sink,
+                T0: ron.now(), flags: flags };
+  const argv = [];
+  for (let i = 0; i < arguments.length; i++) argv.push(String(arguments[i]));
+  return delRun(ctx, argv);
+}
+
+//  JAB-004: the run driver.  Folds the WHOLE arg batch in one linear pass:
+//  classify argv into `?br` tombstone ops (the PRE-LOOP barrier) vs path/dir/bare
+//  rows, run DELStage ONCE, emit the shared `delete:` table, then ONE terminal
+//  DELDIRTY throw + ONE flush at the fold's end.
+function delRun(ctx, argv) {
+  const force = ambient.force();              // JAB-004: force off be (or ctx)
+  const recursive = (ctx.flags || []).indexOf("-r") >= 0 || force;  // -r reads flags
+  const repo = ctx.repo || be.find();
+  ctx.repo = repo;
   const k = store.open(repo.storePath, repo.project);
 
-  //  Branch tombstones FIRST (the pre-loop barrier): each `?br` form pinned by
-  //  the seed into ctx.refs (op create/set) — a tombstone drops the label.
-  for (const ref of (ctx.refs || [])) {
+  //  JAB-004: PLAIN owns the fan-out INLINE (no seedCtx) — split each arg into a
+  //  `?br` tombstone vs a path/dir row.
+  const refs = [], pathRaws = [];
+  for (const arg of argv) {
+    const c = classifyArgLocal(arg);
+    if (c.branch != null) refs.push({ branch: c.branch });
+    else if (c.path) pathRaws.push(c.path);
+  }
+
+  //  Branch tombstones FIRST (the pre-loop barrier): each `?br` op drops the
+  //  label deepest-first before any unlink leaf runs.
+  for (const ref of refs) {
     if (ref.branch == null) continue;
     delBranch(repo, ref.branch || "", recursive);
   }
 
-  //  Path/bare forms: the seed scatters path args one-per-row.  Reassemble the
-  //  batch from ctx.seedRows, dropping the synthetic "." a no-path seed carries
-  //  (loop.js collapses an EMPTY seed to ONE "." row — true for both a bare
-  //  `be delete` AND a branch-only `be delete ?br`; ctx.refs disambiguates).
-  const pathRaws = [];
-  for (const sr of (ctx.seedRows || [])) {
-    const u = sr.uri;
-    if (u == null || u === ".") continue;
-    pathRaws.push(u);
-  }
   //  A pure branch-form invocation (only `?br` args, no path) prints nothing
   //  extra — DELStage does NOT run.  Only a bare `be delete` (no args at all,
-  //  hence no ctx.refs) runs the sweep; with refs present + no paths, the synth
-  //  "." is the branch op's residue, not a sweep request.
-  if (pathRaws.length === 0 && (ctx.refs || []).length > 0) return;
+  //  hence no refs) runs the sweep; refs present + no paths is a ref-only run.
+  if (pathRaws.length === 0 && refs.length > 0) return;
 
   const res = delStage(repo, k, pathRaws, recursive);
   if (res.rows.length > 0) {
     const uris = res.rows.map(function (r) { return { verb: "delete", uri: r.uri }; });
     ulog.append(repo.bePath, uris);
   }
-  //  JAB-003: route the SAME banner through the hunk adapter (ctx.sink) — the
+  //  JAB-003: route the SAME banner through the hunk adapter (be.sink) — the
   //  canonical `delete:` table hunk; done() flushes before any DELDIRTY throw.
-  if (ctx && ctx.sink) {
-    const out = hunkrows(ctx.sink, "delete:");
+  const sink = ctx.sink || (typeof be !== "undefined" && be.sink);
+  if (sink) {
+    const out = hunkrows(sink, "delete:");
     emitBanner(out, res.banner);        // always (the open `delete:` table)
     out.done();
   }
   if (res.dirty) {
-    //  JSQUE-014: the loop edge now flushes the partial banner before the throw
-    //  propagates (no per-handler flush); just emit the diag + throw.
+    //  JSQUE-014: the loop edge flushes the partial banner before the throw
+    //  propagates (no per-handler flush); just emit the diag + throw ONCE.
     io.log("be delete: " + res.dirtyPath + " has unstamped changes — "
            + "stage with `be put` or revert before deleting\n");
     throw DELDIRTY;                      // non-zero exit (native DELDIRTY)
   }
-};
+}
+
+deleteVerb.jab = "args";
+module.exports = deleteVerb;

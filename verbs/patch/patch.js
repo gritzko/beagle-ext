@@ -1,6 +1,7 @@
-//  patch.js — `be patch` as a loop HANDLER (JSQUE-013, was JS-052 one-shot).
-//  The (ours, theirs, fork) commit triple + scope are pinned ONCE at seed
-//  (resolve.seed -> ctx.triple); this handler walks the three trees in tandem,
+//  patch.js — `be patch` as a plain-args verb (JAB-004; was the JSQUE-013 loop
+//  HANDLER).  patch(...args) resolves its OWN (ours, theirs, fork) triple via
+//  patchscope.resolve (the central seed no longer pins ctx.triple); the run core
+//  walks the three trees in tandem,
 //  merges each diverged file into the worktree (conflict fences), restamps
 //  every touched file, appends ONE `patch` provenance ULOG row (a BARRIER — one
 //  row for the WHOLE absorbed set, never per-file), and pushes the per-file
@@ -27,7 +28,6 @@
 //  JSQUE-013: scope/triple is seed-resolved (resolve.seed -> patchscope), so
 //  this handler no longer requires patchscope/render — output rides ctx.out.
 //  JSQUE-016: by-verb reorg — core/discover + shared/ kernel via ../../ .
-const be        = require("../../core/discover.js");
 const wtlog     = require("../../shared/wtlog.js");
 const store     = require("../../shared/store.js");
 const checkout  = require("../../shared/checkout.js");
@@ -45,6 +45,11 @@ const submount  = require("../../shared/submount.js");
 //  JAB-003: TRUE-hunk output via the shared columnar→hunk adapter (ctx.sink),
 //  retiring the ctx.out columnar path for this verb.
 const hunkrows  = require("../../shared/hunkrows.js");
+//  JAB-004: plain-args PATCH resolves its OWN (ours,theirs,fork) triple via
+//  patchscope.resolve (the central seed no longer pins ctx.triple); ambient
+//  bridges be↔ctx for the defensive direct-handler shape.
+const patchscope = require("../../shared/patchscope.js");
+const ambient    = require("../../shared/ambient.js");
 const join = pathlib.join;
 
 //  A commit id for the weave is the hi64 of its sha1, a 16-char hex hashlet
@@ -353,20 +358,36 @@ function patchRowUri(scope, theirs) {
   return "?" + theirs;                                   // NEXT
 }
 
-//  JSQUE-013: `be patch` as a loop HANDLER.  Converted from a `main();`
-//  one-shot to `module.exports = handle(row, ctx)` — the (ours,theirs,fork)
-//  triple + scope ride ctx.triple (seed-pinned, resolution-at-entry), the repo
-//  rides ctx.repo, output goes through ctx.out (ONE flush at the loop edge),
-//  sibling libs via relative ./.  No process.argv read, no self-run tail.
-module.exports = function handle(row, ctx) {
-  const info = (ctx && ctx.repo) || be.find((row && row.uri) || undefined);
-  const wtl = (ctx && ctx.resolved && ctx.resolved._wtl) || wtlog.open(info);
-  const reader = (ctx && ctx.resolved && ctx.resolved._reader)
-                 || store.open(info.storePath, info.project);
+//  JAB-004: plain-args PATCH — `patch(...args)` off global `be`, called ONCE.
+function patch() {
+  const _be = (typeof be !== "undefined") ? be : null;
+  const argv = [];
+  for (let i = 0; i < arguments.length; i++) argv.push(String(arguments[i]));
+  //  JAB-004: strip a `patch:` scheme prefix off the sole URI arg (cat idiom);
+  //  --nosub rides be.flags (loop.js split off the leading '-' flags already).
+  let arg = argv.length ? argv[0] : "";
+  if (arg.indexOf("patch:") === 0) arg = arg.slice(6);
+  return patchRun({ repo: _be && _be.repo, sink: _be && _be.sink,
+                    flags: (_be && _be.flags) || [], triple: null, arg: arg });
+}
+patch.jab = "args";
+module.exports = patch;
 
-  //  Scope + the ours/theirs/fork commit triple are pinned ONCE at seed
-  //  (resolve.seed -> ctx.triple; JSQUE-004).  Never re-resolved live here.
-  const sc = (ctx && ctx.triple);
+//  JAB-004: the run core (plain entry + the sub re-entry share it).  Resolves
+//  its OWN (ours,theirs,fork) triple: the central seed no longer pins it, so
+//  here we open the store reader + wtlog and call patchscope.resolve ourselves
+//  (a pre-pinned ctx.triple, from the sub re-entry, is honoured as-is).
+function patchRun(ctx) {
+  const info = ctx.repo || be.find(ctx.arg || undefined);
+  ctx.repo = info;
+  const wtl = wtlog.open(info);
+  const reader = store.open(info.storePath, info.project);
+
+  //  Scope + the ours/theirs/fork commit triple.  The plain path has NO central
+  //  seed (resolve.seed no longer pins ctx.triple), so PATCH pins its OWN triple
+  //  from its commit arg via patchscope.resolve over the same wtl + reader.  A
+  //  sub re-entry supplies ctx.triple directly (the advanced sub pins).
+  const sc = ctx.triple || patchscope.resolve(ctx.arg || "", wtl, reader);
   if (!sc) throw "PATCHFAIL: a patch URI is required (`?<br>` | `?<br>!` | `#<sha>`)";
 
   //  Build the three tree maps; the union of their paths is the walk set.
@@ -443,7 +464,7 @@ module.exports = function handle(row, ctx) {
   }
 
   emitBanner(ctx, sc, rc.rows, ts);
-};
+}
 
 //  DIS-058 D17 (POST-ORDER sub descent, mirrors post.js postSubs): for each
 //  MOUNTED sub whose gitlink pin advanced (theirs ≠ ours), recurse `be patch`
@@ -501,9 +522,11 @@ function runSubPatch(info, ctx, subRepo, job) {
   //  empty fork (root-pinned sub) drops to the no-base degenerate merge.
   const subTriple = { scope: "NAMED", branch: "", ours: job.ours,
                       theirs: job.theirs, fork: job.fork };
-  const subCtx = { repo: subRepo, sink: ctx && ctx.sink, triple: subTriple,
-                   flags: (ctx && ctx.flags) || [] };
-  module.exports({ uri: subRepo.wt }, subCtx);
+  //  JAB-004: re-enter the run core DIRECTLY with the pinned sub triple (a child
+  //  synthetic ctx) — no global `be` swap, so the sub's rows ride the SAME sink
+  //  and aggregate into the parent banner ([Submodules] §"sub reports aggregated").
+  patchRun({ repo: subRepo, sink: ctx && ctx.sink, triple: subTriple,
+             flags: (ctx && ctx.flags) || [], arg: subRepo.wt });
 }
 
 //  Banner as a TRUE hunk: the canonical `patch:<rowUri>` hunk header, then the

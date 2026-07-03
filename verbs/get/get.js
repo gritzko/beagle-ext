@@ -33,16 +33,17 @@ const ingest   = require("../../shared/ingest.js");
 const pathlib  = require("../../shared/util/path.js");
 const ulog     = require("../../shared/ulog.js");
 const sha      = require("../../shared/util/sha.js");
-const be       = require("../../core/discover.js");
 //  JAB-003: get emits a TRUE hunk (accumulated across dispatches, flushed once).
 const hunkrows = require("../../shared/hunkrows.js");
 const wtlog    = require("../../shared/wtlog.js");
 const conflict = require("../../shared/conflict.js");
 const submount = require("../../shared/submount.js");   // DIS-058 D2-D5 sub mount
+const ambient  = require("../../shared/ambient.js");   // JAB-004: ctx→be bridge
 const join = pathlib.join, dirname = pathlib.dirname;
 const isFullSha = sha.isFullSha;
 
 const writeWtlog = ulog.write;
+
 const appendWtlog = ulog.append;
 
 //  SUBS-041: cap the checkout sub-mount RECURSION depth.  A deep/cyclic gitlink
@@ -289,11 +290,14 @@ function isRemoteSeed(uri) {
   return path.replace(/\/+$/, "").slice(-3) === ".be";
 }
 
-//  --- the handler --------------------------------------------------------
+//  --- the per-row dispatcher (was the top-level handle) ------------------
 //  Dispatch by row provenance: a FAN-OUT child (reconcile/leaf/fold) only
 //  appears AFTER a seed pinned ctx._get, so `ctx._get` set ⇒ fan-out; unset ⇒
 //  a top-level seed (remote clone/switch, cached host, or an in-repo form).
-module.exports = function handle(row, ctx) {
+//  JAB-004: plain dispatch has no loop queue — the get() driver below owns an
+//  in-fn FIFO and calls this once per (seed + fan-out) row; it returns
+//  { enqueue } exactly as the legacy queue path did.
+function dispatchRow(row, ctx) {
   const uri = (row && row.uri) || "";
   if (uri === DELSWEEP) return delSweep(row, ctx);   // BARRIER fold row
   if (uri === CONFMARK) {                              // D5: post-leaf conflict gate
@@ -304,7 +308,7 @@ module.exports = function handle(row, ctx) {
   if (ctx._get) return handleReconcileOrLeaf(uri, ctx);   // a fan-out child
   if (isRemoteSeed(uri)) return handleSeed(uri, ctx);     // remote/clone/cached
   return inRepoSeed(uri, ctx);                            // D1-D4 in-repo forms
-};
+}
 
 //  SEED: resolve the remote once (resolution-at-entry), anchor the wtlog, emit
 //  the `get ?<branch>#<hashlet>` banner + any pulled-commit rows, then run the
@@ -320,7 +324,7 @@ function handleSeed(uri, ctx) {
   //  DIS-058 D4: the parent's SOURCE (this remote) so a gitlink leaf can fetch
   //  its child shard from the SAME source (project swapped to the sub title).
   r.source = rem;
-  return fanoutWholeTree(ctx, r, wt, ctx.flags && ctx.flags.indexOf("--force") >= 0);
+  return fanoutWholeTree(ctx, r, wt, ambient.force());   // JAB-004: force off be
 }
 
 //  Pin ctx._get, run the dirty-overlap pre-pass, emit the banner + pulled-commit
@@ -423,7 +427,7 @@ function inRepoSeed(uri, ctx) {
   //  shed) OR a trailing/lone `!` on the arg.  Force discards local edits — a
   //  CLEAN tree reset (the leaf clean-overwrites; the dirty-overlap pre-pass and
   //  the weave-merge are bypassed).
-  let force = !!(ctx.flags && ctx.flags.indexOf("--force") >= 0);
+  let force = ambient.force();   // JAB-004: force off be
   if (uri === "!") { uri = ""; force = true; }
   else if (uri.length > 1 && uri[uri.length - 1] === "!") {
     uri = uri.slice(0, -1); force = true;
@@ -912,5 +916,39 @@ function sortGetRows(rows) {
   return post.concat(nu, del);
 }
 
+//  JAB-004: plain-args GET — `get(...args)` off the global `be`, called ONCE;
+//  it OWNS its fan-out via an in-fn FIFO (the loop queue that drained {enqueue}
+//  is gone), so there is no legacy `(row,ctx)` shape to forward to.
+function get() {
+  const _be = (typeof be !== "undefined") ? be : null;
+  //  JAB-004: synthetic run ctx mirroring the loop ctx the helpers read — repo
+  //  may be null (a fresh clone targets an empty dir; inRepoSeed be.find-falls
+  //  back).  T0 is this cohort's ts (the plain branch never sets ctx.T0).
+  const ctx = {
+    repo: _be && _be.repo, sink: _be && _be.sink, out: _be && _be.out,
+    T0: ron.now(),
+  };
+  const argv = [];
+  for (let i = 0; i < arguments.length; i++) argv.push(String(arguments[i]));
+  //  Bare `jab get` seeds a "." placeholder (a whole-tree FF of cur's branch),
+  //  matching the loop's no-arg seed row.
+  if (argv.length === 0) argv.push(".");
+  //  JAB-004: OWN the fan-out — an in-fn FIFO replaces the loop queue.  Seed one
+  //  row per arg, drain consume-while-append, honouring each {enqueue} the seed/
+  //  reconcile/leaf helpers return (their staging engine stays byte-identical).
+  const q = argv.slice();
+  while (q.length) {
+    const uri = q.shift();
+    const res = dispatchRow({ verb: "get", uri: uri }, ctx);
+    if (res && res.enqueue && res.enqueue.length)
+      for (const r of res.enqueue) q.push(r.uri);
+  }
+  //  JAB-004: flush the ONE accumulated get hunk after the queue drains (the
+  //  plain branch's ctx._finalize is the loop ctx, not this synthetic one).
+  flushGet(ctx);
+}
+
 //  jab injects module.exports for a required module; the loop requires this as
-//  the `get` verb handler.  No self-run tail (JSQUE-009: handler, not main()).
+//  the `get` verb handler.  JAB-004: opt into plain-args dispatch.
+get.jab = "args";
+module.exports = get;

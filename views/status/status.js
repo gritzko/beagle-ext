@@ -23,12 +23,12 @@
 //  JSQUE-008: sibling libs via relative require ("./lib/X.js"), resolved against
 //  this module's own dir — robust under the resident loop (not argv[1]/__dirname).
 //  JSQUE-016: by-verb reorg — core/discover + shared/ kernel + view/ via ../../ .
-const be       = require("../../core/discover.js");
 const wtlog    = require("../../shared/wtlog.js");
 const store    = require("../../shared/store.js");
 const classify = require("../../shared/classify.js");
 const dag      = require("../../shared/dag.js");
 const subs     = require("../../shared/subs.js");
+const ambient  = require("../../shared/ambient.js");   // JAB-004: ctx→be bridge
 const render   = require("../../view/render.js");
 const theme    = require("../../view/theme.js");
 //  JAB-004: render.js's dateCol/verbCol/writeStdout/shQuote are no longer
@@ -83,51 +83,60 @@ const NAV_DIFF = {
 //  Depth-first is why we recurse in-process here rather than fanning breadth-
 //  first `status <subWt>` rows onto the FIFO queue (which would interleave a
 //  grandchild AFTER a later sibling — the wrong order).
-module.exports = function handle(row, ctx) {
+//  JAB-004: PLAIN verb (`.jab="args"`) — reads ambient off global `be`, fires
+//  ONCE over the top wt (a no-positional COLUMNAR view). Path args are ignored —
+//  status describes THE worktree, not a per-arg fan-out; fire once at the top.
+function status() {
+  return statusOne(null, null);
+}
+
+//  Emit the top wt's status (+ its mounted subs, depth-first). Ambient off `be`
+//  (plain path), falling back to `ctx` (legacy direct-handler test). `row.uri`
+//  (legacy) may pin a sub wt root; the plain path always starts at be.repo.
+function statusOne(row, ctx) {
+  const _be   = (typeof be !== "undefined") ? be : null;
+  const emitOut = (_be && _be.out)  || (ctx && ctx.out)  || null;   // columnar (plain)
+  const sink    = (_be && _be.sink) || (ctx && ctx.sink) || null;   // U-target hunk
+
   //  Recursion (relaying each mounted sub's status as a path-prefixed
-  //  `status:<subpath>` hunk) is now DEFAULT-ON (JAB-024): a bare `jab status`
+  //  `status:<subpath>` hunk) is DEFAULT-ON (JAB-024): a bare `jab status`
   //  recurses into mounted subs, byte-matching native bare `be --plain`'s
-  //  BEDefault relay (be_relay_subs) — the recursing producer.  `--nosub`
-  //  SUPPRESSES the walk → only the parent hunk, byte-matching native
-  //  `be status --plain` (the flat verb).  `--sub` is still accepted but is a
-  //  no-op now (recursion is the default); it stays for symmetry / explicitness.
-  //  Flags are seed-pinned (resolution-at-entry, JSQUE-004) — read from ctx,
-  //  not the row (the queue round-trip carries only ts/verb/uri).
-  const flags = (ctx && ctx.flags) || [];
+  //  BEDefault relay. `--nosub` SUPPRESSES the walk (only the parent hunk);
+  //  `--sub` is accepted but a no-op (recursion is the default).
+  const flags = (_be && _be.flags) || (ctx && ctx.flags) || [];
   const recurse = flags.indexOf("--nosub") < 0;
 
-  //  BRO-006: the pager / `--tlv` read `U` click-targets from the HUNK tok32
-  //  stream (ctx.sink), which ctx.out's plain/colour columniser can't carry —
-  //  so for those, emit a real content HUNK with per-row toks + the hidden `U`
-  //  nav target via sinkOut; plain/colour-on-a-pipe keep ctx.out (parity).
-  const mode = (ctx && ctx.mode) || "plain";
-  const onTty = (typeof io !== "undefined" && io.isatty) ? !!io.isatty(1) : false;
-  const wantPager = onTty && mode !== "tlv" && flags.indexOf("--plain") < 0;
-  const useSink = (mode === "tlv" || wantPager) && ctx && ctx.sink;
-  const out = useSink ? sinkOut(ctx.sink) : (ctx && ctx.out);
+  //  BRO-006: color/tlv read `U` click-targets from the HUNK tok32 stream
+  //  (be.sink), which the columnar emit sink can't carry — so those feed a real
+  //  content HUNK (per-row toks + hidden `U` nav) via sinkOut; PLAIN keeps the
+  //  columnar out (the cli edge owns the pager gate, so mode!=="plain" suffices).
+  const mode = ambient.format();   // JAB-004
+  const useSink = mode !== "plain" && sink;
+  const out = useSink ? sinkOut(sink) : emitOut;
 
   //  The seed (top) row carries the "." cwd placeholder (loop.cli) — its wt is
-  //  the pinned ctx.repo.  Any other uri is a sub wt root (in-process recursion
-  //  passes the absolute sub dir), so re-discover that repo explicitly.
+  //  the pinned repo. A legacy row.uri may pin a sub wt root (re-discover it).
+  const pinned = (_be && _be.repo) || (ctx && ctx.repo) || null;
   const repo = (row && row.uri && row.uri !== ".")
         ? be.find(row.uri)
-        : ((ctx && ctx.repo) || be.find((row && row.uri) || undefined));
+        : (pinned || be.find((row && row.uri) || undefined));
 
   //  The display-path prefix for this hunk: "" at the top, else this sub's
-  //  path RELATIVE to the top wt (so a grandchild reads `sub/grandchild`).
-  //  Taken EXPLICITLY from the wt roots (JAB-004) — never io.cwd(), which is
-  //  the wrong origin for an in-process sub.
-  const topWt = (ctx && ctx.repo && ctx.repo.wt) || repo.wt;
+  //  path RELATIVE to the top wt. Taken EXPLICITLY from the wt roots (JAB-004) —
+  //  never io.cwd(), the wrong origin for an in-process sub.
+  const topWt = (pinned && pinned.wt) || repo.wt;
   const prefix = relUnder(topWt, repo.wt);
 
   //  DEPTH-FIRST walk: emit this repo's hunk, then recurse each mounted sub.
   emitRepo(repo, prefix, out, recurse);
 
-  //  Flush sinkOut's last buffered hunk (ctx.out flushes at the loop edge).
+  //  Flush sinkOut's last buffered hunk (the columnar out flushes at the edge).
   if (useSink) out.done();
 
   //  Read-only leaf: no fan-out, nothing to enqueue.
-};
+}
+status.jab = "args";
+module.exports = status;
 
 //  BRO-006: a HUNK-collector with emitRepo's SAME `raw`/`row` surface, but it
 //  builds a content HUNK (text + tok32) per repo and feeds ctx.sink — `raw`

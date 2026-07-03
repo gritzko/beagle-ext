@@ -29,6 +29,7 @@
 //  same way core/emit.js requires view/render.js.
 const bro = require("view/bro.js");
 const pager = require("views/bro/pager.js");   // JAB-028: the raw-mode TUI
+const argline = require("shared/argline.js");  // JAB-004: the shared tokenizer
 
 function writeStdout(bytes) {
   const b = io.buf(bytes.length + 8);
@@ -62,34 +63,20 @@ function buildHunks(args) {
   return hunks;
 }
 
-//  JAB-003: an address-bar line is a JS-ish CALL.  `verb param…` → ONE string
-//  param (the rest verbatim); `verb(a,b)` → eval'd scalar/string params; a bare
-//  word / path / `scheme:uri` → null (the caller's legacy single-token drive).
+//  JAB-004: address-bar line → argv via the SHARED argline splitter (pager `:`
+//  splits like the CLI); verb null ⇒ URI/path, object/array arg ⇒ PARAMOBJ.
 function spellCall(spell) {
-  const s = spell.trim();
-  const m = /^([a-zA-Z][a-zA-Z0-9]*!?)(\s+|\()/.exec(s);
-  if (!m) return null;
-  const verb = m[1];
-  if (m[2][0] === "(") {                          // verb(a, b) — a real JS call
-    const open = s.indexOf("("), close = s.lastIndexOf(")");
-    if (close <= open) return null;
-    const params = eval("[" + s.slice(open + 1, close) + "]");  // user input: eval OK
-    const argv = [verb];
-    for (const p of params) {
-      const t = typeof p;
-      if (p === null || t === "string" || t === "number" || t === "boolean")
-        argv.push(String(p));
-      else throw "PARAMOBJ";                      // object/array need the `be` global
-    }
-    return argv;
+  const r = argline.parse(spell);
+  if (r.verb == null) return null;                // a URI/path — not a call
+  if (r.args.length === 0) return [r.verb];       // bare verb
+  const argv = [r.verb];
+  for (const p of r.args) {
+    const t = typeof p;
+    if (p === null || t === "string" || t === "number" || t === "boolean")
+      argv.push(String(p));
+    else throw "PARAMOBJ";                         // object/array need the `be` global
   }
-  //  verb param — the rest is ONE string; strip a single layer of matching
-  //  surrounding quotes so `post 'msg'` commits `msg`, not `'msg'`.
-  let rest = s.slice(m[0].length);
-  const q = rest[0];
-  if (rest.length >= 2 && (q === "'" || q === '"') && rest[rest.length - 1] === q)
-    rest = rest.slice(1, -1);
-  return rest.length ? [verb, rest] : [verb];
+  return argv;
 }
 
 //  driveSpell(spell) -> hunks: the in-process address-bar drive (JAB-028 TODO#5).
@@ -144,25 +131,26 @@ function driveSpell(spell) {
   return [];
 }
 
-//  `bro` as a loop HANDLER.  Folds the WHOLE batch on its FIRST row
-//  (ctx._broDone guard) — the seed lowers each path arg to its own row, but
-//  bro's multi-banner order + the BE-002 exit class span the full arg list, so
-//  process every arg once and no-op on every later row.
-module.exports = function handle(row, ctx) {
-  if (ctx._broDone) return;
-  ctx._broDone = true;
+//  JAB-004: PLAIN verb (`.jab="args"`) — bro OWNS its whole batch in ONE call
+//  reading `be` (repo-less file viewer; args ride `arguments`, flags off
+//  be.flags).  Own `(row,ctx)` entry fallback removed; bro is now plain-args.
+function bro_() {
+  //  Plain path: args ride `arguments`, flags/repo/sink read off `be`.
+  const _be = (typeof be !== "undefined") ? be : null;
+  const flags = (_be && _be.flags) || [];
+  broRun(Array.prototype.slice.call(arguments), flags, null);
+}
 
-  //  The raw positional args (flags split off in cli()).  In the pager each arg
-  //  is a SPELL, not just a file: `jab bro ls:` runs the ls view, `jab bro f.c`
-  //  opens the file, `jab bro` (no args) opens an EMPTY viewport ready for `:`.
-  const args = (ctx && ctx.args) || [];
+//  JAB-004: the batch driver — args are SPELLs (pager) or file/dir URIs (plain).
+//  `ctx` (legacy direct-handler) overrides the global; else read `be`.
+function broRun(args, flags, ctx) {
 
   //  JAB-028: at a real terminal, enter the interactive raw-mode pager (a
   //  scrollable hunk viewport + `:` address bar) instead of the plain dump.
   //  OPEN FORK (a): explicit `jab bro` only — auto-enter for a tty view over
   //  one screen is the unresolved product call, surfaced for the gate.  Piped/
   //  --plain stays the byte-parity plain path below (every parity test intact).
-  const wantPager = io.isatty(1) && (ctx.flags || []).indexOf("--plain") < 0;
+  const wantPager = io.isatty(1) && flags.indexOf("--plain") < 0;
   if (wantPager) {
     //  Each arg is a spell: driveSpell runs a view → tlv hunks, a bare path →
     //  file hunk, or an emit-sink view → its text wrapped as one hunk.  No args
@@ -236,9 +224,15 @@ module.exports = function handle(row, ctx) {
   //  see the failure (the per-URI `cannot open …` lines already explained).
   //  THROW (not process.exit) — the loop edge maps it to the process exit code.
   if (!anyOpened) throw "BRONONE";
-};
+}
 
-//  JAB-030: expose driveSpell on the exported handler (a fn IS an object) so the
-//  universal-pager edge (core/loop.js _openPager) wires the SAME address-bar
-//  spell drive bro's own pager uses — ONE spell path, no duplication.
+//  JAB-004: opt into the plain-args convention (registry routes fn(...args)).
+bro_.jab = "args";
+module.exports = bro_;
+//  JAB-030: expose driveSpell on the exported fn (a fn IS an object) so the
+//  universal-pager edge (core/loop.js _openPager) + the pager wire the SAME
+//  address-bar spell drive — ONE spell path, no duplication.
 module.exports.driveSpell = driveSpell;
+//  JAB-004: expose the shared-tokenizer spell splitter for the phase-1 driver
+//  (test/argline.js) to assert the pager `:` line splits like the CLI.
+module.exports._spellCall = spellCall;

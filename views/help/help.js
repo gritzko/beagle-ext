@@ -80,11 +80,10 @@ function concat(parts, total) {
   return all;
 }
 
-//  handle(row, ctx): build the ONE help HUNK and feed it to ctx.sink (the same
-//  edge the log: view feeds — rendered plain/color/tlv by the loop edge).  No
-//  fan-out, no store/wt access — pure static content.
-module.exports = function handle(row, ctx) {
-  const sink = ctx && ctx.sink;
+//  Build the ONE static help HUNK and feed it to `sink` (the same edge the log:
+//  view feeds — rendered plain/color/tlv by the loop edge).  No fan-out, no
+//  store/wt access — pure static content, ignores any args.
+function emit(sink) {
   if (!sink) return;
 
   const parts = [], spans = [];
@@ -101,6 +100,13 @@ module.exports = function handle(row, ctx) {
 
   //  Banner uri "help:" (no verb word), the body, the per-token tok32 spans.
   sink.feed("help:", body, toks, "", 0n);
-};
+}
 
+//  JAB-004: PLAIN verb (`.jab="args"`) — reads the shared sink off global `be`;
+//  args are ignored (static content).
+function help() {
+  emit((typeof be !== "undefined" && be) ? be.sink : null);
+}
+help.jab = "args";
+module.exports = help;
 module.exports.SCHEMES = SCHEMES;
