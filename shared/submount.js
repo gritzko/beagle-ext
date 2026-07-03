@@ -31,12 +31,28 @@ const ingest   = require("./ingest.js");
 const store    = require("./store.js");
 const checkout = require("./checkout.js");
 const ulog     = require("./ulog.js");
+const ambient  = require("./ambient.js");   // GET-040: the global force flag
 const pathlib  = require("./util/path.js");
 const sha      = require("./util/sha.js");
 const join = pathlib.join, basename = pathlib.basename;
 const isFullSha = sha.isFullSha;
 
 function exists(p) { try { io.stat(p); return true; } catch (e) { return false; } }
+
+//  GET-040: the sub's currently-checked-out pin — the last `#<40hex>` in its
+//  existing anchor's tip row (the checkout baseline).  "" when no prior anchor.
+function currentSubPin(anchorPath) {
+  let pin = "";
+  try {
+    ulog.each(anchorPath, function (log) {
+      const u = (log && log.uri) || "";
+      const h = u.indexOf("#");
+      if (h >= 0) { const f = u.slice(h + 1);
+        if (/^[0-9a-f]{40}$/.test(f)) pin = f; }
+    });
+  } catch (e) {}
+  return pin;
+}
 
 //  Return the `.gitmodules` `url` for the [submodule] block whose `path` ==
 //  subpath (or "" when absent).
@@ -179,6 +195,11 @@ function mount(opts) {
         ingest.add(f.pack, shard, usedUri || ("be:" + shard), pin);
     }
 
+    //  GET-040: the sub's PRIOR pin (its current anchor tip) is the checkout
+    //  baseline — read it BEFORE the anchor is rewritten so a non-force re-get
+    //  can tell a clean file from a dirty edit and preserve untracked content.
+    const oldPin = currentSubPin(anchorPath);
+
     //  D13: write the sub wtlog anchor `<wt>/<path>/.be` — row-0 redirect names
     //  the sibling shard + project (so be.find resolves the mount), then the
     //  `?<synthetic-branch>#<pin>` tip the child wt tracks ([Submodules] §1).
@@ -188,9 +209,11 @@ function mount(opts) {
                             { verb: "get", uri: "?" + branch + "#" + pin }]);
 
     //  D3: check out the commit named by the parent gitlink into `<wt>/<path>/`.
+    //  GET-040: the global force flag (`get!`) — uniform across the root and
+    //  EVERY submodule at every depth — decides clean-reset vs merge/leave.
     //  Open against `beDir` (the store dir), per the havePin note above.
     const k = store.open(beDir, title);
-    checkout.apply(k, pin, subWt);
+    checkout.apply(k, pin, subWt, { force: ambient.force(), oldTip: oldPin });
 
     return { storePath: beDir, project: title, shard: shard, tip: pin,
              branch: branch, k: k };

@@ -125,13 +125,47 @@ function leafUnchanged(full, leaf, bytes) {
   return isExec === (leaf.kind === "x");
 }
 
+//  GET-040: blob bytes for a tree sha (null when absent) — the old-baseline
+//  compare input for the non-force clean-vs-dirty decision.
+function blobOf(keeper, sha) {
+  if (!sha) return null;
+  const o = keeper.getObject(sha);
+  return o ? o.bytes : null;
+}
+
+//  GET-040: read a wt regular file's bytes (null if absent/not-regular).
+function readOnDisk(full) {
+  let ls; try { ls = io.lstat(full); } catch (e) { return null; }
+  if (ls.kind !== "reg") return null;
+  return readFile(full, ls.size);
+}
+
+//  apply(keeper, tipSha, wtRoot, opts?): materialise `tipSha`'s tree into wtRoot.
+//  GET-040: FORCE (`get!`) clean-resets — every not-in-tree path (untracked
+//  included) is swept.  NON-force merges/leaves: it (re)writes only MISSING or
+//  CLEAN tracked files, PRESERVES a dirty local edit, and unlinks ONLY a TRACKED
+//  deletion (a path in the OLD baseline tree, gone from the new) — an UNTRACKED
+//  path (in neither tree) is never touched.  `opts.oldTip` is the sub's prior
+//  pin (the baseline); absent oldTip = a fresh checkout (materialise all).
 function apply(keeper, tipSha, wtRoot, opts) {
+  const force = !!(opts && opts.force);
+  const oldTip = (opts && opts.oldTip) || "";
   const treeSha = keeper.commitTree(tipSha);
   if (!treeSha) throw "checkout: tip " + tipSha + " has no tree";
 
   const before = scanWt(wtRoot);
   const rows = [];
   const inTree = {};
+
+  //  GET-040: the OLD baseline tree (path -> sha) so a non-force pass can tell a
+  //  CLEAN file (== old blob → safe to update) from a DIRTY edit (preserve) and
+  //  unlink only a TRACKED deletion.  Force clean-resets, so it needs no baseline.
+  const oldMap = {};
+  if (!force && oldTip) {
+    const ot = keeper.commitTree(oldTip);
+    if (ot) keeper.readTreeRecursive(ot, function (l) {
+      if (l.kind !== "s") oldMap[l.path] = l.sha; });
+  }
 
   //  Walk the new tree's leaves; create/overwrite, classify new vs mod.
   keeper.readTreeRecursive(treeSha, function (leaf) {
@@ -147,6 +181,16 @@ function apply(keeper, tipSha, wtRoot, opts) {
     const full = join(wtRoot, rel);
     const existed = !!before[rel];
     if (existed && leafUnchanged(full, leaf, bytes)) return;  // no row
+    //  GET-040: NON-force never clobbers a DIRTY tracked file (on-disk differs
+    //  from BOTH the old baseline AND the target); only a CLEAN file (== old
+    //  blob) or a MISSING one is (re)materialised.  Fresh checkout (no oldTip)
+    //  materialises all.  Regular files only; symlink/exec clean-reset.
+    if (!force && oldTip && existed && leaf.kind === "f") {
+      const onDisk = readOnDisk(full);
+      const oldBytes = blobOf(keeper, oldMap[rel]);
+      const cleanVsOld = oldBytes != null && bytesEq(onDisk, oldBytes);
+      if (!cleanVsOld) { rows.push({ verb: "mrg", path: rel }); return; }  // dirty → keep
+    }
     materialise(wtRoot, rel, leaf, bytes);
     rows.push({ verb: existed ? "upd" : "new", path: rel });
   });
@@ -155,6 +199,10 @@ function apply(keeper, tipSha, wtRoot, opts) {
   //  dirs is best-effort (io has no rmdir leaf; leave empty dirs).
   for (const rel in before) {
     if (inTree[rel]) continue;
+    //  GET-040: a NON-force checkout unlinks ONLY a TRACKED deletion (present in
+    //  the OLD tree, gone from the new); an UNTRACKED path (in neither) is LEFT.
+    //  `get!` (force) is the sole clean-reset that may remove untracked/dirty.
+    if (!force && !oldMap[rel]) continue;
     try { io.unlink(join(wtRoot, rel)); rows.push({ verb: "del", path: rel }); }
     catch (e) {}
   }
