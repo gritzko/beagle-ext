@@ -135,6 +135,44 @@ function mintBe(ambient) {
   return Object.assign(globalThis.be || (globalThis.be = {}), discover, ambient);
 }
 
+//  DIS-060/[Nav]: resolve a scheme-less `//NAME` nav authority in the spell's
+//  args to a repo:
+//    `//DIS-060` / `//jab-4`  ([a-zA-Z]+-[0-9]+) → worktree at `<todoRoot>/NAME`
+//    `//` / `//.`   (empty/`.` host)             → the MAIN tree (launch-cwd repo)
+//  Any OTHER `//host…` (`//github.com/x?main`) is a CACHED REMOTE — left to the
+//  wire verbs, NEVER a nav authority: the ticket SHAPE is the only local overload
+//  (a real host carries dots/paths, never `[a-zA-Z]+-[0-9]+`).  The `//authority`
+//  is STRIPPED in place so the verb sees a repo-relative path/ref (verb·path·ref
+//  inherited).  A schemed URI (`file://`, `ssh://…`) is a transport.  Returns the
+//  scoped repo, or null when no arg carries a nav authority.
+function authorityRepo(args, todoRoot) {
+  for (let i = 0; i < args.length; i++) {
+    const a = String(args[i] || "");
+    if (a.indexOf("//") < 0) continue;
+    let u; try { u = uri._parse(a); } catch (e) { continue; }
+    if (u.scheme) continue;                          // file:/ssh:/be: — a transport, not nav
+    if (u.authority === undefined) continue;         // no `//` slot in this arg
+    const host = u.host || "";
+    let repo;
+    if (host === "" || host === ".") {               // `//` / `//.` → main tree (cwd)
+      try { repo = be.find(); } catch (e) { repo = null; }
+    } else if (/^[a-zA-Z]+-[0-9]+$/.test(host)) {    // a ticket worktree name
+      //  Probe `<todoRoot>/NAME/.be` DIRECTLY — be.find alone walks UP to an
+      //  ancestor store when absent, scoping the whole home dir; fail fast.
+      const dir = todoRoot + "/" + host;
+      let anchored = false;
+      try { anchored = !!io.stat(dir + "/.be"); } catch (e) { anchored = false; }
+      if (!anchored) throw "NAVNONE: no worktree //" + host;
+      repo = be.find(dir);
+    } else continue;                                 // `//host…` cached remote → the wire
+    let path = u.path || "";
+    if (path[0] === "/") path = path.slice(1);        // authority path is repo-rel
+    args[i] = uri._make(undefined, undefined, path || undefined, u.query, u.fragment) || "";
+    return repo;
+  }
+  return null;
+}
+
 //  --- JSQUE-008: the canonical CLI entry (argv -> seed -> run -> flush) ---
 //  The SHARED integrated entry every later verb reuses: argv lowers to a verb +
 //  positional args + flags; the repo + its ambient coordinates are pinned ONCE
@@ -245,8 +283,16 @@ function _cli(argv, opts2) {
   //  token via scalar(), and run() calls fn(...args) ONCE reading `be`.
   if (!(conv && conv.jab === "args"))
     throw "loop: verb '" + verb + "' has no plain-args handler";
-  try { repo = be.find(); } catch (e) { /* repo-less verb reads be.repo=null */ }
-  mintBe({ repo: repo, sink: sink, out: out, format: mode, force: force, flags: flags, verb: verb });
+  //  DIS-060/[Nav]: a `//TICKET` worktree authority (or `//`/`//.` → main tree) in
+  //  an arg scopes the WHOLE spell to that tree; a `//host…` cached remote and any
+  //  other arg keep the cwd repo.  NAVNONE (unknown worktree) propagates; a repo-
+  //  less cwd is swallowed (be.repo=null).  TODO_ROOT env, default $HOME/todo.
+  const todoRoot = io.getenv("TODO_ROOT") || ((io.getenv("HOME") || ".") + "/todo");
+  const navRepo = authorityRepo(args, todoRoot);
+  if (navRepo) repo = navRepo;
+  else try { repo = be.find(); } catch (e) { /* repo-less verb reads be.repo=null */ }
+  mintBe({ repo: repo, sink: sink, out: out, format: mode, force: force, flags: flags,
+           verb: verb, todo_root: todoRoot });
   const pargs = args.map(function (t) { return argline.scalar(t); });
   res = run({
     repo: repo, require: require, out: out, sink: sink, flags: flags,

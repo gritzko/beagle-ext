@@ -31,6 +31,7 @@ const subs     = require("../../shared/subs.js");
 const ambient  = require("../../shared/ambient.js");   // JAB-004: ctx→be bridge
 const render   = require("../../view/render.js");
 const theme    = require("../../view/theme.js");
+const join     = require("../../shared/util/path.js").join;   // DIS-060: scope path
 //  JAB-004: render.js's dateCol/verbCol/writeStdout/shQuote are no longer
 //  used here — the emit sink (core/emit.js) owns all column formatting at the
 //  flush edge, and the fork machinery (shQuote) is gone.
@@ -83,10 +84,25 @@ const NAV_DIFF = {
 //  Depth-first is why we recurse in-process here rather than fanning breadth-
 //  first `status <subWt>` rows onto the FIFO queue (which would interleave a
 //  grandchild AFTER a later sibling — the wrong order).
-//  JAB-004: PLAIN verb (`.jab="args"`) — reads ambient off global `be`, fires
-//  ONCE over the top wt (a no-positional COLUMNAR view). Path args are ignored —
-//  status describes THE worktree, not a per-arg fan-out; fire once at the top.
+//  JAB-004/DIS-060: PLAIN verb (`.jab="args"`) — reads ambient off global `be`.
+//  A PATH arg SCOPES status to that subtree: parse the URI (never string-slice),
+//  take the PATH slot, IGNORE a `?ref`/`#frag` (status describes the LIVE wt, cf.
+//  ls) — be.find on the abs path re-discovers a mounted sub's shard, so `status
+//  test` shows the sub's own status.  No path arg → the top wt (columnar view).
 function status() {
+  const _be = (typeof be !== "undefined") ? be : null;
+  const topWt = (_be && _be.repo && _be.repo.wt) || null;
+  let scope = null;
+  for (let i = 0; i < arguments.length; i++) {
+    const a = String(arguments[i] || "");
+    if (!a || a[0] === "-") continue;                     // skip flags
+    let p; try { p = uri._parse(a); } catch (e) { p = {}; }
+    if (p.path && p.path !== ".") { scope = p.path.replace(/^\.\//, ""); break; }
+  }
+  if (scope && topWt) {
+    const abs = scope[0] === "/" ? scope : join(topWt, scope);
+    return statusOne({ uri: abs }, null);
+  }
   return statusOne(null, null);
 }
 
