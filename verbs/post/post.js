@@ -269,11 +269,13 @@ function advanceBranch(reader, wtl, info, ctx, target, curBranch, parent,
   //  are left untouched (a bare advance makes no commit and does not retie).
   advanceRef(reader, reader.shard, target, expectedOld, parent);
   //  Banner: a `post` row naming the advanced branch at cur's hashlet.
-  //  JAB-003: TRUE-hunk via the adapter (canonical uri `post:?<target>#<hashlet>`).
+  //  DIS-060: the banner carries a ref-only ADDRESSING uri (`?<target>#<hashlet>`,
+  //  as get's banner already does), NEVER a phantom `post:` scheme ([Nav]).
   if (ctx && ctx.sink) {
     const stamp = ulog.nowAfter(wtlogTail(wtl));
-    const out = hunkrows(ctx.sink, "post:?" + target + "#" + parent.slice(0, 8));
-    out.row("?" + target + "#" + parent.slice(0, 8), "post", stamp);
+    const refUri = "?" + target + "#" + parent.slice(0, 8);
+    const out = hunkrows(ctx.sink, refUri);
+    out.row(refUri, "post", stamp);
     out.done();
   }
 }
@@ -339,14 +341,15 @@ function pushRemote(info, reader, ctx, remoteUri, branch, tip, hasQuery) {
   //  (ingest.saveRemoteRef, the get/clone row shape) so `be head //origin` reads it.
   ingest.saveRemoteRef(reader.shard, remoteUri, tip);
 
-  //  JAB-003: TRUE-hunk via the adapter (canonical uri `post:<remote>?<br>#<tip>`).
+  //  DIS-060: the banner carries the remote ADDRESSING uri (`<remote>?<br>#<tip>`)
+  //  directly — a transport-schemed / ref uri, NEVER a phantom `post:` ([Nav]).
   if (ctx && ctx.sink) {
     const stamp = ulog.nowAfter(0n);
     //  GIT-015: remoteUri already carries the `?branch` slot (POSTNOREF gate
     //  guarantees it) — append only the `#tip` pin, never re-add `?branch`
     //  (that doubled it to `?main?main`).
     const target = remoteUri + "#" + tip.slice(0, 8);
-    const out = hunkrows(ctx.sink, "post:" + target);
+    const out = hunkrows(ctx.sink, target);
     out.row(target, "post", stamp);
     out.done();
   }
@@ -669,12 +672,13 @@ function wtlogTail(wtl) {
 //  Banner: the commit row `post ?<hashlet8>#<subject>`, then per-file
 //  `<verb> <path>` rows (ts=0n → blank-date column, like native).  add->`add`,
 //  modify->`mod`, unlink->`del`.
-//  JAB-003: TRUE-hunk via the adapter (canonical uri `post:?<branch>#<subject>`).
+//  DIS-060: the banner carries a ref-only ADDRESSING uri (`?<branch>#<subject>`),
+//  NEVER a phantom `post:` scheme ([Nav]) — same shape as get's banner.
 function emitBanner(ctx, branchKey, sha, message, decisions, stamp) {
   if (!(ctx && ctx.sink)) return;
   const subject = subjectOf(message);
   const out = hunkrows(ctx.sink,
-    "post:?" + (branchKey || "") + (subject ? "#" + subject : ""));
+    "?" + (branchKey || "") + (subject ? "#" + subject : ""));
   out.row("?" + sha.slice(0, 8) + (subject ? "#" + subject : ""), "post", stamp);
   for (const d of decisions) {
     let v;

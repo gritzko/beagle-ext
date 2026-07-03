@@ -529,12 +529,11 @@ function runSubPatch(info, ctx, subRepo, job) {
              flags: (ctx && ctx.flags) || [], arg: subRepo.wt });
 }
 
-//  Banner as a TRUE hunk: the canonical `patch:<rowUri>` hunk header, then the
-//  per-file status rows (applied / merged / cnf / del / modl) at ts=0n.
-//  JAB-003: route the SAME rows through the ctx.sink adapter, retiring ctx.out.
+//  Banner as a TRUE hunk: a ref-only addressing uri (`#<theirs>`/`?<theirs>`) header,
+//  then per-file status rows.  DIS-060: NO phantom `patch:` — a VERB isn't a SCHEME.
 function emitBanner(ctx, sc, rows, ts) {
   if (!(ctx && ctx.sink)) return;
-  const out = hunkrows(ctx.sink, "patch:" + patchRowUri(sc.scope, sc.theirs));
+  const out = hunkrows(ctx.sink, patchRowUri(sc.scope, sc.theirs));
   for (const r of rows) out.row(r.path, r.status, 0n);
   out.done();
 }

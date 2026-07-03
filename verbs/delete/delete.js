@@ -294,7 +294,9 @@ function eachDescendant(k, target, cb) {
 //  a summary line is plain text (no date/verb column) via out.raw.  Mirrors
 //  the active HUNK `delete:` table native opens for every DELStage run.
 function emitBanner(out, banner) {
-  if (!banner.bare) out.row("delete:", "delete", ron.now());
+  //  DIS-060: the header row addresses the wt trunk ("?"), NOT a phantom `delete:`
+  //  scheme — a VERB is not a SCHEME (`delete delete:` doubled the verb) ([Nav]).
+  if (!banner.bare) out.row("?", "delete", ron.now());
   for (const it of banner.items) {
     if (it.type === "row") out.row(it.path, "delete", 0n);
     else if (it.type === "summary") out.raw(it.text);
@@ -365,11 +367,11 @@ function delRun(ctx, argv) {
     const uris = res.rows.map(function (r) { return { verb: "delete", uri: r.uri }; });
     ulog.append(repo.bePath, uris);
   }
-  //  JAB-003: route the SAME banner through the hunk adapter (be.sink) — the
-  //  canonical `delete:` table hunk; done() flushes before any DELDIRTY throw.
+  //  DIS-060: route the banner through the hunk adapter; the table hunk addresses
+  //  the wt trunk ("?"), NOT a phantom `delete:` scheme ([Nav]).
   const sink = ctx.sink || (typeof be !== "undefined" && be.sink);
   if (sink) {
-    const out = hunkrows(sink, "delete:");
+    const out = hunkrows(sink, "?");
     emitBanner(out, res.banner);        // always (the open `delete:` table)
     out.done();
   }

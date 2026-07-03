@@ -52,12 +52,17 @@ const ambient = require("../../shared/ambient.js");
 const PUTDUP = "PUTDUP";
 const SNIFFFAIL = "SNIFFFAIL";
 
-//  JAB-003: the ONE per-run hunk adapter (ctx.sink) shared across handle and its
-//  delegates; scheme "put:" so the banner opens the hunk, sub-banners open subs.
+//  DIS-060: the per-run hunk adapter (ctx.sink); each hunk is opened via out.open()
+//  with a ref-only banner URI ("?" trunk / sub path), never a phantom `put:` ([Nav]).
 function putOut(ctx) {
   if (!ctx || !ctx.sink) return null;
-  if (!ctx._putOut) ctx._putOut = hunkrows(ctx.sink, null, "put:");
+  if (!ctx._putOut) ctx._putOut = hunkrows(ctx.sink, null);
   return ctx._putOut;
+}
+//  DIS-060: open the shared top staging banner ONCE (ctx._putBannerOpen guard),
+//  addressing the wt trunk ("?") instead of the phantom `put:` scheme.
+function openPutBanner(out, ctx) {
+  if (out && !ctx._putBannerOpen) { ctx._putBannerOpen = true; out.open("?"); }
 }
 //  Normalise a bareword arg: `.`/`./` → "" (reporoot), strip a leading
 //  `./` (mirrors put_stage_named's reporoot normalisation).
@@ -269,7 +274,7 @@ function pushWire(repo, k, ctx, arg, u) {
   //  DIS-011: a bare `ssh://host/path` with NO ?ref is recorded, never pushed.
   if (!hasQuery && (u.path || "")) {
     if (out) {
-      if (!ctx._putBannerOpen) { ctx._putBannerOpen = true; out.raw("put:"); }
+      openPutBanner(out, ctx);
       out.row(arg, "put", 0n);
     }
     return;
@@ -304,7 +309,7 @@ function pushWire(repo, k, ctx, arg, u) {
   //  (ingest.saveRemoteRef, the get/clone row shape) so `be head //origin` reads it.
   ingest.saveRemoteRef(k.shard, arg, target);
   if (out) {
-    if (!ctx._putBannerOpen) { ctx._putBannerOpen = true; out.raw("put:"); }
+    openPutBanner(out, ctx);
     //  Banner: the remote base (any user #sha stripped) + `?branch#hashlet`.
     const hash = arg.indexOf("#");
     const base = hash >= 0 ? arg.slice(0, hash) : arg;
@@ -438,7 +443,7 @@ function bareStageSubs(repo, prefix, ctx) {
     const r = bareStage(subRepo, wtlog.open(subRepo), subK);  // may throw PUTAMBIG
     commitOps(subRepo, r.ops, ctx && ctx.T0);
     if (out) {
-      out.raw("put:" + subPrefix);                                // sub banner (hunk uri)
+      out.open(subPrefix);                                          // DIS-060: sub banner = sub path (no put: scheme)
       let staged = 0;
       for (const op of r.ops)
         if (op.path !== null && !op.silent) {
@@ -486,7 +491,7 @@ function stageInSub(repo, pfx, uri, ctx) {
     if (dst.indexOf(pfx + "/") === 0) dst = dst.slice(pfx.length + 1);
     subUri = subUri + "#" + dst;
   }
-  if (out && !ctx._putBannerOpen) { ctx._putBannerOpen = true; out.raw("put:"); }
+  openPutBanner(out, ctx);
   const eng = stage.prep(subRepo, wtlog.open(subRepo), subK);
   const r = stageArg(eng, subRepo, subUri);
   commitOps(subRepo, r.ops, ctx && ctx.T0);
@@ -515,7 +520,7 @@ function putOne(repo, k, ctx, uri) {
 
   //  Open the shared `put:` table header ONCE (native opens it for every
   //  PUTStage run; the row lines below carry a BLANK date, native HUNK `.ts=0`).
-  if (out && !ctx._putBannerOpen) { ctx._putBannerOpen = true; out.raw("put:"); }
+  openPutBanner(out, ctx);
 
   //  Stage this one arg (file / dir / move leaf), write its rows under the
   //  cohort T0, restamp, and push the banner lines (rows + skips) via ctx.out.
@@ -630,7 +635,7 @@ function putRun(ctx, argv, firstUri) {
     //  one whole-tree fold; open the `put:` header BEFORE the walk (native
     //  PUTStage opens its table before move detection) so a PUTAMBIG refusal
     //  carries the same partial banner (the edge-catch flushes it on the throw).
-    if (out && !ctx._putBannerOpen) { ctx._putBannerOpen = true; out.raw("put:"); }
+    openPutBanner(out, ctx);
     const r = bareStage(repo, wtlog.open(repo), k);  // may throw PUTAMBIG
     commitOps(repo, r.ops, ctx.T0);
     if (out)

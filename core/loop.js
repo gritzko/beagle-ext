@@ -19,6 +19,21 @@ const emit = require("core/emit.js");
 //  JAB-004: the discover module stays intact + required; its API is folded onto
 //  the unified global `be` at loop entry (mintBe), and loop.js reads that global.
 const discover = require(_here + "/core/discover.js");
+//  DIS-060: the shape-(2) `<scheme>:uri` gate consults THIS projector+transport
+//  allowlist, NOT _isVerb — a VERB is not a SCHEME ([Nav]); mutation verbs absent.
+const SCHEME_ALLOW = (function () {
+  //  DIS-060: transports + the two viewers (bro/help) that help.js's SCHEMES
+  //  table omits but which ARE dispatchable schemes.
+  const s = new Set(["ssh", "https", "http", "git", "be", "file", "keeper",
+                     "bro", "help"]);
+  const SCHEMES = require(_here + "/views/help/help.js").SCHEMES || [];
+  for (const p of SCHEMES) {
+    const k = String(p[0]);
+    const c = k.indexOf(":");
+    if (c > 0) s.add(k.slice(0, c));       // "commit:<rev>" -> "commit"
+  }
+  return s;
+})();
 //  JAB-029: the edge render — cli() turns the collected HUNK sink into fd-1
 //  bytes via bro.renderHunkLog (the ONE place mode plain/color/tlv is applied).
 const bro = require(_here + "/view/bro.js");
@@ -186,7 +201,9 @@ function _cli(argv, opts2) {
   } else {                                  // shape (2): a URI view
     const sc = verb.indexOf(":");
     const scheme = sc > 0 ? verb.slice(0, sc) : "";
-    if (scheme && /^[a-zA-Z0-9]+$/.test(scheme) && _isVerb(scheme, _here)) {
+    //  DIS-060: route `<scheme>:uri` only when scheme is on the allowlist, not any
+    //  _isVerb module — a phantom `<verb>:` is absent, so it can't round-trip.
+    if (scheme && /^[a-zA-Z0-9]+$/.test(scheme) && SCHEME_ALLOW.has(scheme)) {
       verb = scheme;                        //  scheme:uri — keep the whole token
     } else {                                //  a bare path — default the view
       verb = _viewDefault(verb, _here);     //  dir -> ls, file -> blob/bro
@@ -255,8 +272,11 @@ function _cli(argv, opts2) {
     //  pager shows it coloured like the content views (gritzko: pager colored).
     const colBytes = out.renderColor ? out.renderColor(res.outSort || null)
                                      : out.render(res.outSort || null);
+    //  DIS-060: banner URI = the projector's own `<verb>:` scheme, but a bare
+    //  (schemeless) uri for an off-allowlist mutation verb (never a phantom).
     if (colBytes && colBytes.length)
-      hunks = hunks.concat([{ uri: verb + ":", verb: "hunk", text: colBytes,
+      hunks = hunks.concat([{ uri: SCHEME_ALLOW.has(verb) ? verb + ":" : verb,
+                              verb: "hunk", text: colBytes,
                               toks: new Uint32Array(0), kind: "file" }]);
     if (hunks.length) { _openPager(hunks); return res; }
     //  Nothing to page (a self-paging verb already ran, or no output): done.

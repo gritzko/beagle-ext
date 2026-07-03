@@ -893,7 +893,9 @@ function flushGet(ctx) {
   const g = ctx && ctx._get;
   if (!g || !g.head || !ctx.sink || g._flushed) return;
   g._flushed = true;
-  const out = hunkrows(ctx.sink, "get:" + g.head.uri);
+  //  DIS-060: the get op-summary banner carries the head's ref-only ADDRESSING
+  //  uri (`?<branch>#<sha>`) directly — NOT a phantom `get:` scheme ([Nav]).
+  const out = hunkrows(ctx.sink, g.head.uri);
   out.row(g.head.uri, g.head.verb, g.head.ts);
   for (const r of sortGetRows(g.rows || [])) out.row(r.uri, r.verb, r.ts);
   out.done();

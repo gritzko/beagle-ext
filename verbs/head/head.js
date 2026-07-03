@@ -220,7 +220,9 @@ function report(ctx, uri, branch, rel, ahead, behind, tip, paths) {
   //  is shed) + the relation verb; the ahead/behind commit rows follow.
   const q = uri.indexOf("?"), base = q >= 0 ? uri.slice(0, q) : uri;
   const target = base + "?" + (branch || "") + "#" + (tip ? tip.slice(0, 8) : "");
-  const out = hunkrows(sink, "head:" + target);
+  //  DIS-060: the banner carries the target ADDRESSING uri (`<remote>?<br>#<tip>`)
+  //  directly — NEVER a phantom `head:` scheme ([Nav]).
+  const out = hunkrows(sink, target);
   out.row(target, relVerb(rel), 0n);
   for (const c of ahead)
     out.row("?" + (c.hashlet || "") + (c.subject ? "#" + c.subject : ""),

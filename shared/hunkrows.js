@@ -57,6 +57,9 @@ module.exports = function hunkrows(sink, uri, scheme) {
   }
 
   return {
+    //  DIS-060: open a new hunk with an EXPLICIT (possibly schemeless) URI, so a
+    //  verb carries a ref-only banner URI with no `<verb>:` (the put: replacement).
+    open: function (uri) { flush(); cur = uri; },
     //  A scheme-prefixed line → new hunk; "" separator → drop; else → a text
     //  line (default 'S' tag over the whole line).
     raw: function (text) {

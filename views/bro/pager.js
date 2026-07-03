@@ -188,6 +188,14 @@ function joinPath(base, rel) {
   return segs.join("/");
 }
 
+//  DIS-060/[Nav]: the TRANSPORT schemes (network/file) — addressing, NOT verbs.
+//  A view uri whose scheme is OFF this set is a projector verb (`status:`/`sha1:`
+//  → the verbs `status`/`sha1`); `keeper` is `be:`'s backend, not a URI scheme.
+const TRANSPORT = { ssh:1, https:1, http:1, git:1, be:1, file:1 };
+
+//  The directory of a URI path (drop the last segment); "" when path-less.
+function dirOf(p) { p = p || ""; const i = p.lastIndexOf("/"); return i >= 0 ? p.slice(0, i) : ""; }
+
 //  JAB-003: the CURRENT view's anchor URI — the tracked navigated spell, else
 //  its first hunk's banner URI (a scheme verb self-labels its own hunk).
 Pager.prototype._viewUri = function () {
@@ -204,9 +212,11 @@ Pager.prototype._viewUri = function () {
 Pager.prototype._resolveSpell = function (spell) {
   const s = spell.trim();
   if (!s) return s;
-  //  JAB-003: a bare VERB is a CALL, not a URI — it ERASES the current URI
-  //  (`status`/`ls` → `status:`/`ls:`).  Only explicit URI forms inherit.
-  if (/^[a-zA-Z][a-zA-Z0-9]*$/.test(s)) return s + ":";
+  //  DIS-060: a bare word is a `module(args)` CALL ([Nav]), NOT a `word:` scheme
+  //  — minting `word+":"` phantom-schemed a mutation verb (`post` -> `post:`).
+  //  Return the bare word: driveSpell re-enters cli() which resolves it as a
+  //  verb/view (shape-1) and ERASES the current URI, same as the old `word:`.
+  if (/^[a-zA-Z][a-zA-Z0-9]*$/.test(s)) return s;
   //  Not a URI (a `verb param` call — spaces/quotes) → ride to the dispatcher.
   let t; try { t = new URI(s); } catch (e) { return s; }
   const cur = new URI(this._viewUri());
@@ -307,15 +317,9 @@ Pager.prototype._statusLine = function (rows, scroll, viewRows, cols) {
     return (this.color ? ESC + "[7m" : "") + this._fit(line, cols) +
            (this.color ? ESC + "[0m" : "");
   }
-  //  JAB-003: the LEFT label is the CURRENT URI — the view's navigated spell (a
-  //  scheme verb self-labels its hunk, so trust the spell), else the hunk URI.
-  const r = rows.length ? rows[Math.min(scroll, rows.length - 1)] : null;
-  let left = "";
-  if (this.view && this.view.uri) left = this.view.uri;
-  else if (r) {
-    const srcl = this._srcLine(r.hunk, r.banner ? 0 : r.off);
-    left = bro.statusURI(r.hunk, srcl);
-  }
+  //  DIS-060/[Nav]: the address bar INDICATES the current (verb, URI).
+  const vu = this._verbUri();
+  let left = (vu.verb ? vu.verb + " " : "") + vu.uri;
   if (this.message) left = this.message + "  " + left;
   //  BRO-007: `<pos>  h: help` (help pointer + scroll position) is RIGHT-aligned;
   //  the URI stays left, the gap between them padded to the terminal width.
@@ -374,11 +378,11 @@ Pager.prototype._keyScroll = function (b) {
     //  BRO-005: `m` toggles SGR mouse tracking (wheel/click) on/off, writing
     //  the enable/disable bracket to the tty so the terminal stops reporting.
     case 0x6d: this._toggleMouse(); break;              // m  mouse on/off
-    //  JAB-030: the address bar opens on `:` (vim, EMPTY) AND on a URI-special
-    //  `. # ? /` — the typed char is PRE-INSERTED so the line reads `:<char>`
-    //  with the cursor after it (the URI is then relative to the current view).
+    //  DIS-060/[Nav]: the address bar opens on `:` (verb / anything, EMPTY) AND
+    //  on a slot sigil `. / ? #` — the char is PRE-INSERTED so the buffer reads
+    //  `./x`/`/x`/`?ref`/`#pos` (a slot edit relative to the current view).
     case 0x3a: this.mode = "command"; this.cmd = ""; break;          // :  empty
-    case 0x2e: case 0x23: case 0x3f: case 0x2f:                       // . # ? /
+    case 0x2e: case 0x2f: case 0x23: case 0x3f:                      // . / # ? sigil
       this.mode = "command"; this.cmd = String.fromCharCode(b); break;
     //  JAB-030: Enter FOLLOWS the URI of the hunk at the cursor row (its banner
     //  URI is itself a spell) — a mouse click follows the same path (_followRow).
@@ -394,11 +398,11 @@ Pager.prototype._keyScroll = function (b) {
 };
 
 Pager.prototype._keyCommand = function (b) {
-  if (b === 0x0d || b === 0x0a) {                        // Enter: run the spell
+  if (b === 0x0d || b === 0x0a) {                        // Enter: apply the spell
     const spell = this.cmd;
     this.mode = "scroll";
     this.cmd = "";
-    this._runSpell(spell);
+    this._applySpell(spell);
     return;
   }
   if (b === 0x1b) { this.mode = "scroll"; this.cmd = ""; return; }   // Esc: cancel
@@ -422,10 +426,66 @@ Pager.prototype._runSpell = function (spell) {
     const hunks = this.driveSpell ? this.driveSpell(s) : null;
     if (!hunks || hunks.length === 0) { this.message = "no hunks: " + s; return; }
     this.pushView(hunks);
-    //  view.uri must stay a VALID URI: a `verb param` / `verb(...)` CALL is not
-    //  one — record the verb's scheme (`post:`); a URI-nav records the URI.
-    const call = /^([a-zA-Z][a-zA-Z0-9]*)(\s|\()/.exec(s);
-    this.view.uri = call ? call[1] + ":" : s;    // JAB-003: track the current URI
+    //  DIS-060: track the view as the resolved SPELL itself ([Nav] click-targets),
+    //  never `call[1]+":"` — a `verb args` call is a spell, not a `<verb>:` scheme.
+    this.view.uri = s;                           // track the current spell/URI
+  } catch (e) { this.message = "err: " + String(e); }
+};
+
+//  DIS-060: total URI parse — never throws (an empty URI on malformed input).
+Pager.prototype._parse = function (s) {
+  try { return new URI(s || ""); } catch (e) { return new URI(""); }
+};
+
+//  DIS-060/[Nav]: the current view's (verb, URI) — set explicitly by a nav
+//  (_applySpell), else decoded from the hunk: a projector scheme IS the verb.
+Pager.prototype._verbUri = function () {
+  const v = this.view;
+  if (v && v.verb !== undefined) return { verb: v.verb, uri: v.uri || "" };
+  const spell = this._viewUri();
+  const u = this._parse(spell);
+  if (u.scheme && !TRANSPORT[u.scheme])
+    return { verb: u.scheme,
+             uri: URI.make(undefined, u.authority, u.path, u.query, u.fragment) };
+  let verb = "";
+  const h = v && v.hunks && v.hunks[0];
+  if (h && h.verb && h.verb !== "hunk") verb = h.verb;
+  return { verb: verb, uri: spell };
+};
+
+//  DIS-060/[Nav]: apply a typed address-bar spell.  A LEADING bareword is the
+//  verb (`:verb`/`:verb uri`); else URI-only.  Parse the URI, INHERIT-merge onto
+//  the current (present overrides, undefined inherits), compose via URI.make,
+//  drive.  A relative path joins the view dir; a path change drops the frag.
+Pager.prototype._applySpell = function (cmd) {
+  const s = (cmd || "").trim();
+  if (!s) return;
+  const cur = this._verbUri();
+  let verb = cur.verb, uristr = s;
+  const m = /^([a-zA-Z][a-zA-Z0-9]*)(?:\s+([\s\S]*))?$/.exec(s);
+  if (m) { verb = m[1]; uristr = m[2] || ""; }
+  const cu = this._parse(cur.uri), tu = this._parse(uristr);
+  let path = tu.path;                            // relative path joins the view dir
+  if (path !== undefined && path[0] !== "/") path = joinPath(dirOf(cu.path), path);
+  const inh = function (a, b) { return a !== undefined ? a : b; };
+  const scheme = inh(tu.scheme, cu.scheme);
+  const auth   = inh(tu.authority, cu.authority);
+  const npath  = inh(path, cu.path);
+  const query  = inh(tu.query, cu.query);
+  let   frag   = inh(tu.fragment, cu.fragment);
+  if (tu.path !== undefined && npath !== cu.path && tu.fragment === undefined)
+    frag = undefined;                            // [Nav]: a path change drops #pos
+  //  with an authority present the path is store-absolute (leading `/`).
+  let cpath = npath;
+  if (auth !== undefined && cpath !== undefined && cpath[0] !== "/") cpath = "/" + cpath;
+  const newUri = URI.make(scheme, auth, cpath, query, frag);
+  const spell  = (verb ? verb + " " : "") + newUri;
+  try {
+    const hunks = this.driveSpell ? this.driveSpell(spell) : null;
+    if (!hunks || hunks.length === 0) { this.message = "no hunks: " + spell; return; }
+    this.pushView(hunks);
+    this.view.verb = verb;
+    this.view.uri  = newUri;
   } catch (e) { this.message = "err: " + String(e); }
 };
 
