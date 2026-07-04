@@ -142,29 +142,76 @@ function _stage(path, rows) {
   return tmp;
 }
 
-//  Write a fresh ULOG from `rows` over `path`, crash-safely.
-function write(path, rows) {
-  const tmp = _stage(path, rows);
-  try { io.rename(tmp, path); }
-  catch (e) { try { io.unlink(tmp); } catch (e2) {} throw e; }
+//  --- NATIVE WRITERS (JS-073) --------------------------------------------
+//  write/append now drive the C ULOG family (abc._ulog_open/_append/_close =
+//  ULOGOpen/ULOGAppendAt/ULOGClose) instead of the JS drain-and-rewrite.  Two
+//  wins: append is a genuine in-place, crash-safe booked append (survivors are
+//  never re-fed, so their ts is preserved byte-for-byte — the wtlog/refs row ts
+//  MUST equal the file-mtime the verbs stamp, DIS-057/classify band), and the
+//  `.<base>.idx` sidecar is maintained the way native `be` expects.  ULOGAppendAt
+//  writes rec.ts VERBATIM and refuses ts<=tail (ULOGCLOCK), so callers hand us
+//  the exact stamp and we only keep the sequence strictly increasing.
+
+//  The ULOG sidecar path `<dir>/.<base>.idx` (dog/ULOG.c ulog_idx_path).
+function idxPath(path) {
+  const i = path.lastIndexOf("/");
+  return (i < 0) ? "." + path + ".idx"
+                 : path.slice(0, i + 1) + "." + path.slice(i + 1) + ".idx";
 }
 
-//  Append `rows` to the EXISTING ULOG at `bePath`: drain the old rows
-//  (preserving their original ts), sample a monotonic new ts strictly past
-//  the tail, assign consecutive increasing ts to the new rows, then rewrite.
-function append(bePath, rows) {
-  const old = [];
-  each(bePath, function (log) {
-    old.push({ verb: log.verb, uri: log.uri, ts: log.time });
-  });
-  const tail = old.length ? old[old.length - 1].ts : 0n;
-  let ts = nowAfter(tail);
-  const fresh = rows.map(function (r) {
-    const row = { verb: r.verb, uri: r.uri, ts: (r.ts != null ? BigInt(r.ts) : ts) };
-    ts = (row.ts >= ts ? row.ts : ts) + 1n;     // next row strictly later
-    return row;
-  });
-  write(bePath, old.concat(fresh));
+//  Callers pass string URIs; a URI object is stringified defensively.
+function _uri(u) { return (typeof u === "string") ? u : String(u); }
+
+//  Write a fresh ULOG from `rows` over `path`, crash-safely: build into a temp
+//  sibling via the native writer, then io.rename onto `path` (a kill before the
+//  rename leaves the OLD file byte-intact).  Explicit row ts are honoured
+//  VERBATIM (put's drained old rows keep their small original ts); a no-ts row
+//  samples a fresh monotonic stamp.  The stale sidecars are dropped so the next
+//  native open rebuilds one matching the renamed file (ULOGOpenIdx self-heals).
+function write(path, rows) {
+  const tmp = path + ".tmp." + (ron.now()).toString(36) +
+              "." + (Math.random() * 1e9 | 0);
+  try { io.unlink(tmp); } catch (e) {}
+  try { io.unlink(idxPath(tmp)); } catch (e) {}
+  const h = abc._ulog_open(tmp);
+  try {
+    let ts = 0n;                              // 0 = no row yet (honour small ts)
+    for (const r of rows) {
+      let use = (r.ts != null) ? BigInt(r.ts) : (ts > 0n ? ts : nowAfter(0n));
+      if (use <= ts) use = ts + 1n;           // strictly increasing (native guard)
+      abc._ulog_append(h, use, r.verb, _uri(r.uri));
+      ts = use;
+    }
+  } catch (e) {
+    try { abc._ulog_close(h); } catch (e2) {}
+    try { io.unlink(tmp); } catch (e2) {}
+    try { io.unlink(idxPath(tmp)); } catch (e2) {}
+    throw e;
+  }
+  abc._ulog_close(h);                         // trims tmp to PAST+DATA + sidecar
+  io.rename(tmp, path);
+  try { io.unlink(idxPath(tmp)); } catch (e) {}
+  try { io.unlink(idxPath(path)); } catch (e) {}
+}
+
+//  Append `rows` to the ULOG at `path` IN PLACE (native booked append): open,
+//  stamp each new row strictly past the live tail (nowAfter(tail) then +1 per
+//  row; an explicit row ts is honoured when it stays ahead), append, close.
+//  Old rows are NOT re-fed — they keep their original ts and bytes.  Creates
+//  the file if absent.
+function append(path, rows) {
+  const h = abc._ulog_open(path);
+  try {
+    const n = abc._ulog_count(h);
+    const tail = n > 0 ? abc._ulog_rowTime(h, n - 1) : 0n;
+    let ts = nowAfter(tail);
+    for (const r of rows) {
+      let use = (r.ts != null) ? BigInt(r.ts) : ts;
+      if (use < ts) use = ts;                 // native refuses ts<=last
+      abc._ulog_append(h, use, r.verb, _uri(r.uri));
+      ts = use + 1n;
+    }
+  } finally { abc._ulog_close(h); }
 }
 
 //  --- STREAMING TAIL-APPEND (JSQUE-003) ----------------------------------

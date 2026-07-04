@@ -31,14 +31,6 @@ function writeBytes(path, u8) {
   } finally { io.close(fd); }
 }
 
-//  Build a fresh ULOG in RAM, feed rows, write its DATA region to `path`.
-function writeUlog(path, rows) {
-  const log = abc.ram("ULOG", Math.max(1 << 16, rows.length * 256));
-  for (const r of rows) log.feed(r.verb, r.uri);
-  const n = Number(log.buffer.watermark);
-  writeBytes(path, log.subarray(0, n));
-}
-
 //  Strip a git packfile's trailing 20-byte SHA-1 → the keeper pack-log bytes
 //  (PACK header + records; the log's extent is its byte length, no trailer).
 function packLogBytes(packBytes) {
@@ -88,8 +80,9 @@ function clone(packBytes, beDir, proj, tip, remoteUri) {
   buildIndex(shard, "0000000001.keeper", 1);
   //  refs: the origin remote-tracking row + the local trunk tip (`post ?#`),
   //  the row keeper.resolveRef('') matches.  Remote URI query stripped to `?`.
+  //  JS-073: the crash-safe native ULOG writer (temp+rename), not in-place.
   const origin = remoteUri.replace(/\?.*/, "?");
-  writeUlog(join(shard, "refs"), [
+  ulog.write(join(shard, "refs"), [
     { verb: "get",  uri: origin + "#" + tip },
     { verb: "post", uri: "?#" + tip }
   ]);
@@ -116,15 +109,13 @@ function add(packBytes, shard, remoteUri, tip) {
   const nm = logName(max + 1);
   writeBytes(join(shard, nm), packLogBytes(packBytes));
   buildIndex(shard, nm, fileIdOf(nm));
-  //  Append (not rewrite) the refs ULOG with the new tip rows.
-  const old = [];
-  ulog.each(join(shard, "refs"),
-            function (log) { old.push({ verb: log.verb, uri: log.uri }); });
+  //  JS-073: append the new tip rows via ulog.append (native in-place booked
+  //  append) — survivors keep their ORIGINAL ts; only the new rows get a stamp.
   const origin = remoteUri.replace(/\?.*/, "?");
-  writeUlog(join(shard, "refs"), old.concat([
+  ulog.append(join(shard, "refs"), [
     { verb: "get",  uri: origin + "#" + tip },
     { verb: "post", uri: "?#" + tip }
-  ]));
+  ]);
 }
 
 //  GIT-016: after a successful push, record the pushed ref at its new tip as a
@@ -132,13 +123,11 @@ function add(packBytes, shard, remoteUri, tip) {
 //  shape clone/add write, so store.eachRemote picks it up).  `shard` = the
 //  project shard dir; `remoteUri` the raw push target; `tip` the new 40-hex sha.
 function saveRemoteRef(shard, remoteUri, tip) {
+  //  JS-073: in-place native append preserves every survivor's ts; no re-drain,
+  //  no restamp (the old writeUlog re-fed rows with no ts, bumping them to now).
   const origin = remoteUri.replace(/\?.*/, "?");
-  const old = [];
-  ulog.each(join(shard, "refs"),
-            function (log) { old.push({ verb: log.verb, uri: log.uri }); });
-  writeUlog(join(shard, "refs"),
-            old.concat([{ verb: "get", uri: origin + "#" + tip }]));
+  ulog.append(join(shard, "refs"), [{ verb: "get", uri: origin + "#" + tip }]);
 }
 
-module.exports = { clone, add, buildIndex, writeUlog, writeBytes,
+module.exports = { clone, add, buildIndex, writeBytes,
                    packLogBytes, logName, fileIdOf, saveRemoteRef };
