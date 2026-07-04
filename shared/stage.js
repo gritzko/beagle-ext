@@ -234,7 +234,8 @@ function prep(be, wtlogReader, storeReader) {
 
     //  --- dir-form (`be put <dir>/`) expansion (dir_collect_step) --------
     //  `prefix` ends in `/` (or "" for the reporoot).  Per-file rule:
-    //    BOTH    + mtime ∈ ANY stamp-set      → settled, skip
+    //    BOTH    + mtime ∈ ANY stamp-set      → settled, skip (fast path)
+    //    BOTH    + wt bytes == baseline sha   → settled, skip (content clean)
     //    BOTH    + otherwise                  → stage (tracked-and-dirty)
     //    WT_ONLY                              → stage (untracked sibling)
     //    BASE_ONLY                            → skip (gone; delete's job)
@@ -257,8 +258,11 @@ function prep(be, wtlogReader, storeReader) {
         if (b) sawTracked = true;                // tracked dir
         let doStage = false;
         if (b && w) {
-          //  any stamp-set membership counts as settled (idempotence).
-          const settled = w.ts != null && wtlogReader.has(w.ts);
+          //  PUT-006: stamp-set is the fast path (idempotence); a MISS falls
+          //  back to a content compare so a get-checkout mtime (not a stamp)
+          //  over baseline-equal bytes stays clean — agreeing with status.
+          const settled = (w.ts != null && wtlogReader.has(w.ts)) ||
+                          wtEqBase(wtRoot, rel, b.sha);
           if (!settled) doStage = true;
         } else if (w && !b) {
           doStage = true;
