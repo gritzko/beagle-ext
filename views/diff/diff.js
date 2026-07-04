@@ -175,17 +175,21 @@ function emitGitlink(path, oldSha, newSha, color, out) {
   emitHunks(hd, color, out);
 }
 
-//  --- tree map: leaf path -> { sha, kind } (files + gitlinks) -----------
+//  --- tree map: leaf path -> { sha, kind } (files + gitlinks + links) ---
 //  readTreeRecursive yields file/exe/symlink leaves (kind f/x/l) and gitlinks
-//  (kind s).  We keep files (blob diff) and subs (pin bump) separately.
+//  (kind s).  files (blob diff), subs (pin bump), and links (target-string
+//  diff, never mmap'd) are kept separate.
+//  JS-069: symlink leaves (kind "l") go to `links`, NOT `files` — a `files`
+//  entry gets io.mmap'd wt-side, which FOLLOWS the link and leaks its target.
 function treeMap(k, treeSha) {
-  const files = {}, subs = {};
-  if (!treeSha) return { files: files, subs: subs };
+  const files = {}, subs = {}, links = {};
+  if (!treeSha) return { files: files, subs: subs, links: links };
   k.readTreeRecursive(treeSha, function (leaf) {
     if (leaf.kind === "s") subs[leaf.path] = leaf.sha;
+    else if (leaf.kind === "l") links[leaf.path] = leaf.sha;
     else files[leaf.path] = leaf.sha;
   });
-  return { files: files, subs: subs };
+  return { files: files, subs: subs, links: links };
 }
 
 //  --- ref-vs-ref whole-tree diff (GRAFDiffTreeRefs) ---------------------
@@ -217,6 +221,17 @@ function diffTreeRefs(k, fromTreeSha, toTreeSha, navver, color, ctx, repo,
   for (const p of Object.keys(F.files).sort()) {
     if (T.files[p] !== undefined) continue;
     diffFile(p, blobBytes(k, F.files[p]), undefined, false, navver, color, out);
+  }
+  //  JS-069: symlinks — diff their stored target-string blobs (both sides are
+  //  tree leaves here, no wt read), to-first then from-only deletions (lex).
+  for (const p of Object.keys(T.links).sort()) {
+    const fsha = F.links[p], tsha = T.links[p];
+    if (fsha && fsha === tsha) continue;                       // unchanged
+    diffFile(p, blobBytes(k, fsha), blobBytes(k, tsha), false, navver, color, out);
+  }
+  for (const p of Object.keys(F.links).sort()) {
+    if (T.links[p] !== undefined) continue;
+    diffFile(p, blobBytes(k, F.links[p]), undefined, false, navver, color, out);
   }
 }
 
@@ -252,9 +267,13 @@ function diffWtTree(k, baseTreeSha, repo, color, ctx, prefix, out) {
   paths.sort();
 
   for (const p of paths) {
-    const fsha = F.files[p];                   // base entry sha, or undefined
+    //  JS-069: a base symlink leaf reads its wt side via readWtLink (lstat/
+    //  readlink), NEVER mmap — mmap follows the link and leaks the target file.
+    const isLink = F.links[p] !== undefined;
+    const fsha = isLink ? F.links[p] : F.files[p];
     if (fsha === undefined) continue;          // no base side → wholly-new, skip
-    const wt = readWtFile(join(repo.wt, p));
+    const wt = isLink ? readWtLink(join(repo.wt, p))
+                      : readWtFile(join(repo.wt, p));
     if (wt === undefined) {
       //  BASE_ONLY: deleted/missing in wt → base blob vs empty.
       diffFile(p, blobBytes(k, fsha), undefined, false, "", color, out);
@@ -287,8 +306,20 @@ function diffWtTree(k, baseTreeSha, repo, color, ctx, prefix, out) {
 }
 
 //  Read a wt file's bytes, or undefined when absent/unreadable.
+//  JS-069: only ever called for a NON-link leaf (symlinks route through
+//  readWtLink) — the caller gates by leaf kind so this never follows a link.
 function readWtFile(path) {
   try { return io.mmap(path, "r").data().slice(); } catch (e) { return undefined; }
+}
+
+//  JS-069: wt-side symlink read — lstat kind "lnk" → readlink; the target
+//  STRING bytes ARE the git blob body of a 120000 leaf.  Never mmap (no follow).
+//  Returns undefined when absent or not a symlink on disk.
+function readWtLink(path) {
+  try {
+    if (io.lstat(path).kind !== "lnk") return undefined;
+    return utf8.Encode(io.readlink(path));
+  } catch (e) { return undefined; }
 }
 
 function join(dir, name) {
@@ -505,7 +536,12 @@ function diffOne(arg) {
       } else {
         fB = blobAtTree(k, baseTree, spec.path);
       }
-      const tB = readWtFile(join(repo.wt, spec.path));
+      //  JS-069: a symlink on disk reads via readWtLink (lstat/readlink), never
+      //  mmap — mmap follows the link and leaks the target file's bytes.
+      const wtAbs = join(repo.wt, spec.path);
+      let onLink = false;
+      try { onLink = io.lstat(wtAbs).kind === "lnk"; } catch (e) {}
+      const tB = onLink ? readWtLink(wtAbs) : readWtFile(wtAbs);
       diffFile(spec.path, fB, tB, true, "", color, out);
     } else {
       diffWtTree(k, baseTree, repo, color, fctx, "", out);
@@ -588,3 +624,7 @@ function blobAtTree(k, treeSha, path) {
 module.exports.withUTarget = withUTarget;
 module.exports.tok = tok;
 module.exports.TAG_U = TAG_U;
+//  JS-069: repro hooks — treeMap (leaf routing) + readWtLink (no-follow wt read).
+module.exports.treeMap = treeMap;
+module.exports.readWtLink = readWtLink;
+module.exports.readWtFile = readWtFile;
