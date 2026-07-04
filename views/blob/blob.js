@@ -102,11 +102,11 @@ function blobOne(arg, ctx) {
   const repo = (_be && _be.repo) || (ctx && ctx.repo) || null;
   if (!repo) return;
 
-  //  Self-parse the STRING arg; strip the `blob:` scheme so the URI binding sees
-  //  the bare body (the analogue of cat's `cat:` strip).
-  let first = String(arg || "");
-  if (first.indexOf("blob:") === 0) first = first.slice("blob:".length);
-  const u = new URI(first);
+  //  URI-013: ONE structured parse of the whole `blob:<uri>` — the URI binding
+  //  reads `.path`/`.query`/`.fragment`/`.authority` off the scheme'd form (no
+  //  strip-then-reparse; the analogue of cat's collapse).
+  const first = String(arg || "");
+  const u = uri._parse(first);
   const path  = u.path || "";
   const query = u.query || "";
   const frag  = u.fragment || "";
@@ -179,7 +179,7 @@ function blobOne(arg, ctx) {
     const body = bytes.slice(off, end);
     let toks = EMPTY32;
     if (mode !== "plain" && ext) { try { toks = tok.parse(body, ext); } catch (e) { toks = EMPTY32; } }
-    sink.feed(bannerKey + "#L" + line, body, toks, "blob", 0n);   // banner: `blob <key>#L<n>`
+    sink.feed(URI.make(undefined, undefined, bannerKey, undefined, "L" + line), body, toks, "blob", 0n);  // `blob <key>#L<n>`
     for (let i = off; i < end; i++) if (bytes[i] === 10) line++;
     off = end;
   }

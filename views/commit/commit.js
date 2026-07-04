@@ -220,7 +220,7 @@ function buildHunk(sha, headers, body) {
     const linky = linkScheme !== null && isFullSha(h.value.slice(0, 40));
     //  URI-011: full nav-authority URI — authority BEFORE the `?` so the hunk
     //  carries the FULL address (`<scheme>://name?<sha40>`; "" auth = byte-parity).
-    const uri = linky ? navlib.navUri(linkScheme, "") + "?" + h.value.slice(0, 40) : "";
+    const uri = linky ? navlib.navUri(linkScheme, "", h.value.slice(0, 40)) : "";
     emit(h.value, linky ? TAG_L : TAG_G, uri);
     emit("\n", TAG_S);
   }
@@ -357,10 +357,15 @@ function commitOne(arg, ctx) {
   //  survive a queue row; cf. cat.js/log.js).  Never trust a row.uri.
   let first = String(arg || "");
   if (first.indexOf("commit:") !== 0) first = "commit:" + first;
-  const u = new URI(first);
-  //  URI collapses `commit:?` (empty query) into query "" — recover the
-  //  explicit-`?` distinction from the raw token (an empty `?` is a resolve
-  //  FAIL, distinct from a bare `commit:` = cur tip).
+  //  URI-013: ONE structured parse of the whole scheme'd `commit:<uri>` — the
+  //  URI binding reads `.query`/`.fragment`/`.path` (no strip-then-reparse).
+  const u = uri._parse(first);
+  //  [URI-009] slot-PRESENCE scans (LEFT AS-IS): the binding collapses an empty
+  //  `?`/`#` (undefined vs "") in `.query`/`.fragment`, so the explicit-slot
+  //  distinction — `commit:?` (empty query = resolve FAIL) and `commit:#` (empty
+  //  hashlet = FAIL), both distinct from bare `commit:` (= cur tip) — can only be
+  //  recovered by scanning the raw body.  Needs a binding presence API (URI-009);
+  //  do NOT replace with more hand-parsing.
   const rest = first.slice("commit:".length);
   const hasHash = rest.indexOf("#") >= 0;
   const parsed = {

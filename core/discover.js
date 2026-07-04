@@ -229,7 +229,10 @@ function navCwd(dir) {
              : top.indexOf(root + "/") === 0 ? top.slice(root.length + 1)
              : top.slice(top.lastIndexOf("/") + 1);      // fallback: basename
   const sub = d.length > top.length ? d.slice(top.length + 1) : "";
-  return "//" + name + (sub ? "/" + sub : "");
+  //  Compose the `//name[/sub]` context URI via the URI class (authority = name,
+  //  path = the sub crossing into the submodule); byte-identical to the old concat.
+  return uri._make(undefined, "//" + name, sub ? "/" + sub : undefined) ||
+         ("//" + name);
 }
 
 //  URI-011: cwd() → the CONTEXT worktree ROOT a verb runs from — the ONE place a

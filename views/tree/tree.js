@@ -167,11 +167,10 @@ function treeOne(arg, ctx) {
   const repo = (_be && _be.repo) || (ctx && ctx.repo) || (_be ? _be.find() : null);
   if (!repo) return;
 
-  //  Self-parse the projector URI (the whole `tree:<path>[?rev]`); strip the
-  //  `tree:` scheme so the URI binding sees the bare body.  Empty → root/cur-tip.
-  let first = String(arg || "");
-  if (first.indexOf("tree:") === 0) first = first.slice("tree:".length);
-  const u = new URI(first);
+  //  URI-013: ONE structured parse of the whole `tree:<path>[?rev]` — the URI
+  //  binding reads `.path`/`.query`/`.fragment` off the scheme'd form (no
+  //  strip-then-reparse).  Empty → root/cur-tip.
+  const u = uri._parse(String(arg || ""));
   const path  = u.path || "";
   const query = u.query || "";
   const frag  = u.fragment || "";
@@ -222,7 +221,7 @@ function treeOne(arg, ctx) {
   const rev = query || frag;                    // frag (#hex) shows as ?<hex>
   //  URI-011: authority-prefixed banner; the ?rev suffix stays AFTER navUri
   //  (the //name authority goes before the '?').
-  const banner = navlib.navUri("tree", segs.join("/")) + (rev ? "?" + rev : "");
+  const banner = navlib.navUri("tree", segs.join("/"), rev || undefined);
   const pathPfx = segs.length ? segs.join("/") + "/" : "";   // full-path nav prefix
 
   //  BRO-006 pager/--tlv path: ONE content HUNK, a hidden `U` per entry name.

@@ -31,6 +31,7 @@ const subs     = require("../../shared/subs.js");
 const ambient  = require("../../shared/ambient.js");   // JAB-004: ctx→be bridge
 const render   = require("../../view/render.js");
 const theme    = require("../../view/theme.js");
+const navlib   = require("../../shared/nav.js");        // URI-011: full-URI nav helper
 const join     = require("../../shared/util/path.js").join;   // DIS-060: scope path
 //  JAB-004: render.js's dateCol/verbCol/writeStdout/shQuote are no longer
 //  used here — the emit sink (core/emit.js) owns all column formatting at the
@@ -282,7 +283,7 @@ function emitRepo(repo, prefix, out, recurse) {
   //  banner + the `?<branch>\t<counts>` summary are pre-formatted framing,
   //  pushed verbatim via out.raw.  JAB-004: the header carries this hunk's
   //  subpath (`status:` at the top, `status:<prefix>` for a sub).
-  out.raw(prefix ? "status:" + prefix : "status:");
+  out.raw(navlib.navUri("status", prefix || ""));
 
   //  Commit divergence block FIRST (ahead `post` rows, then behind `miss`
   //  rows), each `<date7> <verb3> ?<hashlet>#<subject>`.  These are NOT real
@@ -316,7 +317,7 @@ function emitRepo(repo, prefix, out, recurse) {
       //  A rename renders as the `rmv` source + `mov` dest PAIR (two plain path
       //  rows), each nav targeting its OWN path — the move-row nav restored.
       const navPath = joinPrefix(prefix, r.path);
-      const nav = (NAV_DIFF[r.bucket] ? "diff:" : "cat:") + navPath;
+      const nav = navlib.navUri(NAV_DIFF[r.bucket] ? "diff" : "cat", navPath);
       out.row(navPath, bucket, r.ts, null, nav);
     }
   }

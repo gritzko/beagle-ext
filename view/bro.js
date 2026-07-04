@@ -504,9 +504,14 @@ const BRO_KEEP_SCHEME = new Set(
 function statusURI(hunk, line) {
   const u = uri._parse(hunk.uri);
   if (!u.path) return hunk.uri;
+  //  URI-013: rebuild via URI.make (path is repo-relative/rootless, no authority,
+  //  no query; the `#L<n>` line anchor rides the fragment slot) — byte-identical to
+  //  the old `scheme:path#L<n>` / `path#L<n>` concat, with that concat as a fallback.
   if (u.scheme && BRO_KEEP_SCHEME.has(u.scheme))
-    return u.scheme + ":" + u.path + "#L" + line;
-  return u.path + "#L" + line;
+    return URI.make(u.scheme, undefined, u.path, undefined, "L" + line) ||
+           (u.scheme + ":" + u.path + "#L" + line);
+  return URI.make(undefined, undefined, u.path, undefined, "L" + line) ||
+         (u.path + "#L" + line);
 }
 
 function statusPos(scroll, nrows, viewRows) {

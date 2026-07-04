@@ -46,9 +46,8 @@ function currentSubPin(anchorPath) {
   try {
     ulog.each(anchorPath, function (log) {
       const u = (log && log.uri) || "";
-      const h = u.indexOf("#");
-      if (h >= 0) { const f = u.slice(h + 1);
-        if (/^[0-9a-f]{40}$/.test(f)) pin = f; }
+      let f = ""; try { f = uri._parse(u).fragment || ""; } catch (e) {}
+      if (/^[0-9a-f]{40}$/.test(f)) pin = f;
     });
   } catch (e) {}
   return pin;
@@ -103,6 +102,13 @@ function syntheticBranch(title, parentTitle, parentBranch) {
 function sameSourceUri(source, title) {
   if (!source) return "";
   //  source.raw is the parent's remote URI; rebuild it with `?/<title>`.
+  //  URI-013: LEFT as a hand-compose for BYTE-PARITY.  `u.authority` here already
+  //  carries the leading `//` (the binding returns the slotted form), so the old
+  //  `"//" + u.authority` DOUBLES it (`ssh:////host/...`) for an authority-bearing
+  //  (remote-ssh) source — a latent bug.  Routing through `URI.make(u.scheme,
+  //  u.authority, u.path, "/" + title)` would EMIT THE CORRECT single `//` and so
+  //  CHANGE the output string — a behaviour change a byte-parity refactor must not
+  //  make.  Fix belongs with the same-source-remote-submodule work, not here.
   const u = new URI(source.raw);
   const scheme = u.scheme ? u.scheme + ":" : "";
   const auth = (u.authority != null && u.authority !== "") ? "//" + u.authority : "";
@@ -190,9 +196,9 @@ function mount(opts) {
       //  shard that lacks the pin lands the new pack via ingest.add (a re-get
       //  pulling an advanced child).
       if (!exists(join(shard, "0000000001.keeper")))
-        ingest.clone(f.pack, beDir, title, pin, usedUri || ("be:" + shard));
+        ingest.clone(f.pack, beDir, title, pin, usedUri || URI.make("be", undefined, shard));
       else
-        ingest.add(f.pack, shard, usedUri || ("be:" + shard), pin);
+        ingest.add(f.pack, shard, usedUri || URI.make("be", undefined, shard), pin);
     }
 
     //  GET-040: the sub's PRIOR pin (its current anchor tip) is the checkout
@@ -204,9 +210,9 @@ function mount(opts) {
     //  the sibling shard + project (so be.find resolves the mount), then the
     //  `?<synthetic-branch>#<pin>` tip the child wt tracks ([Submodules] §1).
     try { io.mkdir(subWt); } catch (e) {}
-    const redirect = "file:" + beDir + "/?/" + title;
+    const redirect = URI.make("file", undefined, beDir + "/", "/" + title);
     ulog.write(anchorPath, [{ verb: "get", uri: redirect },
-                            { verb: "get", uri: "?" + branch + "#" + pin }]);
+                            { verb: "get", uri: URI.make(undefined, undefined, undefined, branch, pin) }]);
 
     //  D3: check out the commit named by the parent gitlink into `<wt>/<path>/`.
     //  GET-040: the global force flag (`get!`) — uniform across the root and

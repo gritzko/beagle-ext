@@ -45,11 +45,10 @@ const EMPTY32  = new Uint32Array(0);   // JAB-029: hunks feed ctx.sink; cli rend
 function parseURI(verb, rawArgs) {
   const mode = verb;                       // spot | grep | regex
   const args = (rawArgs && rawArgs.length) ? rawArgs.slice() : [""];
-  //  First arg = the projector URI; strip the `<scheme>:` so URI sees the body.
-  let first = String(args[0] || "");
-  const pfx = mode + ":";
-  if (first.indexOf(pfx) === 0) first = first.slice(pfx.length);
-  const u = new URI(first);
+  //  URI-013: First arg = the projector URI.  ONE structured parse of the whole
+  //  `<mode>:<uri>` — the URI binding reads `.fragment`/`.path`/`.query`/
+  //  `.authority` off the scheme'd form (no strip-then-reparse).
+  const u = uri._parse(String(args[0] || ""));
   let body = u.fragment || "";
   let ext  = "";
   let path = u.path || "";
@@ -111,7 +110,7 @@ function grepCtx(src, pos, nctx) {
 function makeURI(mode, path, src, ctxLo) {
   let ln = 1;
   for (let i = 0; i < ctxLo && i < src.length; i++) if (src[i] === 10) ln++;
-  return navlib.navUri(mode, path) + "#L" + ln;
+  return navlib.navUri(mode, path, undefined, "L" + ln);
 }
 
 //  --- per-file search + hunk emit (capo_spot_file / capo_grep_file_cb) -----

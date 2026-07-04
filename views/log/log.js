@@ -45,15 +45,20 @@ function tok(tag, end) { return ((tag & 0x1f) << 27) | (end & 0xffffff); }
 //  ./path = FILE history (graflog_strip_dotslash); ?query = branch ref tip;
 //  #frag = a tip-sha (hashlet) OR a `#N` walk cap.
 function parseArg(raw) {
+  //  URI-013: ONE structured parse of the whole `log:<uri>` — the URI binding
+  //  splits `.path`/`.query`/`.fragment` off the scheme'd form (no strip-then-
+  //  re-scheme).  logOne guarantees `raw` carries the `log:` prefix.
   let s = String(raw || "");
-  if (s.indexOf("log:") === 0) s = s.slice(4);
-  const u = new URI("log:" + s);   // re-scheme so URI splits path/query/frag
+  if (s.indexOf("log:") === 0) s = s.slice(4);      // body, for the presence scan
+  const u = uri._parse(String(raw || ""));
   let path = u.path || "";
   if (path.indexOf("./") === 0) path = path.slice(2);   // strip the ./ lead
   if (path === ".") path = "";   // the loop's no-arg "." scope = whole-repo log
-  //  A `?` (even with an EMPTY query) means an explicit ref resolution
-  //  (`log:?` = REFSResolve trunk), distinct from bare `log:` (= cur tip).
-  //  URI collapses both to query "" — recover the distinction from the raw.
+  //  [URI-009] slot-PRESENCE scan (LEFT AS-IS): a `?` (even with an EMPTY query)
+  //  means an explicit ref resolution (`log:?` = REFSResolve trunk), distinct
+  //  from bare `log:` (= cur tip).  The binding collapses `.query` undefined-vs-""
+  //  so the distinction can only be recovered from the raw body — needs a binding
+  //  presence API (URI-009); do NOT replace with more hand-parsing.
   const hasQuery = s.indexOf("?") >= 0;
   return { path: path, query: u.query || "", hasQuery: hasQuery,
            frag: u.fragment || "" };
@@ -360,7 +365,7 @@ function appendRow(sha, k, textParts, spans, baseOff, nonspine, subPrefix) {
   //  SUBS-045: prepend the descent prefix so a DESCENDED row's link is
   //  base-relative (`commit:<sub>?<sha>` from root); "" keeps `commit:?<sha>`.
   //  URI-011: full nav address before the `?` — commit://name[/sub]?<sha>.
-  const uri = navlib.navUri("commit", subPrefix || "") + "?" + sha;
+  const uri = navlib.navUri("commit", subPrefix || "", sha);
   const uriBytes = utf8.Encode(uri);
   //  Row bytes WITH the hidden URI inline: sha8 + <uri> + " " + date7 + " " +
   //  summary + " (author)" + "\n".  The pager hides the U-tagged span, so the
@@ -451,8 +456,7 @@ function logOne(arg, ctx) {
   //  fragment (#N / #hashlet) is NOT part of the title.  LOG-002: the banner
   //  uses the FULL original path (pre-sub-strip), the walk uses the stripped one.
   //  URI-011: full nav address before the `?` — log://name[/path][?<ref>].
-  let bannerUri = navlib.navUri("log", bannerPath);
-  if (parsed.query) bannerUri += "?" + parsed.query;
+  let bannerUri = navlib.navUri("log", bannerPath, parsed.query || undefined);
 
   //  The history walk (newest-first, bounded by `#N`).  branchHistory now
   //  returns [{ sha, nonspine }] (the spine + greyed merge-2nd+ chains);

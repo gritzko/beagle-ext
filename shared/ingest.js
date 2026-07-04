@@ -81,10 +81,15 @@ function clone(packBytes, beDir, proj, tip, remoteUri) {
   //  refs: the origin remote-tracking row + the local trunk tip (`post ?#`),
   //  the row keeper.resolveRef('') matches.  Remote URI query stripped to `?`.
   //  JS-073: the crash-safe native ULOG writer (temp+rename), not in-place.
+  //  URI-013: the `origin` row is LEFT a hand-compose — the `.replace(/\?.*/,"?")`
+  //  keeps the `?`-slot PRESENT-BUT-EMPTY ([URI-009] slot-presence, un-routable
+  //  until the binding exposes presence), and a `uri._parse(remoteUri)` would
+  //  THROW on an scp-style git remote (`git@host:owner/repo.git`) where the old
+  //  concat never throws.  The local trunk `?#<tip>` row is the clean refKey shape.
   const origin = remoteUri.replace(/\?.*/, "?");
   ulog.write(join(shard, "refs"), [
     { verb: "get",  uri: origin + "#" + tip },
-    { verb: "post", uri: "?#" + tip }
+    { verb: "post", uri: URI.make(undefined, undefined, undefined, "", tip) }
   ]);
 }
 
@@ -111,10 +116,12 @@ function add(packBytes, shard, remoteUri, tip) {
   buildIndex(shard, nm, fileIdOf(nm));
   //  JS-073: append the new tip rows via ulog.append (native in-place booked
   //  append) — survivors keep their ORIGINAL ts; only the new rows get a stamp.
+  //  URI-013: `origin` row LEFT hand-composed ([URI-009] present-empty `?` +
+  //  scp-remote parse-throw risk — see clone()); the `?#<tip>` trunk row routed.
   const origin = remoteUri.replace(/\?.*/, "?");
   ulog.append(join(shard, "refs"), [
     { verb: "get",  uri: origin + "#" + tip },
-    { verb: "post", uri: "?#" + tip }
+    { verb: "post", uri: URI.make(undefined, undefined, undefined, "", tip) }
   ]);
 }
 
@@ -125,6 +132,8 @@ function add(packBytes, shard, remoteUri, tip) {
 function saveRemoteRef(shard, remoteUri, tip) {
   //  JS-073: in-place native append preserves every survivor's ts; no re-drain,
   //  no restamp (the old writeUlog re-fed rows with no ts, bumping them to now).
+  //  URI-013: `origin` row LEFT hand-composed ([URI-009] present-empty `?` +
+  //  scp-remote parse-throw risk — see clone()).
   const origin = remoteUri.replace(/\?.*/, "?");
   ulog.append(join(shard, "refs"), [{ verb: "get", uri: origin + "#" + tip }]);
 }

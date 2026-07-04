@@ -92,8 +92,8 @@ function headOne(arg, ctx) {
   const res = hasScheme       ? peekFetch(k, uri, branch, curSha)
             : hasAuth         ? peekCached(k, u, branch, curSha)
             : /* local ?br */   peekLocal(k, branch, curSha);
-  report(ctx, uri || "?" + branch, branch, res.rel, res.ahead, res.behind,
-         res.tip, res.paths);
+  report(ctx, uri || URI.make(undefined, undefined, undefined, branch, undefined),
+         branch, res.rel, res.ahead, res.behind, res.tip, res.paths);
 }
 head.jab = "args";
 module.exports = head;
@@ -218,17 +218,24 @@ function report(ctx, uri, branch, rel, ahead, behind, tip, paths) {
   if (!sink) return;
   //  Header row: the target ref (any `?ref`/`#pin` slot the uri already carries
   //  is shed) + the relation verb; the ahead/behind commit rows follow.
-  const q = uri.indexOf("?"), base = q >= 0 ? uri.slice(0, q) : uri;
-  const target = base + "?" + (branch || "") + "#" + (tip ? tip.slice(0, 8) : "");
+  //  URI-013 A5/B4: parse the uri and RE-COMPOSE via the URI class instead of a
+  //  raw indexOf("?")/slice — the scheme/authority/path stay, the query is
+  //  replaced by `?<branch>` and the fragment by `#<hashlet>` (byte-identical to
+  //  the old `uri.slice(0,"?") + "?"+branch+"#"+tip` for every head URI form:
+  //  slots feed verbatim, and a real head URI carries a `?query` whenever it has
+  //  a `#pin`).
+  const u = new URI(uri);
+  const target = URI.make(u.scheme, u.authority, u.path,
+                          branch || "", tip ? tip.slice(0, 8) : "");
   //  DIS-060: the banner carries the target ADDRESSING uri (`<remote>?<br>#<tip>`)
   //  directly — NEVER a phantom `head:` scheme ([Nav]).
   const out = hunkrows(sink, target);
   out.row(target, relVerb(rel), 0n);
   for (const c of ahead)
-    out.row("?" + (c.hashlet || "") + (c.subject ? "#" + c.subject : ""),
+    out.row(URI.make(undefined, undefined, undefined, c.hashlet || "", c.subject ? c.subject : undefined),
             "post", c.ts);
   for (const c of behind)
-    out.row("?" + (c.hashlet || "") + (c.subject ? "#" + c.subject : ""),
+    out.row(URI.make(undefined, undefined, undefined, c.hashlet || "", c.subject ? c.subject : undefined),
             "miss", c.ts);
   //  Changed FILE paths (cur's tree vs the tip's tree) — a `chg` row each.
   for (const p of (paths || [])) out.row(p, "chg", 0n);

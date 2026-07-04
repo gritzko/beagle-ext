@@ -127,11 +127,10 @@ function sizeOne(arg) {
   const sink = (_be && _be.sink) || null;
   if (!repo || !sink) return;
 
-  //  Self-parse the STRING arg; strip the `size:` scheme so the URI binding sees
-  //  the bare body (the analogue of cat's/blob's scheme strip).
-  let first = String(arg || "");
-  if (first.indexOf("size:") === 0) first = first.slice("size:".length);
-  const u = new URI(first);
+  //  URI-013: ONE structured parse of the whole `size:<uri>` — the URI binding
+  //  reads `.path`/`.query`/`.fragment` off the scheme'd form (no strip-then-
+  //  reparse; the analogue of cat's/blob's collapse).
+  const u = uri._parse(String(arg || ""));
   const path  = u.path || "";
   const query = u.query || "";
   const frag  = u.fragment || "";
@@ -149,8 +148,10 @@ function sizeOne(arg) {
   if (!obj) throw "SIZENONE";
 
   //  3) emit ONE row: the decimal size, as a TRUE hunk on the canonical
-  //     JAB-003: size:<path> uri.  out.raw appends "\n"; done() flushes to sink.
-  const out = hunkrows(sink, "size:" + first);
+  //     JAB-003: size:<uri>.  out.raw appends "\n"; done() flushes to sink.
+  //     URI-013: rebuild the banner via URI.make (not a `"size:" + body` concat).
+  //     ([URI-009]: an empty-`?`/`#`-only banner input collapses — accepted gap.)
+  const out = hunkrows(sink, URI.make("size", u.authority, u.path, u.query, u.fragment));
   out.raw(String(obj.bytes.length));
   out.done();
   //  Read-only leaf: no fan-out (per-arg; the dispatcher fans out over args).

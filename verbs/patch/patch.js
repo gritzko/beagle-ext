@@ -353,9 +353,12 @@ function emit(rc, status, path) { rc.rows.push({ status: status, path: path }); 
 //  DIS-030 row URI: NAMED → `#<sha>` (fragment), NEXT → `?<sha>`, WHOLE →
 //  `?<sha>!`.  The slot/`!` encode the scope POST reads for provenance.
 function patchRowUri(scope, theirs) {
-  if (scope === "NAMED") return "#" + theirs;
-  if (scope === "WHOLE") return "?" + theirs + "!";
-  return "?" + theirs;                                   // NEXT
+  //  URI-013 B10: compose the ref-only key via the URI class.  NAMED = `#<sha>`
+  //  (fragment); NEXT = `?<sha>` (query); WHOLE = `?<sha>` + a trailing `!` scope
+  //  sigil (NOT a URI slot — appended after the composed URI, byte-preserving).
+  if (scope === "NAMED") return URI.make(undefined, undefined, undefined, undefined, theirs);
+  if (scope === "WHOLE") return URI.make(undefined, undefined, undefined, theirs, undefined) + "!";
+  return URI.make(undefined, undefined, undefined, theirs, undefined);   // NEXT
 }
 
 //  JAB-004: plain-args PATCH — `patch(...args)` off global `be`, called ONCE.
@@ -489,7 +492,7 @@ function patchSubs(info, ctx, reader, rc, fMap, oMap, tMap) {
     //  at the next `be post`.  `ulog.append` stamps strictly past the live tail,
     //  so a second sub's bump never collides with the first's.
     ulog.append(info.bePath,
-                [{ verb: "put", uri: job.path + "#" + job.theirs }]);
+                [{ verb: "put", uri: URI.make(undefined, undefined, job.path, undefined, job.theirs) }]);
   }, { gitlinks: subGitlinkMap(rc.subJobs) });
 }
 

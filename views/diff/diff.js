@@ -371,8 +371,19 @@ function prefixingSink(out, prefix) {
       s = s.split("diff:").join("diff:" + prefix + "/");
       out.chunk(s);
     },
-    feed: out.feed ? function (uri, text, toks) {
-      out.feed(uri.split("diff:").join("diff:" + prefix + "/"), text, toks);
+    feed: out.feed ? function (hunkUri, text, toks) {
+      //  URI-011: prefix the hunk URI's PATH under the mount via the URI class
+      //  (parse once, rebuild) — the same rewrite as the `.split("diff:")` join
+      //  it replaces, but scheme/authority/query/#L<n> are preserved structurally.
+      //  An empty uri (text-only gitlink hunk) has no `diff:` to rewrite: pass it
+      //  through UNCHANGED, exactly as `.split("diff:")` did (byte-parity).
+      let pfxed = hunkUri;
+      if (hunkUri) {
+        const u = uri._parse(hunkUri);
+        pfxed = URI.make(u.scheme, u.authority, prefix + "/" + u.path,
+                         u.query, u.fragment);
+      }
+      out.feed(pfxed, text, toks);
     } : undefined,
   };
 }
@@ -422,9 +433,13 @@ function resolveCommit(k, ref) {
 //  baselineSha, navver, path } in the existing spec shape, or null when a ref
 //  is unresolvable.
 function parseDiffArg(k, repo, raw) {
-  let first = String(raw || "");
-  if (first.indexOf("diff:") !== 0) first = "diff:" + first;
-  const u = new URI(first);
+  //  URI-011: parse the arg ONCE, then branch on its scheme instead of the old
+  //  prepend-`diff:`-then-reparse dance.  Already a `diff:` address → use its
+  //  slots directly; a bare/other address → default the `diff:` scheme via
+  //  URI.make and read the slots back.  Only path/query/#frag are consumed.
+  let u = new URI(String(raw || ""));
+  if (u.scheme !== "diff")
+    u = new URI(URI.make("diff", u.authority, u.path, u.query, u.fragment) || "diff:");
   const path = u.path || "";
   const query = u.query || "";
   const frag = u.fragment || "";

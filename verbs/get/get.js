@@ -182,8 +182,8 @@ function seedLocal(rem, wt) {
   const bePath = join(wt, ".be");
   const fresh = !exists(bePath);
   const oldTip = fresh ? "" : oldTipOf(bePath);
-  const redirect = "file:" + src.storeBe + "/?/" + src.proj;
-  const tipRow = { verb: "get", uri: "?" + (rem.branch || "") + "#" + tip };
+  const redirect = URI.make("file", undefined, src.storeBe + "/", "/" + src.proj);
+  const tipRow = { verb: "get", uri: URI.make(undefined, undefined, undefined, rem.branch || "", tip) };
   if (fresh) writeWtlog(bePath, [{ verb: "get", uri: redirect }, tipRow]);
   else appendWtlog(bePath, [tipRow]);
   return { k, tip, oldTip, fresh, branch: rem.branch || "" };
@@ -210,13 +210,13 @@ function seedRemote(rem, wt) {
   let oldTip = "";
   if (fresh) {
     ingest.clone(f.pack, beDir, proj, tip, rem.raw);
-    const anchor = "file:" + beDir + "/" + proj + "/";
+    const anchor = URI.make("file", undefined, beDir + "/" + proj + "/");
     writeWtlog(wtl, [{ verb: "get", uri: anchor },
-                     { verb: "get", uri: "?" + branch + "#" + tip }]);
+                     { verb: "get", uri: URI.make(undefined, undefined, undefined, branch, tip) }]);
   } else {
     oldTip = oldTipOf(wtl);
     ingest.add(f.pack, shard, rem.raw, tip);
-    appendWtlog(wtl, [{ verb: "get", uri: "?" + branch + "#" + tip }]);
+    appendWtlog(wtl, [{ verb: "get", uri: URI.make(undefined, undefined, undefined, branch, tip) }]);
   }
   const k = store.open(wt, proj);
   return { k, tip, oldTip, fresh, branch };
@@ -245,7 +245,7 @@ function seedCached(rem, wt) {
   const bePath = info.bePath;
   const oldTip = oldTipOf(bePath);
   appendWtlog(bePath, [{ verb: "get",
-                         uri: "?" + (rem.branch || "") + "#" + tip }]);
+                         uri: URI.make(undefined, undefined, undefined, rem.branch || "", tip) }]);
   return { k, tip, oldTip, fresh: false, branch: rem.branch || "" };
 }
 
@@ -390,7 +390,7 @@ function fanoutWholeTree(ctx, r, wt, force) {
   //  D6 --force skips the refuse (it will clean-reset everything).
   if (!force) dirtyOverlapCheck(r.k, newTree, oldTree, wt, r.fresh);
 
-  out.banner("get", "?" + (r.branch || "") + "#" + r.tip.slice(0, 8), ctx.T0);
+  out.banner("get", URI.make(undefined, undefined, undefined, r.branch || "", r.tip.slice(0, 8)), ctx.T0);
 
   //  Pulled-commit rows (UPDATE only), newest-first; rendered above file rows.
   //  GIT-016: via the shared spine — from cur=oldTip the fetched tip is AHEAD, so
@@ -399,8 +399,8 @@ function fanoutWholeTree(ctx, r, wt, force) {
     const v = relate.verdict(r.k, r.oldTip, r.tip);
     const pulled = v.behind;                        // rel exposed for a future FF gate (JGET-002)
     for (const c of pulled)
-      out.row("?" + c.hashlet + (c.subject ? "#" + c.subject : ""), "post",
-              c.ts, { _post: true });
+      out.row(URI.make(undefined, undefined, undefined, c.hashlet || "", c.subject ? c.subject : undefined),
+              "post", c.ts, { _post: true });
   }
 
   //  ENQUEUE the root reconcile then the del-sweep fold row LAST (post-order:
@@ -463,7 +463,7 @@ function inRepoSeed(uri, ctx) {
     if (!isFullSha(anc))
       throw "be get: cannot rewind " + n + " from " + (curSha || "(none)");
     appendWtlog(info.bePath, [{ verb: "get",
-                               uri: "?" + curBranch + "#" + anc }]);
+                               uri: URI.make(undefined, undefined, undefined, curBranch, anc) }]);
     return fanoutWholeTree(ctx, { k, tip: anc, oldTip: curSha, fresh: false,
                                   branch: curBranch }, wt, force);
   }
@@ -475,7 +475,7 @@ function inRepoSeed(uri, ctx) {
   if (query && !frag && (isFullSha(query) || isShortHex(query))) {
     const tip = resolvePin(k, query);
     if (!isFullSha(tip)) throw "be get: cannot resolve ?" + query;
-    appendWtlog(info.bePath, [{ verb: "get", uri: "?" + tip }]);
+    appendWtlog(info.bePath, [{ verb: "get", uri: URI.make(undefined, undefined, undefined, tip, undefined) }]);
     return fanoutWholeTree(ctx, { k, tip, oldTip: curSha, fresh: false,
                                   branch: "" }, wt, force);
   }
@@ -485,7 +485,7 @@ function inRepoSeed(uri, ctx) {
   if (frag && isShortOrFullHex(frag)) {
     const tip = resolvePin(k, frag);
     if (!isFullSha(tip)) throw "be get: cannot resolve ?" + query + "#" + frag;
-    appendWtlog(info.bePath, [{ verb: "get", uri: "?" + query + "#" + tip }]);
+    appendWtlog(info.bePath, [{ verb: "get", uri: URI.make(undefined, undefined, undefined, query, tip) }]);
     return fanoutWholeTree(ctx, { k, tip, oldTip: curSha, fresh: false,
                                   branch: query }, wt, force);
   }
@@ -501,7 +501,7 @@ function inRepoSeed(uri, ctx) {
               (wantBranch === curBranch ? curSha : "");
   if (!isFullSha(tip))
     throw "be get: cannot resolve " + (branch ? "?" + branch : "current branch");
-  appendWtlog(info.bePath, [{ verb: "get", uri: "?" + wantBranch + "#" + tip }]);
+  appendWtlog(info.bePath, [{ verb: "get", uri: URI.make(undefined, undefined, undefined, wantBranch, tip) }]);
   return fanoutWholeTree(ctx, { k, tip, oldTip: curSha, fresh: false,
                                 branch: wantBranch }, wt, force);
 }
@@ -545,7 +545,7 @@ function restorePath(ctx, k, wt, path, query, curSha, curBranch) {
                force: force, noPrune: true };
   ctx.outSort = function (rows) { return sortGetRows(rows); };
   ctx._finalize = flushGet;   // JAB-003: flush the one get hunk after the queue drains
-  getOut(ctx).banner("get", "?" + (curBranch || "") + "#" + srcSha.slice(0, 8), ctx.T0);
+  getOut(ctx).banner("get", URI.make(undefined, undefined, undefined, curBranch || "", srcSha.slice(0, 8)), ctx.T0);
 
   const enqueue = [];
   const newIsDir = newEnt && newEnt.kind === "tree";

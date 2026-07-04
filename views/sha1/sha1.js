@@ -120,10 +120,11 @@ function sha1One(arg, ctx) {
   const sink = (_be && _be.sink) || (ctx && ctx.sink) || null;
   if (!repo) return;
 
-  //  Strip the `sha1:` scheme so the URI binding sees the bare body.
-  let first = String(arg || "");
-  if (first.indexOf("sha1:") === 0) first = first.slice("sha1:".length);
-  const u = new URI("sha1:" + first);   // re-scheme so URI splits path/query/frag
+  //  URI-013: ONE structured parse of the whole `sha1:<uri>` — the URI binding
+  //  splits `.path`/`.query`/`.fragment` off the scheme'd form (no strip-then-
+  //  re-scheme dance).  The ORIGINAL slots (pre-promotion) are kept for the
+  //  emitted banner URI, which URI.make rebuilds below.
+  const u = uri._parse(String(arg || ""));
   const path  = u.path || "";
   let   query = u.query || "";
   let   frag  = u.fragment || "";
@@ -170,9 +171,13 @@ function sha1One(arg, ctx) {
   if (!target || !isFullSha(target)) return;
 
   //  Emit the 41-byte line as ONE raw row into a TRUE hunk at the canonical
-  //  `sha1:<path>` (verbatim in plain AND colour; out.raw appends the '\n').
+  //  `sha1:<uri>` (verbatim in plain AND colour; out.raw appends the '\n').
+  //  URI-013: rebuild the banner via URI.make from the ORIGINAL parsed slots
+  //  (pre-promotion), not a `"sha1:" + body` concat.  ([URI-009]: an empty-`?`/
+  //  `#`-only banner input collapses through the binding — the accepted gap.)
   if (sink) {
-    const out = hunkrows(sink, "sha1:" + first);
+    const bannerUri = URI.make("sha1", u.authority, u.path, u.query, u.fragment);
+    const out = hunkrows(sink, bannerUri);
     out.raw(target);
     out.done();
   }

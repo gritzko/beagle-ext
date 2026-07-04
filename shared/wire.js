@@ -41,7 +41,7 @@ function classify(remoteUri, verb) {
   //  absolute `/<project>` selector (WIREServePath).  A bare `?ref` is the
   //  in-band want, never appended here.
   function servePath(p) {
-    return (query && query[0] === "/") ? (p + "?" + query) : p;
+    return (query && query[0] === "/") ? (URI.make(undefined, undefined, p, query) || p) : p;
   }
 
   //  DIS-058: a host-less `be:`/`keeper:` (an ABSOLUTE local store path, NO
@@ -63,9 +63,9 @@ function classify(remoteUri, verb) {
   //  GIT-012: http(s) rides a spawned curl (jab has no TLS), smart-protocol.
   //  The base URL is the remote verbatim minus any in-band `?<sel>`/`?ref`.
   if (scheme === "http" || scheme === "https") {
-    let base = remoteUri;
-    const q = base.indexOf("?");
-    if (q >= 0) base = base.slice(0, q);
+    //  Base URL = the remote minus any in-band `?<sel>`/`?ref`, rebuilt from the
+    //  already-parsed `u` (scheme+authority+path) via the URI class.
+    const base = URI.make(u.scheme, u.authority, u.path);
     return { http: true, url: base, ssh: false };
   }
 

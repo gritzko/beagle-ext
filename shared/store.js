@@ -607,10 +607,23 @@ const ZERO_SHA = "0".repeat(40);
 
 //  ref-key (`""` trunk, `"feat"`, `"heads/main"`) → URI key prefix.  A
 //  leading `?` is tolerated and shed so callers may pass either form.
+//  URI-013: compose the `?<k>#<sha>` ref URI via URI.make (query=k, fragment=sha;
+//  no scheme/authority/path).  A present-empty query ("") renders the bare `?`
+//  (trunk key `?#<sha>`) — byte-identical to the old `"?"+k+"#"+sha` (abc/URI.c
+//  URIutf8Feed / js/test/uri.js).  Fall back to the concat if make ever returns falsy.
 function keyURI(key, sha) {
   let k = key == null ? "" : String(key);
   if (k && k[0] === "?") k = k.slice(1);
-  return "?" + k + "#" + sha;
+  return URI.make(undefined, undefined, undefined, k, String(sha)) ||
+         ("?" + k + "#" + sha);
+}
+
+//  refKey(branch, sha) → the `?<branch>#<sha>` refs-log key URI, the shared
+//  builder the ~39 open-coded `?b#sha` concats across the verbs/core adopt.
+//  Same shape/semantics as keyURI (a leading `?` on `branch` is shed; a `""`
+//  branch is the trunk `?#<sha>`); single-sourced on URI.make.
+function refKey(branch, sha) {
+  return keyURI(branch, sha);
 }
 
 //  createShard(shard[, key]): mkdir the shard dir (with parents) and seed an
@@ -649,4 +662,5 @@ module.exports = { open: open, frameSha: frameSha,
                    hashlet60FromBytes: hashlet60FromBytes,
                    TYPE_NAME: TYPE_NAME, NAME_TYPE: NAME_TYPE,
                    createShard: createShard, set: set, tombstone: tombstone,
-                   keyURI: keyURI, ZERO_SHA: ZERO_SHA, modeKind: modeKind };
+                   keyURI: keyURI, refKey: refKey,
+                   ZERO_SHA: ZERO_SHA, modeKind: modeKind };

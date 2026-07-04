@@ -51,7 +51,7 @@ function withLinks(body, toks) {
   if (toks.length === 0) return { body: body, toks: toks };
   //  URI-011: grep click-target `<grep-uri>#<token>` — navUri carries the //name
   //  authority; when unscoped navUri("grep","")="grep:" so PFX="grep:#" (parity).
-  const PFX = utf8.Encode(navlib.navUri("grep", "") + "#");
+  const PFX = utf8.Encode(navlib.navUri("grep", "", undefined, ""));
   let extra = 0, nlinks = 0, prev = 0;
   for (let i = 0; i < toks.length; i++) {
     const end = tokEnd(toks[i]);
@@ -125,9 +125,10 @@ function catOne(arg) {
   const sink = _be && _be.sink;
   if (!repo || !sink) return;
 
-  let first = String(arg || "");
-  if (first.indexOf("cat:") === 0) first = first.slice(4);
-  const u = new URI(first);
+  //  URI-013: ONE structured parse of the whole `cat:<path>[?ref]` — the URI
+  //  binding reads `.path`/`.query` off the scheme'd form (no strip-then-reparse).
+  const first = String(arg || "");
+  const u = uri._parse(first);
   const path = u.path || "";
   const ref  = (u.query && u.query.length) ? u.query : "";
   if (!path) { io.log("cat: needs a path\n  try: cat:<path>\n"); throw "CATNOPATH"; }
@@ -158,7 +159,7 @@ function catOne(arg) {
     }
     //  URI-011: banner carries the full nav address `cat://name/<path>#L<n>`;
     //  navUri prefixes the authority, the #L<n> fragment stays AFTER it (parity).
-    const uri = navlib.navUri("cat", path) + "#L" + line;
+    const uri = navlib.navUri("cat", path, undefined, "L" + line);
     sink.feed(uri, body, toks, "", 0n);   // banner: `cat:<path>#L<n>`
     for (let i = off; i < end; i++) if (bytes[i] === 10) line++;
     off = end;

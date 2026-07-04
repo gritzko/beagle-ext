@@ -80,10 +80,9 @@ function typeOne(arg, ctx) {
   const sink = (_be && _be.sink) || (ctx && ctx.sink) || null;
   if (!repo) return;
 
-  //  Strip the `type:` scheme so the URI binding sees the bare body (cat-style).
-  let first = String(arg || "");
-  if (first.indexOf("type:") === 0) first = first.slice("type:".length);
-  const u = new URI(first);
+  //  URI-013: ONE structured parse of the whole `type:<uri>` — the URI binding
+  //  reads `.query`/`.fragment` off the scheme'd form (no strip-then-reparse).
+  const u = uri._parse(String(arg || ""));
   const query = u.query || "";
   const frag  = u.fragment || "";
 
@@ -101,8 +100,10 @@ function typeOne(arg, ctx) {
 
   //  3) emit the type word as ONE raw row into a TRUE hunk at the canonical
   //  `type:<uri>` (plain == colour: the type word carries no THEME SGR).
+  //  URI-013: rebuild the banner via URI.make (not a `"type:" + body` concat).
+  //  ([URI-009]: an empty-`?`/`#`-only banner input collapses — accepted gap.)
   if (sink) {
-    const out = hunkrows(sink, "type:" + first);
+    const out = hunkrows(sink, URI.make("type", u.authority, u.path, u.query, u.fragment));
     out.raw(obj.type);
     out.done();
   }

@@ -277,7 +277,7 @@ function advanceBranch(reader, wtl, info, ctx, target, curBranch, parent,
   //  as get's banner already does), NEVER a phantom `post:` scheme ([Nav]).
   if (ctx && ctx.sink) {
     const stamp = ulog.nowAfter(wtlogTail(wtl));
-    const refUri = "?" + target + "#" + parent.slice(0, 8);
+    const refUri = URI.make(undefined, undefined, undefined, target, parent.slice(0, 8));
     const out = hunkrows(ctx.sink, refUri);
     out.row(refUri, "post", stamp);
     out.done();
@@ -354,9 +354,11 @@ function pushRemote(info, reader, ctx, remoteUri, branch, tip, hasQuery) {
   if (ctx && ctx.sink) {
     const stamp = ulog.nowAfter(0n);
     //  GIT-015: remoteUri already carries the `?branch` slot (POSTNOREF gate
-    //  guarantees it) — append only the `#tip` pin, never re-add `?branch`
-    //  (that doubled it to `?main?main`).
-    const target = remoteUri + "#" + tip.slice(0, 8);
+    //  guarantees it) — set only the `#tip` pin via the parse, never re-add
+    //  `?branch` (that doubled it to `?main?main`).  URI-013 B10: compose the
+    //  fragment through the URI class off remoteUri's own slots.
+    const ru = new URI(remoteUri);
+    const target = URI.make(ru.scheme, ru.authority, ru.path, ru.query, tip.slice(0, 8));
     const out = hunkrows(ctx.sink, target);
     out.row(target, "post", stamp);
     //  DIS-060: the change set across the pushed range (old..tip) — add/mod/del
@@ -508,7 +510,7 @@ function postSubs(info, ctx) {
       //  `ulog.append` reads the live tail + stamps strictly past it, so a
       //  second sub's bump never collides with the first's stamp.  postOne
       //  re-opens the wtlog, so it sees this just-appended bump row.
-      ulog.append(info.bePath, [{ verb: "put", uri: s.path + "#" + newTip }]);
+      ulog.append(info.bePath, [{ verb: "put", uri: URI.make(undefined, undefined, s.path, undefined, newTip) }]);
     }
   }
 }
@@ -649,9 +651,13 @@ function postOne(info, ctx, row) {
 
   const leaves = dres.decisions.map(function (d) {
     //  Each leaf is a branch-free decision row `<verb> path[?<old>]#<sha>`.
+    //  URI-013 B10: compose path + optional `?old` query + `#sha` fragment via
+    //  the URI class (byte-identical: slots feed verbatim, an absent old => no `?`).
     let uri = d.path;
-    if (d.verb === "add") uri += (d.oldSha ? "?" + d.oldSha : "") + "#" + d.sha;
-    else if (d.verb === "keep") uri += "#" + d.sha;
+    if (d.verb === "add")
+      uri = URI.make(undefined, undefined, d.path, d.oldSha ? d.oldSha : undefined, d.sha);
+    else if (d.verb === "keep")
+      uri = URI.make(undefined, undefined, d.path, undefined, d.sha);
     return { verb: d.verb, uri: uri };
   });
   if (leaves.length !== dres.decisions.length)
@@ -684,7 +690,7 @@ function postOne(info, ctx, row) {
   //  Append the `post` row (`?<branch>#<sha>`) at the stamp, then restamp
   //  every `add` file so it reads clean under the new baseline.
   ulog.append(info.bePath,
-              [{ verb: "post", uri: "?" + (branchKey || "") + "#" + commit.sha,
+              [{ verb: "post", uri: URI.make(undefined, undefined, undefined, branchKey || "", commit.sha),
                  ts: stamp }]);
   for (const d of dres.decisions) {
     if (d.verb !== "add") continue;
@@ -710,9 +716,13 @@ function wtlogTail(wtl) {
 function emitBanner(ctx, branchKey, sha, message, decisions, stamp) {
   if (!(ctx && ctx.sink)) return;
   const subject = subjectOf(message);
+  //  URI-013 B10: `?<branch>#<subject>` / `?<hashlet>#<subject>` via the URI
+  //  class — an empty subject drops the `#` (undefined fragment); the subject
+  //  body feeds verbatim (no escaping), so the bytes match the old concat.
   const out = hunkrows(ctx.sink,
-    "?" + (branchKey || "") + (subject ? "#" + subject : ""));
-  out.row("?" + sha.slice(0, 8) + (subject ? "#" + subject : ""), "post", stamp);
+    URI.make(undefined, undefined, undefined, branchKey || "", subject ? subject : undefined));
+  out.row(URI.make(undefined, undefined, undefined, sha.slice(0, 8), subject ? subject : undefined),
+          "post", stamp);
   for (const d of decisions) {
     let v;
     if (d.verb === "unlink") v = "del";

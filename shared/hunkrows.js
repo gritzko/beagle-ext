@@ -41,8 +41,11 @@ module.exports = function hunkrows(sink, uri, scheme) {
   let spans = [];                          // [tagLetter, byteEnd]
   let off   = 0;                           // running byte offset
   if (scheme == null && uri != null) {
-    const sc = uri.indexOf(":");
-    scheme = sc > 0 ? uri.slice(0, sc + 1) : null;
+    //  URI-013: read the scheme off the URI class instead of hand-slicing on ':'.
+    //  NOTE `uri` is the STRING param (shadows the `uri` global), so parse via the
+    //  `URI` class; guard the native throw to keep the old never-throw behavior.
+    let p; try { p = new URI(uri); } catch (e) { p = null; }
+    scheme = (p && p.scheme) ? p.scheme + ":" : null;
   }
 
   function feedText(bytes) { parts.push(bytes); off += bytes.length; }

@@ -87,7 +87,7 @@ function refCreate(repo, k, branch) {
   const cur = wtlog.open(repo).curTip();
   if (!cur || !cur.sha || !isFullSha(cur.sha)) throw SNIFFFAIL;
   store.set(k.shard, branch, cur.sha);
-  return { verb: "put", uri: "?" + branch + "#" + cur.sha.slice(0, 8) };
+  return { verb: "put", uri: URI.make(undefined, undefined, undefined, branch, cur.sha.slice(0, 8)) };
 }
 
 function refSet(repo, k, branch, sha) {
@@ -96,12 +96,12 @@ function refSet(repo, k, branch, sha) {
   //  ref to the value it already resolves to writes NO row (keeps .be/refs
   //  bit-identical across repeats); only a real change appends.
   if (k.resolveRef(branch) === sha)
-    return { verb: "put", uri: "?" + branch + "#" + sha.slice(0, 8) };
+    return { verb: "put", uri: URI.make(undefined, undefined, undefined, branch, sha.slice(0, 8)) };
   //  Materialise the shard for a not-yet-existing branch (idempotent), then
   //  append the REFS row.  Trunk ("") writes the project shard's own refs.
   if (branch && !k.resolveRef(branch)) store.createShard(k.shard, branch);
   store.set(k.shard, branch, sha);
-  return { verb: "put", uri: "?" + branch + "#" + sha.slice(0, 8) };
+  return { verb: "put", uri: URI.make(undefined, undefined, undefined, branch, sha.slice(0, 8)) };
 }
 
 //  JSQUE-010: per-arg slot classification (the C is_put split) now lives at the
@@ -175,7 +175,7 @@ function commitOps(repo, ops, floorTs) {
   }
   const rows = [];
   for (const op of stageOps)
-    rows.push({ verb: "put", uri: op.dst ? (op.path + "#" + op.dst) : op.path });
+    rows.push({ verb: "put", uri: op.dst ? URI.make(undefined, undefined, op.path, undefined, op.dst) : op.path });
   const assigned = appendAndAssign(repo.bePath, rows, floorTs);
   let ri = 0;
   for (const op of ops) {
@@ -313,8 +313,10 @@ function pushWire(repo, k, ctx, arg, u) {
   if (out) {
     openPutBanner(out, ctx);
     //  Banner: the remote base (any user #sha stripped) + `?branch#hashlet`.
-    const hash = arg.indexOf("#");
-    const base = hash >= 0 ? arg.slice(0, hash) : arg;
+    //  URI-013 A6: shed the fragment via the parse `u` (not arg.indexOf("#")) —
+    //  re-compose the base URI without a fragment; the `?branch` merge below is
+    //  byte-preserved (incl. a present-empty `?` edge that the parse keeps intact).
+    const base = URI.make(u.scheme, u.authority, u.path, u.query, undefined);
     out.row(base + (u.query ? "" : "?" + (branch || "")) + "#" + target.slice(0, 8), "put", 0n);
   }
 }
@@ -449,7 +451,7 @@ function bareStageSubs(repo, prefix, ctx) {
       let staged = 0;
       for (const op of r.ops)
         if (op.path !== null && !op.silent) {
-          out.row(subPrefix + "/" + (op.dst ? (op.path + "#" + op.dst) : op.path), "put", 0n);
+          out.row(subPrefix + "/" + (op.dst ? URI.make(undefined, undefined, op.path, undefined, op.dst) : op.path), "put", 0n);
           staged++;
         }
       //  SUBS-044: two-blank `put:` close ONLY when this sub staged a row
@@ -491,7 +493,7 @@ function stageInSub(repo, pfx, uri, ctx) {
   if (u.fragment) {
     let dst = normRel(u.fragment);
     if (dst.indexOf(pfx + "/") === 0) dst = dst.slice(pfx.length + 1);
-    subUri = subUri + "#" + dst;
+    subUri = URI.make(undefined, undefined, subUri, undefined, dst);
   }
   openPutBanner(out, ctx);
   const eng = stage.prep(subRepo, wtlog.open(subRepo), subK);
@@ -500,7 +502,7 @@ function stageInSub(repo, pfx, uri, ctx) {
   if (out)
     for (const it of r.items) {
       if (it.type === "skip") out.raw(skipText({ path: pfx + "/" + it.path, reason: it.reason, whole: it.whole }));
-      else { const op = r.ops[it.opIdx]; out.row(pfx + "/" + (op.dst ? op.path + "#" + op.dst : op.path), "put", 0n); }
+      else { const op = r.ops[it.opIdx]; out.row(pfx + "/" + (op.dst ? URI.make(undefined, undefined, op.path, undefined, op.dst) : op.path), "put", 0n); }
     }
   //  JAB-004: tallies accumulate on ctx; the driver (putRun) owns the final
   //  all-skip PUTNONE decision after the whole arg batch (no per-arg throw).
@@ -535,7 +537,7 @@ function putOne(repo, k, ctx, uri) {
       else {
         //  blank-date row column (ts 0n, native HUNK `.ts=0`).
         const op = r.ops[it.opIdx];
-        out.row(op.dst ? (op.path + "#" + op.dst) : op.path, "put", 0n);
+        out.row(op.dst ? URI.make(undefined, undefined, op.path, undefined, op.dst) : op.path, "put", 0n);
       }
     }
   }
@@ -622,7 +624,7 @@ function putRun(ctx, argv, firstUri) {
   for (const arg of argv) {
     const c = classifyPutArg(arg, k, curQuery);
     if (c.kind === "ref") ctx.refs.push({ op: c.op, branch: c.branch, sha: c.sha });
-    else if (c.path || c.dst) pathUris.push(c.dst ? (c.path + "#" + c.dst) : c.path);
+    else if (c.path || c.dst) pathUris.push(c.dst ? URI.make(undefined, undefined, c.path, undefined, c.dst) : c.path);
   }
   ctx.seededRowCount = pathUris.length;
 
@@ -652,7 +654,7 @@ function putRun(ctx, argv, firstUri) {
     if (out)
       for (const op of r.ops)
         if (op.path !== null && !op.silent)
-          out.row(op.dst ? (op.path + "#" + op.dst) : op.path, "put", 0n);
+          out.row(op.dst ? URI.make(undefined, undefined, op.path, undefined, op.dst) : op.path, "put", 0n);
     //  SUBS-044: then recurse mounted subs (pre-order), staging their interior.
     bareStageSubs(repo, "", ctx);
     if (out) out.done();

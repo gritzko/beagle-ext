@@ -121,8 +121,13 @@ function _isVerb(w, here) {
 //  `cat:` syntax-hili view (gritzko: "blob: or cat: whatever"); a dir (or an
 //  unstattable path) defaults to `ls`.  Returns the VERB; args[0] holds the URI.
 function _viewDefault(token, here) {
-  const sc = token.indexOf(":");
-  const path = sc > 0 ? token.slice(sc + 1) : token;
+  //  Strip a leading `<scheme>:` to the bare fs path to stat (`cat:foo` -> `foo`).
+  //  The URI-class scheme-drop (remake sans scheme) is byte-identical to the old
+  //  slice for every shape — authority/query/fragment ride through untouched.
+  let path = token;
+  try { const u = uri._parse(token);
+        const r = uri._make(undefined, u.authority, u.path, u.query, u.fragment);
+        if (r !== undefined && r !== null) path = r; } catch (e) {}
   let st = null;
   try { st = io.stat(path); } catch (e) {}
   if (st && st.kind !== "dir") return _isVerb("blob", here) ? "blob" : "cat";
@@ -261,8 +266,7 @@ function _cli(argv, opts2) {
   } else if (/^[a-zA-Z0-9]+$/.test(verb) && _isVerb(verb, _here)) {
     args.shift();                           // shape (1): verb URI+
   } else {                                  // shape (2): a URI view
-    const sc = verb.indexOf(":");
-    const scheme = sc > 0 ? verb.slice(0, sc) : "";
+    let scheme = ""; try { scheme = uri._parse(verb).scheme || ""; } catch (e) {}
     //  DIS-060: route `<scheme>:uri` only when scheme is on the allowlist, not any
     //  _isVerb module — a phantom `<verb>:` is absent, so it can't round-trip.
     if (scheme && /^[a-zA-Z0-9]+$/.test(scheme) && SCHEME_ALLOW.has(scheme)) {
@@ -345,7 +349,7 @@ function _cli(argv, opts2) {
     //  DIS-060: banner URI = the projector's own `<verb>:` scheme, but a bare
     //  (schemeless) uri for an off-allowlist mutation verb (never a phantom).
     if (colBytes && colBytes.length)
-      hunks = hunks.concat([{ uri: SCHEME_ALLOW.has(verb) ? verb + ":" : verb,
+      hunks = hunks.concat([{ uri: SCHEME_ALLOW.has(verb) ? (URI.make(verb) || verb + ":") : verb,
                               verb: "hunk", text: colBytes,
                               toks: new Uint32Array(0), kind: "file" }]);
     if (hunks.length) { _openPager(hunks); return res; }
