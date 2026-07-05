@@ -21,8 +21,8 @@ const TAG_L = 11, TAG_D = 3, TAG_S = 18;
 function tok(tag, end) { return ((tag & 0x1f) << 27) | (end & 0xffffff); }
 
 //  The URI SCHEMES typeable at `:` — a curated scheme→one-line table.  CROSS-
-//  CHECKED against be/views/ (blob cat commit diff grep log ls lsr refs regex
-//  sha1 size spot status tree type); `bro`/`help` are the viewers themselves so
+//  CHECKED against be/views/ (blob cat commit diff grep list log ls lsr refs
+//  regex sha1 size spot status tree type); `bro`/`help` are the viewers so
 //  they are not listed as navigation targets.  Keep this list in sync with the
 //  registry's view dirs.
 const SCHEMES = [
@@ -36,6 +36,7 @@ const SCHEMES = [
   ["status:", "the working-tree status"],
   ["ls:<dir>", "list a working-tree directory"],
   ["lsr:<dir>", "list a directory recursively"],
+  ["list:<dir>", "browse a dir: wt state + each entry's last commit"],
   ["refs:", "branch + baseline refs"],
   ["grep:#<word>", "search the tree for a word"],
   ["regex:<pat>", "search the tree by regex"],
