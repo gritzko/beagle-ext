@@ -540,6 +540,14 @@ Pager.prototype._tabComplete = function () {
 //  paths); match on the last SEGMENT so `u`/`./u` both find `shared/util`.  A `./`
 //  stem inserts the path relative to the VIEW dir, else the full wt-relative path.
 Pager.prototype._completions = function (stem) {
+  //  BRO-013: a directory-qualified stem (a "/" AFTER any leading `./`/`../`) is a
+  //  real PATH prefix — complete it from the FILESYSTEM, one segment at a time.
+  //  The on-screen basename matcher below keys on the LAST segment only, so it
+  //  jumps to a wrong-dir token (`test/co` → `views/commit/commit.js`) and
+  //  overshoots the segment (`views/com` → `.../commit.js`, not `views/commit/`).
+  //  A bare `./u` keeps the on-screen (view-relative) matcher — no inner "/".
+  if (stem.replace(/^\.\.?\//, "").indexOf("/") >= 0)
+    return this._fsCompletions(stem).sort();
   const rel = stem.slice(0, 2) === "./" || stem.slice(0, 3) === "../";
   const key = stem.slice(stem.lastIndexOf("/") + 1);       // match on the last seg
   const viewPath = (this._parse(this._verbUri().uri).path || "").replace(/^\/+|\/+$/g, "");
@@ -586,9 +594,33 @@ Pager.prototype._compTok = function (full, viewPath, rel) {
   return "./" + r;
 };
 
-//  BRO-013 TODO: FS fallback — readdir the view's context dir (via discover + the
-//  URI class), stat-guess dir-vs-file.  Deferred; hunk tokens cover on-screen paths.
-Pager.prototype._fsCompletions = function (stem) { return []; };
+//  BRO-013: FS fallback — readdir the stem's directory (resolved against the wt
+//  root, else the session cwd) and return matching entries, a trailing "/" on
+//  dirs.  The stem's own dir prefix (incl a leading "./") is preserved, so a
+//  verb-led `put ./test/c` completes to `put ./test/commit/` (the `_lastWord`
+//  head carries the verb; this only rewrites the path word).
+Pager.prototype._fsCompletions = function (stem) {
+  const rel = stem.slice(0, 2) === "./" || stem.slice(0, 3) === "../";
+  const slash = stem.lastIndexOf("/");
+  const dirPart = slash >= 0 ? stem.slice(0, slash + 1) : "";   // kept prefix, incl "/"
+  const name = slash >= 0 ? stem.slice(slash + 1) : stem;
+  let base = (this.be && (this.be.wt_root || this.be.cwd)) || io.cwd();
+  //  A ./-relative stem resolves against the VIEW's dir; a bare one against the wt.
+  if (rel) { const vp = (this._parse(this._verbUri().uri).path || "").replace(/^\/+|\/+$/g, "");
+             if (vp) base = base + "/" + vp; }
+  const sub = dirPart.replace(/^\.\//, "").replace(/\/+$/, "");
+  const dir = sub ? base + "/" + sub : base;
+  let ents; try { ents = io.readdir(dir); } catch (e) { return []; }
+  const out = [];
+  for (const raw of ents) {
+    const nm = raw.replace(/\/+$/, "");                // readdir may mark dirs with "/"
+    if (nm === "." || nm === ".." || (name && nm.indexOf(name) !== 0)) continue;
+    let d = raw !== nm;                                // dir per readdir's own marker
+    if (!d) { try { d = io.lstat(dir + "/" + nm).kind === "dir"; } catch (e) {} }
+    out.push(dirPart + nm + (d ? "/" : ""));
+  }
+  return out;
+};
 
 //  Drive a typed spell in-process: hand it to driveSpell (the bro handler wires
 //  the --tlv capture + reparse); on success PUSH the view (back-stack), else

@@ -39,6 +39,9 @@ const navlib  = require("../../shared/nav.js");        // URI-011: full-URI hunk
 //  (ctx.views unset, JS-071) is bypassed.  See inlineDiff() below.
 const diffView = require("../diff/diff.js");
 const recurse = require("../../core/recurse.js");
+//  COMMIT-007: the SHARED ticket resolver (BRO-012) — scanKeys (the tokenizer's
+//  `F` issue-key spans) + ticketUri (key → its `cat:` ticket-file nav URI).
+const ticket  = require("../../shared/ticket.js");
 const isFullSha = shalib.isFullSha;
 const frameSha  = shalib.frameSha;
 
@@ -58,6 +61,9 @@ const frameSha  = shalib.frameSha;
 //  log.js pattern — the C keeper's own per-line ESC[0m reset is a separate
 //  proj_emit_hunk renderer, a documented binding-level delta vs the HUNK sink).
 const TAG_R = 17, TAG_L = 11, TAG_G = 6, TAG_N = 13, TAG_S = 18, TAG_W = 22;
+//  COMMIT-007: TAG_F (5) is the tokenizer's issue-key tag (log.js:45) — a
+//  message ticket code gets it + a hidden `U` ticketUri click-target.
+const TAG_F = 5;
 //  BRO-006: TAG_U (20) is the invisible click-target — after a linky sha span we
 //  splice its URI bytes + a `U` tok so the pager's `_uriAt` left-click navigates
 //  (mirrors C KEEPProjCommit PROJ.c:489-493: `<scheme>:?<sha40>` + tok 'U').
@@ -66,6 +72,18 @@ function tok(tag, end) { return ((tag & 0x1f) << 27) | (end & 0xffffff); }
 
 //  --- a 1..40 hex hashlet test (the `#<hex>` / `?<hex>` slot). ---
 function isHexish(s) { return !!s && /^[0-9a-f]{1,40}$/.test(s); }
+
+//  COMMIT-007: a git ident value ends `Name <email> <epoch> <tz>` — return the
+//  ident with the raw `<epoch> <tz>` tail replaced by the lib's HUMAN short date
+//  (ron.date(ron.of(secs*1000)), the same convert `log:` uses via dag.commitTs).
+//  No trailing epoch/tz → returned verbatim.  Keeps `Name <email>` intact.
+function humanIdent(value) {
+  const m = /^(.*\S)\s+(\d+)\s+([+-]\d{4})\s*$/.exec(value);
+  if (!m) return value;
+  let date; try { date = ron.date(ron.of(parseInt(m[2], 10) * 1000)); }
+  catch (e) { return value; }
+  return m[1] + " " + date;
+}
 
 //  --- raw ordered header walk (GITu8sDrainCommit twin, dog/git/GIT.c:119) ---
 //  Split a raw git object's bytes into ORDERED `{name, value}` headers + the
@@ -188,6 +206,25 @@ function pinFrag(sha) {
   return { query: "", fragment: sha, path: "", emptyFrag: false, hasQuery: false };
 }
 
+//  COMMIT-007: emit ONE message line, splitting it at issue keys (BRO-012).  A
+//  key that RESOLVES to a ticket file becomes an `F` part carrying uri =
+//  ticketUri(key) (the `parts`→hidden-`U` splice below opens it on click); text
+//  around it (and any UNRESOLVED key) keeps `lineTag` (N subject / W body).  Key
+//  spans come from the SHARED tokenizer (ticket.scanKeys) so they can't drift.
+function emitTicketLine(emit, lineText, lineTag) {
+  const bytes = utf8.Encode(lineText);
+  const keys = ticket.scanKeys(lineText);      // { key, lo, hi } byte spans
+  let cursor = 0;
+  for (const kt of keys) {
+    const uri = ticket.ticketUri(kt.key);
+    if (!uri) continue;                        // unresolved → left in the plain run
+    if (kt.lo > cursor) emit(utf8.Decode(bytes.slice(cursor, kt.lo)), lineTag);
+    emit(utf8.Decode(bytes.slice(kt.lo, kt.hi)), TAG_F, uri);
+    cursor = kt.hi;
+  }
+  if (cursor < bytes.length) emit(utf8.Decode(bytes.slice(cursor)), lineTag);
+}
+
 //  --- the metadata hunk body (KEEPProjCommit bytes, PROJ.c:431-507) ---------
 //  Build the hunk body bytes + the per-field tok32 spans for --color.  The body
 //  is `commit <sha>\n` + the raw object's ordered headers + blank + message,
@@ -221,7 +258,10 @@ function buildHunk(sha, headers, body) {
     //  URI-014: word-URI spell click-target — verb OUT of the scheme
     //  (`<verb> [//name]?<sha40>`; "" auth = bare `<verb> ?<sha40>`).
     const uri = linky ? navlib.navLink(linkScheme, "", h.value.slice(0, 40)) : "";
-    emit(h.value, linky ? TAG_L : TAG_G, uri);
+    //  COMMIT-007: author/committer/tagger show a HUMAN date, not the raw epoch.
+    const isDated = h.name === "author" || h.name === "committer" || h.name === "tagger";
+    const value = isDated ? humanIdent(h.value) : h.value;
+    emit(value, linky ? TAG_L : TAG_G, uri);
     emit("\n", TAG_S);
   }
 
@@ -242,7 +282,10 @@ function buildHunk(sha, headers, body) {
       let nl = msg.indexOf("\n", off);
       const hasNL = nl >= 0;
       if (!hasNL) nl = msg.length;
-      emit(msg.slice(off, nl), line === 0 ? TAG_N : TAG_W);  // subject bold, rest green
+      //  COMMIT-007: subject bold ('N'), rest green ('W') — but split the line at
+      //  any RESOLVED issue key into an `F` part (uri = ticketUri) so a pager
+      //  click opens the ticket (BRO-012); an unresolved key stays plain.
+      emitTicketLine(emit, msg.slice(off, nl), line === 0 ? TAG_N : TAG_W);
       if (hasNL) emit("\n", TAG_S);            // terminator default → no bleed
       off = hasNL ? nl + 1 : nl;
       line++;
