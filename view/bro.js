@@ -563,17 +563,28 @@ function rowEnd(hunk, off, cols) {
 //  Walk one hunk's text into display rows (one per soft-wrap segment).  A diff
 //  hunk (tok sides) walks the bro two-pass index (old rows then new rows, each
 //  carrying its render `pass`); a syntax hunk is one NORMAL-pass row per line.
-function indexRows(hunk, cols) {
-  if (hunk.toks && hasDiffSides(hunk.toks)) return indexDiffRows(hunk, cols);
+//  BRO-014: `wrap` boolean — false (no-wrap) emits ONE row per logical line,
+//  clamped by rowEnd to `cols`, then skips the tail to the next '\n'; true (or
+//  undefined, the default) soft-wraps.
+function indexRows(hunk, cols, wrap) {
+  if (hunk.toks && hasDiffSides(hunk.toks)) return indexDiffRows(hunk, cols, wrap);
   const rows = [];
-  const tlen = hunk.text.length;
+  const text = hunk.text, tlen = text.length;
   let off = 0;
   while (off < tlen) {
     const end = rowEnd(hunk, off, cols);
     rows.push({ off: off, end: end, pass: PASS_NORMAL });
-    //  Next row starts past the terminating '\n' (rowEnd stops AT it), else at
-    //  the wrap point.  Guard against a zero-width row (cols 0) stalling.
-    const next = end < tlen && hunk.text[end] === 0x0a ? end + 1 : end;
+    let next;
+    if (wrap === false) {
+      //  BRO-014 no-wrap: the clamped tail is hidden — skip to past the logical
+      //  line's '\n' so the next row is the next line, not a wrap of this one.
+      let nl = end; while (nl < tlen && text[nl] !== 0x0a) nl++;
+      next = nl < tlen ? nl + 1 : nl;
+    } else {
+      //  Next row starts past the terminating '\n' (rowEnd stops AT it), else at
+      //  the wrap point.  Guard against a zero-width row (cols 0) stalling.
+      next = end < tlen && text[end] === 0x0a ? end + 1 : end;
+    }
     off = next > off ? next : off + 1;
   }
   return rows;
@@ -581,7 +592,8 @@ function indexRows(hunk, cols) {
 
 //  Diff hunk row index (bro_walk_hunk + bro_append_rows): each row carries its
 //  render `pass` (rm/in/normal) so the pager paints + hides the right side.
-function indexDiffRows(hunk, cols) {
+//  BRO-014: `wrap` false emits ONE clamped row per logical (per-pass) line.
+function indexDiffRows(hunk, cols, wrap) {
   const rows = [];
   const text = hunk.text, toks = hunk.toks, tlen = text.length;
   walkHunk(text, toks, function (lo, endNl, pass) {
@@ -590,7 +602,7 @@ function indexDiffRows(hunk, cols) {
       const end = rowEndPass(text, toks, tlen, off, cols, pass);
       const rowEndByte = end < endNl ? end : endNl;
       rows.push({ off: off, end: rowEndByte, pass: pass });
-      if (end >= endNl) break;
+      if (end >= endNl || wrap === false) break;      // BRO-014: no-wrap = 1 row
       off = end;
     }
   });

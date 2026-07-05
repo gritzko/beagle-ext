@@ -37,8 +37,19 @@ const SHORTCUTS = [
   ["Enter", "follow the URI of the row at the cursor"],
   ["- / BS", "back — pop to the previous view (refreshed)"],
   ["R / r", "refresh — re-run the current view (keep the scroll pos)"],
+  ["w", "toggle soft-wrap / no-wrap for this view"],
+  ["W", "set the default wrap mode for this view's type"],
   ["h", "this help screen"],
 ];
+
+//  BRO-014: a view opens in the session-scoped per-TYPE wrap default be.wrap[type]
+//  (verb/scheme → boolean; true = soft-wrap, false = no-wrap; `W` writes it) with
+//  an UNLISTED type defaulting to true (wrap).  Seeded on `be` in core/loop.js.
+function wrapFor(verb) {
+  const w = typeof be !== "undefined" && be.wrap;
+  const v = w ? w[verb || ""] : undefined;
+  return v === undefined ? true : v;
+}
 
 //  ---- terminal write helpers (raw escapes; no OPOST, so we emit CRLF) -------
 const ESC = "\x1b";
@@ -79,11 +90,11 @@ function ttyWrite(fd, str) {
 //  of them.  Each entry: {hunk, off, end} — a display row (soft-wrapped) plus
 //  its owning hunk, so cellSGR/statusURI have the hunk in hand per row.  A
 //  banner row (the `<verb> <uri>` header) precedes each hunk's body rows.
-function indexAll(hunks, cols) {
+function indexAll(hunks, cols, wrap) {
   const rows = [];
   for (const h of hunks) {
     rows.push({ hunk: h, banner: true });      // the hunk header line
-    const sub = bro.indexRows(h, cols);
+    const sub = bro.indexRows(h, cols, wrap);  // BRO-014: wrap boolean (soft|no-wrap)
     for (const r of sub) rows.push({ hunk: h, off: r.off, end: r.end, pass: r.pass });
   }
   return rows;
@@ -177,8 +188,11 @@ function Pager(fd, opts) {
 }
 
 //  Set the current view from a hunk array; (re)index against the current width.
+//  BRO-014: resolve wrap from be.wrap for the INITIAL view too (verb decoded off
+//  the hunk banner); _runSpell/_driveApply re-resolve it once a nav verb is known.
 Pager.prototype.setHunks = function (hunks) {
-  this.view = { hunks: hunks, rows: null, scroll: 0, cols: 0 };
+  this.view = { hunks: hunks, rows: null, scroll: 0, cols: 0, wrap: true };
+  this.view.wrap = wrapFor(this._verbUri().verb);
 };
 
 //  JAB-030: PUSH a fresh hunk view, stacking the current one (a spell / a
@@ -313,9 +327,12 @@ Pager.prototype._resolveSpell = function (spell) {
 //  re-wraps but a scroll does not.  The status line steals the last screen row.
 Pager.prototype.rows = function (cols) {
   const v = this.view;
-  if (v.rows === null || v.cols !== cols) {
-    v.rows = indexAll(v.hunks, cols);
+  //  BRO-014: cache key is (cols, wrap) so a `w` toggle re-indexes but a scroll
+  //  does not; a resize still re-wraps.
+  if (v.rows === null || v.cols !== cols || v.rowWrap !== v.wrap) {
+    v.rows = indexAll(v.hunks, cols, v.wrap);
     v.cols = cols;
+    v.rowWrap = v.wrap;
   }
   return v.rows;
 };
@@ -455,6 +472,14 @@ Pager.prototype._keyScroll = function (b) {
     //  DIS-060: `R`/`r` REFRESH — re-run the current view's spell IN PLACE (no
     //  push), keeping the scroll pos, so a changed store/wt re-renders live.
     case 0x52: case 0x72: this._refresh(); break;                    // R/r refresh
+    //  BRO-014: `w` flips THIS view soft-wrap ↔ no-wrap (rows() re-indexes on the
+    //  new key, scroll kept); `W` writes it as the per-TYPE default (be.wrap) a
+    //  later same-type view inherits.  SHORTCUTS (above) mirrors to the help: view.
+    case 0x77: v.wrap = !v.wrap; break;                              // w  toggle
+    case 0x57:                                                       // W  set default
+      be.wrap[this._verbUri().verb || ""] = v.wrap;
+      this.message = "wrap default " + (this._verbUri().verb || "?") + ": " +
+        (v.wrap ? "soft" : "nowrap"); break;
     //  BRO-007: `h` runs the `help:` spell — pushes views/help/help.js as a
     //  normal view (scrollable, `-`/BS backs out).  SHORTCUTS (above) is the
     //  single source the help: view mirrors; keep both in sync.
@@ -583,6 +608,7 @@ Pager.prototype._runSpell = function (spell) {
     const sp = this._splitSpell(s);
     this.view.verb = sp.verb;
     this.view.uri  = sp.uri;
+    this.view.wrap = wrapFor(sp.verb);           // BRO-014: type default (W override)
   } catch (e) { this.message = "err: " + String(e); }
 };
 
@@ -659,6 +685,7 @@ Pager.prototype._driveApply = function (spell, verb, uri) {
     this.pushView(hunks);
     this.view.verb = verb;
     this.view.uri  = uri;
+    this.view.wrap = wrapFor(verb);              // BRO-014: type default (W override)
   } catch (e) { this.message = "err: " + String(e); }
 };
 

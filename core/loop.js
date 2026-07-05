@@ -136,8 +136,19 @@ function _viewDefault(token, here) {
 
 //  JAB-004: mint/refresh the unified global `be`.  Folds the (intact) discover
 //  module's API onto globalThis.be, then overlays this run's ambient fields.
+//  BRO-014: seed the session-scoped per-view-TYPE wrap defaults (verb → boolean;
+//  true = soft-wrap, false = no-wrap) once; the pager reads/`W`-writes be.wrap.
 function mintBe(ambient) {
-  return Object.assign(globalThis.be || (globalThis.be = {}), discover, ambient);
+  const g = globalThis.be || (globalThis.be = {});
+  if (!g.wrap) g.wrap = { 
+	  log: false, 
+	  cat: true, 
+	  diff: true, 
+	  status: true, 
+	  ls: false, 
+	  list: false 
+  };
+  return Object.assign(g, discover, ambient);
 }
 
 //  URI-011/[Nav]: resolve a scheme-less `//NAME` nav authority in the spell's
