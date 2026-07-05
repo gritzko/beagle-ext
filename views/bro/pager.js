@@ -192,7 +192,9 @@ Pager.prototype._viewPath = function () {
   const v = this.view;
   if (!v || !v.hunks.length) return "";
   for (const h of v.hunks) {
-    const u = uri._parse(h.uri || "");
+    //  URI-014: strip a leading `<verb> ` off the banner word spell before the
+    //  URI parse (a raw space would mis-parse); _splitSpell.uri is the address.
+    const u = uri._parse(this._splitSpell(h.uri || "").uri);
     if (u.path) return u.path;
   }
   return "";
@@ -240,9 +242,15 @@ Pager.prototype._resolveSpell = function (spell) {
   //  Return the bare word: driveSpell re-enters cli() which resolves it as a
   //  verb/view (shape-1) and ERASES the current URI, same as the old `word:`.
   if (/^[a-zA-Z][a-zA-Z0-9]*$/.test(s)) return s;
+  //  URI-014: a `<verb> <rest>` target (a baked word-URI link/banner — leading
+  //  bareword + SPACE) is a COMPLETE absolute spell; hand it STRAIGHT to
+  //  driveSpell (spellCall→argline splits `verb arg`), no URI-relative mangling.
+  if (/^[a-zA-Z][a-zA-Z0-9]*!? /.test(s)) return s;
   //  Not a URI (a `verb param` call — spaces/quotes) → ride to the dispatcher.
   let t; try { t = new URI(s); } catch (e) { return s; }
-  const cur = new URI(this._viewUri());
+  //  URI-014: the context is the view's ADDRESS part (a word banner has a space,
+  //  which `new URI` would mis-parse) — _verbUri().uri strips the verb word.
+  const cur = new URI(this._verbUri().uri || "");
   //  Explicit URI form is RELATIVE to the current URI: a schemed spell INHERITS
   //  the //authority + path/?query it OMITS (`ls:` → `ls:test`); #fragment resets.
   //  URI-012: fill the OMITTED authority from the context so a relative click-
@@ -459,9 +467,12 @@ Pager.prototype._runSpell = function (spell) {
     const hunks = this.driveSpell ? this.driveSpell(s) : null;
     if (!hunks || hunks.length === 0) { this.message = "no hunks: " + s; return; }
     this.pushView(hunks);
-    //  DIS-060: track the view as the resolved SPELL itself ([Nav] click-targets),
-    //  never `call[1]+":"` — a `verb args` call is a spell, not a `<verb>:` scheme.
-    this.view.uri = s;                           // track the current spell/URI
+    //  DIS-060/URI-014: track the view as (verb, ADDRESS) split off the resolved
+    //  spell ([Nav] click-targets are `verb args`), so a follow-up typed slot-edit
+    //  (`#L`, `?ref`) resolves against the address, not the whole word spell.
+    const sp = this._splitSpell(s);
+    this.view.verb = sp.verb;
+    this.view.uri  = sp.uri;
   } catch (e) { this.message = "err: " + String(e); }
 };
 
@@ -470,16 +481,33 @@ Pager.prototype._parse = function (s) {
   try { return new URI(s || ""); } catch (e) { return new URI(""); }
 };
 
-//  DIS-060/[Nav]: the current view's (verb, URI) — set explicitly by a nav
-//  (_applySpell), else decoded from the hunk: a projector scheme IS the verb.
+//  URI-014: a spell/banner string → { verb, uri }.  A `<verb> <uri>` word spell
+//  (baked link/banner) splits on the FIRST space — the verb is the leading
+//  token, the rest the scheme-less address.  A residual `<scheme>:`-verb form
+//  (C-baked diff:/cat:, out of scope) decodes the scheme as the verb (the compat
+//  bridge, [URI-012]).  Else bare (verb "", uri = the string).
+Pager.prototype._splitSpell = function (spell) {
+  const m = /^([a-zA-Z][a-zA-Z0-9]*!?) (.*)$/.exec(spell || "");
+  if (m) return { verb: m[1], uri: m[2] };
+  //  URI-014: a lone bareword banner (`log`, `status` — empty addressing) IS the
+  //  verb spell, NOT a path; else `new URI("log")` would mis-read it as a path.
+  if (/^[a-zA-Z][a-zA-Z0-9]*!?$/.test(spell || "")) return { verb: spell, uri: "" };
+  const u = this._parse(spell || "");
+  if (u.scheme && !TRANSPORT[u.scheme])
+    return { verb: u.scheme,
+             uri: URI.make(undefined, u.authority, u.path, u.query, u.fragment) || "" };
+  return { verb: "", uri: spell || "" };
+};
+
+//  DIS-060/[Nav]/URI-014: the current view's (verb, URI) — set explicitly by a
+//  nav (_applySpell/_runSpell), else split off the hunk's banner word spell
+//  (`<verb> <uri>`), else the scheme-decode bridge for a C-baked residue.
 Pager.prototype._verbUri = function () {
   const v = this.view;
   if (v && v.verb !== undefined) return { verb: v.verb, uri: v.uri || "" };
   const spell = this._viewUri();
-  const u = this._parse(spell);
-  if (u.scheme && !TRANSPORT[u.scheme])
-    return { verb: u.scheme,
-             uri: URI.make(undefined, u.authority, u.path, u.query, u.fragment) };
+  const sp = this._splitSpell(spell);
+  if (sp.verb) return sp;
   let verb = "";
   const h = v && v.hunks && v.hunks[0];
   if (h && h.verb && h.verb !== "hunk") verb = h.verb;

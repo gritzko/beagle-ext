@@ -49,9 +49,10 @@ function grepable(body, lo, hi) {
 }
 function withLinks(body, toks) {
   if (toks.length === 0) return { body: body, toks: toks };
-  //  URI-011: grep click-target `<grep-uri>#<token>` — navUri carries the //name
-  //  authority; when unscoped navUri("grep","")="grep:" so PFX="grep:#" (parity).
-  const PFX = utf8.Encode(navlib.navUri("grep", "", undefined, ""));
+  //  URI-014: grep click-target as the `word URI` spell `grep [//name]#<token>`
+  //  — navLink puts the verb OUT of the scheme; unscoped PFX="grep #", scoped
+  //  "grep //name#", the per-token `<token>` append completing the spell.
+  const PFX = utf8.Encode(navlib.navLink("grep", "", undefined, ""));
   let extra = 0, nlinks = 0, prev = 0;
   for (let i = 0; i < toks.length; i++) {
     const end = tokEnd(toks[i]);
@@ -71,8 +72,8 @@ function withLinks(body, toks) {
     for (let p = prev; p < end; p++) out[op++] = body[p];
     ntoks[oi++] = tokPack((toks[i] >>> 27) & 0x1f, op);
     if (link) {
-      //  Append `grep:#<token>` (the token = its just-copied bytes), then a
-      //  `U` token whose end is the new body length (the U bytes' end).
+      //  URI-014: append the `grep [//name]#<token>` spell (PFX + the token =
+      //  its just-copied bytes), then a `U` token ending at the new body length.
       out.set(PFX, op); op += PFX.length;
       for (let p = prev; p < end; p++) out[op++] = body[p];
       ntoks[oi++] = tokPack(TAG_U, op);
@@ -157,10 +158,10 @@ function catOne(arg) {
       //  BRO-006: append `U` click-targets on name/symbol (N/C) tokens.
       const wl = withLinks(body, toks); body = wl.body; toks = wl.toks;
     }
-    //  URI-011: banner carries the full nav address `cat://name/<path>#L<n>`;
-    //  navUri prefixes the authority, the #L<n> fragment stays AFTER it (parity).
-    const uri = navlib.navUri("cat", path, undefined, "L" + line);
-    sink.feed(uri, body, toks, "", 0n);   // banner: `cat:<path>#L<n>`
+    //  URI-014: banner is the `word URI` spell `cat [//name/]<path>#L<n>` — the
+    //  verb OUT of the scheme (navLink), the #L<n> fragment riding the addressing.
+    const uri = navlib.navLink("cat", path, undefined, "L" + line);
+    sink.feed(uri, body, toks, "", 0n);   // banner: `cat <path>#L<n>`
     for (let i = off; i < end; i++) if (bytes[i] === 10) line++;
     off = end;
   }

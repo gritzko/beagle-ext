@@ -363,9 +363,9 @@ function appendRow(sha, k, textParts, spans, baseOff, nonspine, subPrefix) {
   const authTail = " (" + author + ")";
   //  The hidden U-target bytes, spliced in right after sha8 (C row order).
   //  SUBS-045: prepend the descent prefix so a DESCENDED row's link is
-  //  base-relative (`commit:<sub>?<sha>` from root); "" keeps `commit:?<sha>`.
-  //  URI-011: full nav address before the `?` — commit://name[/sub]?<sha>.
-  const uri = navlib.navUri("commit", subPrefix || "", sha);
+  //  base-relative (`commit //sub?<sha>` from root); "" keeps `commit ?<sha>`.
+  //  URI-014: word-URI spell — verb OUT of the scheme (`commit //name[/sub]?<sha>`).
+  const uri = navlib.navLink("commit", subPrefix || "", sha);
   const uriBytes = utf8.Encode(uri);
   //  Row bytes WITH the hidden URI inline: sha8 + <uri> + " " + date7 + " " +
   //  summary + " (author)" + "\n".  The pager hides the U-tagged span, so the
@@ -452,11 +452,11 @@ function logOne(arg, ctx) {
   //  emits the banner + the single trailing blank line.
   if (!tip || !isFullSha(tip)) return;
 
-  //  The banner uri: `log:` + path + `?query` (the GRAFLog title shape).  The
+  //  The banner uri: `log //name[/path][?<ref>]` (the GRAFLog title shape).  The
   //  fragment (#N / #hashlet) is NOT part of the title.  LOG-002: the banner
   //  uses the FULL original path (pre-sub-strip), the walk uses the stripped one.
-  //  URI-011: full nav address before the `?` — log://name[/path][?<ref>].
-  let bannerUri = navlib.navUri("log", bannerPath, parsed.query || undefined);
+  //  URI-014: word-URI spell banner — verb OUT of the scheme (single-hunk feed).
+  let bannerUri = navlib.navLink("log", bannerPath, parsed.query || undefined);
 
   //  The history walk (newest-first, bounded by `#N`).  branchHistory now
   //  returns [{ sha, nonspine }] (the spine + greyed merge-2nd+ chains);

@@ -53,6 +53,10 @@ function create(opts) {
   //  exact bytes (sans trailing "\n"); render emits it as-is, never columnised.
   function raw(text) { rows.push({ raw: text }); }
 
+  //  URI-014: open a hunk with an explicit banner spell (`status //name`) — the
+  //  columnar (plain) twin of hunkrows/sinkOut `open`; a verbatim banner row.
+  function open(uri) { rows.push({ raw: uri }); }
+
   //  Render ONE line the way every native banner does: dateCol + " " +
   //  verbCol + " " + text.  `text` is the uri/path column.
   function line(verb, text, ts) {
@@ -146,7 +150,7 @@ function create(opts) {
     render.writeStdout(utf8.Decode(bytes));
   }
 
-  return { banner: banner, row: row, raw: raw, render: render_,
+  return { banner: banner, row: row, raw: raw, open: open, render: render_,
            renderColor: renderColor_, flush: flush };
 }
 

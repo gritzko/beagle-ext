@@ -212,15 +212,15 @@ function buildHunk(sha, headers, body) {
   //  Each header verbatim, in object order.
   for (const h of headers) {
     emit(h.name + " ", TAG_R);
-    //  BRO-006: tree/parent sha values are clickable — tree → `tree:?<sha40>`,
-    //  parent → `commit:?<sha40>` (open the parent), mirroring PROJ.c:468-493.
+    //  BRO-006: tree/parent sha values are clickable — tree → `tree ?<sha40>`,
+    //  parent → `commit ?<sha40>` (open the parent), mirroring PROJ.c:468-493.
     //  Every other field (author/committer/gpgsig/encoding/mergetag/…) is plain.
     const linkScheme = (h.name === "tree") ? "tree"
                      : (h.name === "parent") ? "commit" : null;
     const linky = linkScheme !== null && isFullSha(h.value.slice(0, 40));
-    //  URI-011: full nav-authority URI — authority BEFORE the `?` so the hunk
-    //  carries the FULL address (`<scheme>://name?<sha40>`; "" auth = byte-parity).
-    const uri = linky ? navlib.navUri(linkScheme, "", h.value.slice(0, 40)) : "";
+    //  URI-014: word-URI spell click-target — verb OUT of the scheme
+    //  (`<verb> [//name]?<sha40>`; "" auth = bare `<verb> ?<sha40>`).
+    const uri = linky ? navlib.navLink(linkScheme, "", h.value.slice(0, 40)) : "";
     emit(h.value, linky ? TAG_L : TAG_G, uri);
     emit("\n", TAG_S);
   }

@@ -41,6 +41,7 @@ const ambient = require("../../shared/ambient.js");   // JAB-004: ctx→be bridg
 const bro   = require("../../view/bro.js");
 const resolve = require("../../core/resolve.js");
 const isFullSha = require("../../shared/util/sha.js").isFullSha;
+const navlib = require("../../shared/nav.js");        // URI-014: word-URI banner
 
 //  JS-082: a FULL 40-hex sha passes through verbatim iff the object exists (its
 //  presence is the resolution); resolveHexAny's {1,39} prefix scanner rejects
@@ -179,7 +180,9 @@ function blobOne(arg, ctx) {
     const body = bytes.slice(off, end);
     let toks = EMPTY32;
     if (mode !== "plain" && ext) { try { toks = tok.parse(body, ext); } catch (e) { toks = EMPTY32; } }
-    sink.feed(URI.make(undefined, undefined, bannerKey, undefined, "L" + line), body, toks, "blob", 0n);  // `blob <key>#L<n>`
+    //  URI-014: word-URI banner — the verb "blob" rides the uri as its leading
+    //  WORD (`blob <key>#L<n>`), NOT the RON60 verb slot (the pager can't read it).
+    sink.feed(navlib.navLink("blob", bannerKey, undefined, "L" + line), body, toks, "", 0n);
     for (let i = off; i < end; i++) if (bytes[i] === 10) line++;
     off = end;
   }

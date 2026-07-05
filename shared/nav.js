@@ -24,6 +24,22 @@ function navUri(scheme, path, query, fragment) {
   return URI.make(scheme, auth, p, query, fragment) || (scheme + ":");
 }
 
+//  URI-014: compose a hunk LINK/BANNER as the `word URI` spell — `<verb> <uri>`,
+//  the URI part SCHEME-LESS + authority-scoped ([Nav] views-are-verbs; the
+//  scheme slot stays FREE for a real transport).  Addressing via URI.make with
+//  be.authority INJECTED (rooted path, exactly like navUri); the verb is
+//  prepended with a SPACE.  No authority ⇒ `<verb> path?q#f`; empty addressing ⇒
+//  the bare `<verb>`.  The pager dispatches it as a spell (spellCall→argline
+//  splits `verb arg`).  Replaces navUri("<verb>",…) at every link/banner site.
+function navLink(verb, path, query, fragment) {
+  const a = authority();                                   // "//name" or ""
+  const auth = a || undefined;                             // fed verbatim (keeps `//`)
+  let p = path || undefined;
+  if (auth !== undefined && p) p = "/" + p;                // authority ⇒ rooted path
+  const addr = URI.make(undefined, auth, p, query, fragment) || "";
+  return addr ? verb + " " + addr : verb;                 // scheme-less arg; bare verb if empty
+}
+
 //  URI-011: inject the current nav authority into a BAKED `scheme:<path>?…` hunk
 //  URI — the C weave/graf bakes `diff:`/`cat:` click-targets with NO authority, so
 //  a click from a `//ULOG` view loses the scope (empty output).  `be.authority`
@@ -43,4 +59,17 @@ function navAuthorize(bakedUri) {
   return URI.make(u.scheme, a, p, u.query, u.fragment) || bakedUri;
 }
 
-module.exports = { authority: authority, navUri: navUri, navAuthorize: navAuthorize };
+//  URI-014: re-bake a C-baked `<scheme>:<addr>` hunk link as the word-URI spell
+//  `<scheme> <scheme-less authority-scoped addr>` — the verb OUT of the scheme,
+//  the nav authority INJECTED (the word twin of navAuthorize).  A scheme-less /
+//  empty input (text-only hunk) passes through unchanged.  Use at the JS sink
+//  that finalises a C weave/graf `diff:`/`cat:` target (diff.js diffOut.feed).
+function navRelink(bakedUri) {
+  if (!bakedUri) return bakedUri;
+  const u = uri._parse(bakedUri);
+  if (!u.scheme) return bakedUri;                       // text-only hunk → as-is
+  return navLink(u.scheme, u.path, u.query, u.fragment);
+}
+
+module.exports = { authority: authority, navUri: navUri, navLink: navLink,
+                   navAuthorize: navAuthorize, navRelink: navRelink };

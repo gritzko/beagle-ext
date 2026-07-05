@@ -105,12 +105,12 @@ function grepCtx(src, pos, nctx) {
 //  --- HUNKu8sMakeURI (dog/HUNK.c:1383), func-less form ---------------------
 //  `path` + (`#L<lineno>` when lineno>0).  The 1-based line of byte ctx_lo.
 //  (Func segment omitted — DEF has no JS binding; see header.)
-//  URI-011: the hunk uri carries the scheme+authority (`grep://name/path#L<n>`);
-//  off-nav authority is "" → byte-identical `<mode>:path#L<n>`.
+//  URI-014: the hunk banner is the `word URI` spell (`grep //name/path#L<n>`);
+//  off-nav authority ⇒ `<mode> path#L<n>`.
 function makeURI(mode, path, src, ctxLo) {
   let ln = 1;
   for (let i = 0; i < ctxLo && i < src.length; i++) if (src[i] === 10) ln++;
-  return navlib.navUri(mode, path, undefined, "L" + ln);
+  return navlib.navLink(mode, path, undefined, "L" + ln);
 }
 
 //  --- per-file search + hunk emit (capo_spot_file / capo_grep_file_cb) -----

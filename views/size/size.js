@@ -46,6 +46,7 @@ const ambient = require("../../shared/ambient.js");   // JAB-004: ctx→be bridg
 //  JAB-003: emit a TRUE hunk via the shared sink (retiring ctx.out) through the
 //  shared columnar→HUNK adapter.
 const hunkrows = require("../../shared/hunkrows.js");
+const navlib  = require("../../shared/nav.js");        // URI-014: word-URI banner
 
 //  JS-082: a FULL 40-hex sha passes through verbatim iff the object exists; a
 //  short prefix goes through resolveHexAny ({1,39} prefix scanner rejects 40).
@@ -147,11 +148,10 @@ function sizeOne(arg) {
   const obj = k.getObject(sha);
   if (!obj) throw "SIZENONE";
 
-  //  3) emit ONE row: the decimal size, as a TRUE hunk on the canonical
-  //     JAB-003: size:<uri>.  out.raw appends "\n"; done() flushes to sink.
-  //     URI-013: rebuild the banner via URI.make (not a `"size:" + body` concat).
-  //     ([URI-009]: an empty-`?`/`#`-only banner input collapses — accepted gap.)
-  const out = hunkrows(sink, URI.make("size", u.authority, u.path, u.query, u.fragment));
+  //  3) emit ONE row: the decimal size, as a TRUE hunk banner.
+  //     URI-014: the word-URI spell `size <uri>` — verb OUT of the scheme,
+  //     navLink injects be.authority + roots the path (strip a leading '/').
+  const out = hunkrows(sink, navlib.navLink("size", path.replace(/^\//, ""), query, frag));
   out.raw(String(obj.bytes.length));
   out.done();
   //  Read-only leaf: no fan-out (per-arg; the dispatcher fans out over args).

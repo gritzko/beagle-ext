@@ -181,9 +181,11 @@ function sinkOut(sink) {
   }
 
   return {
-    //  banner → new hunk; "" separator → drop; else → a summary text line.
+    //  URI-014: open a hunk with the EXPLICIT banner spell (`status //name`); the
+    //  old `status:`-prefix sniff is retired — banners arrive via open, not raw.
+    open: function (u) { flush(); uri = u; },
+    //  "" separator → drop; else → a summary text line.
     raw: function (text) {
-      if (text.slice(0, 7) === "status:") { flush(); uri = text; return; }
       if (text === "") return;
       const b = utf8.Encode(text + "\n");
       feedText(b);
@@ -283,7 +285,7 @@ function emitRepo(repo, prefix, out, recurse) {
   //  banner + the `?<branch>\t<counts>` summary are pre-formatted framing,
   //  pushed verbatim via out.raw.  JAB-004: the header carries this hunk's
   //  subpath (`status:` at the top, `status:<prefix>` for a sub).
-  out.raw(navlib.navUri("status", prefix || ""));
+  out.open(navlib.navLink("status", prefix || ""));
 
   //  Commit divergence block FIRST (ahead `post` rows, then behind `miss`
   //  rows), each `<date7> <verb3> ?<hashlet>#<subject>`.  These are NOT real
@@ -317,7 +319,7 @@ function emitRepo(repo, prefix, out, recurse) {
       //  A rename renders as the `rmv` source + `mov` dest PAIR (two plain path
       //  rows), each nav targeting its OWN path — the move-row nav restored.
       const navPath = joinPrefix(prefix, r.path);
-      const nav = navlib.navUri(NAV_DIFF[r.bucket] ? "diff" : "cat", navPath);
+      const nav = navlib.navLink(NAV_DIFF[r.bucket] ? "diff" : "cat", navPath);
       out.row(navPath, bucket, r.ts, null, nav);
     }
   }

@@ -42,6 +42,7 @@ const isFullSha = require("../../shared/util/sha.js").isFullSha;
 //  JAB-003: TRUE-hunk output via the shared columnar→hunk adapter (be.sink),
 //  retiring the ctx.out columnar path for this view.
 const hunkrows = require("../../shared/hunkrows.js");
+const navlib   = require("../../shared/nav.js");        // URI-014: word-URI banner
 
 //  Resolve the URI to a full object sha (KEEPResolveTree's sibling, minus the
 //  commit→tree deref).  A hex (full sha or 6..40 short prefix) in EITHER slot
@@ -98,12 +99,11 @@ function typeOne(arg, ctx) {
   const obj = k.getObject(sha);
   if (!obj || !obj.type) throw "TYPENONE";
 
-  //  3) emit the type word as ONE raw row into a TRUE hunk at the canonical
-  //  `type:<uri>` (plain == colour: the type word carries no THEME SGR).
-  //  URI-013: rebuild the banner via URI.make (not a `"type:" + body` concat).
-  //  ([URI-009]: an empty-`?`/`#`-only banner input collapses — accepted gap.)
+  //  3) emit the type word as ONE raw row into a TRUE hunk banner.
+  //  URI-014: the word-URI spell `type <uri>` — verb OUT of the scheme;
+  //  navLink injects be.authority + roots the path (strip a leading '/').
   if (sink) {
-    const out = hunkrows(sink, URI.make("type", u.authority, u.path, u.query, u.fragment));
+    const out = hunkrows(sink, navlib.navLink("type", (u.path || "").replace(/^\//, ""), u.query, u.fragment));
     out.raw(obj.type);
     out.done();
   }

@@ -219,9 +219,9 @@ function treeOne(arg, ctx) {
   //  `?<hex>` query form in the banner and keeps the VERBATIM (un-expanded)
   //  value (`?054a0d44`, `?heads/feat`).  No suffix for a pure-path/empty URI.
   const rev = query || frag;                    // frag (#hex) shows as ?<hex>
-  //  URI-011: authority-prefixed banner; the ?rev suffix stays AFTER navUri
-  //  (the //name authority goes before the '?').
-  const banner = navlib.navUri("tree", segs.join("/"), rev || undefined);
+  //  URI-014: banner is the `word URI` spell (`tree //name/segs?rev`); the ?rev
+  //  suffix rides after the authority-scoped addressing.
+  const banner = navlib.navLink("tree", segs.join("/"), rev || undefined);
   const pathPfx = segs.length ? segs.join("/") + "/" : "";   // full-path nav prefix
 
   //  BRO-006 pager/--tlv path: ONE content HUNK, a hidden `U` per entry name.
@@ -240,10 +240,11 @@ function treeOne(arg, ctx) {
       const prefix = MODE_PREFIX[kind] || MODE_PREFIX.blob;
       const name = kind === "tree" ? (e.name + "/") : e.name;
       const meta = prefix + e.sha + "\t";
-      //  URI-011: entry click-target carries the //name nav authority.
+      //  URI-014: entry click-target is the `word URI` spell (`tree //name/p` /
+      //  `blob //name/p`).
       const nav = kind === "tree"
-                ? navlib.navUri("tree", pathPfx + e.name + "/")
-                : navlib.navUri("blob", pathPfx + e.name);
+                ? navlib.navLink("tree", pathPfx + e.name + "/")
+                : navlib.navLink("blob", pathPfx + e.name);
       off += appendRow(textParts, spans, off, meta, name, nav);
     }
     const body = new Uint8Array(off);

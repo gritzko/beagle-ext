@@ -77,14 +77,14 @@ function emitHunk(sink, banner, navPfx, entries) {
   let off = 0;
   for (const e of entries) {
     if (e.dir) {
-      //  URI-011: nav uri via navlib so it carries the `//name` authority.
-      const nav = navlib.navUri("ls", navPfx + e.name + "/");
+      //  URI-014: nav click-target is the `word URI` spell `ls [//name/]<sub>/`.
+      const nav = navlib.navLink("ls", navPfx + e.name + "/");
       off += appendRow(textParts, spans, off, "dir", e.name + "/", nav, 0n);
     } else {
       //  DIS-057 RULING 2026-06-29: a move is the `rmv`(src)+`mov`(dst) pair (no
-      //  `-> dst` arrow), so the entry text is the bare name — the nav click
-      //  target is just `cat:<path>`.  URI-011: composed via navlib (authority).
-      const nav = navlib.navUri("cat", navPfx + e.key);
+      //  `-> dst` arrow), so the entry text is the bare name.  URI-014: the click
+      //  target is the `word URI` spell `cat [//name/]<path>` (verb out of scheme).
+      const nav = navlib.navLink("cat", navPfx + e.key);
       off += appendRow(textParts, spans, off, e.verb, e.text, nav, e.ts);
     }
   }
@@ -145,7 +145,7 @@ function lsOne(uri, verb, ctx, queue, rdCache) {
 
   const scopePfx = relDir(repo.wt, absScope);               // rel to OWNING wt
   const navPfx   = relDir(topWt, absScope);                 // rel to TOP wt
-  const banner   = navlib.navUri(verb, navPfx);             // URI-011: hunk URI + authority
+  const banner   = navlib.navLink(verb, navPfx);            // URI-014: `word URI` banner spell
   const rd        = repoReaders(rdCache, repo);
   const res       = classify.classifyDir(repo, rd.log, rd.k, scopePfx);
 

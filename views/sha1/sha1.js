@@ -56,6 +56,7 @@ const isFullSha = shalib.isFullSha;
 //  JAB-003: TRUE-hunk output via the shared columnar→hunk adapter (be.sink),
 //  retiring the ctx.out columnar path for this view.
 const hunkrows = require("../../shared/hunkrows.js");
+const navlib   = require("../../shared/nav.js");        // URI-014: word-URI banner
 
 const HASH_MIN_HEX = 4;   // keeper/KEEP.h: the `?<hex>`→fragment promotion floor
 
@@ -170,13 +171,12 @@ function sha1One(arg, ctx) {
   //  PROJNONE: unresolvable -> write NOTHING (no '\n').
   if (!target || !isFullSha(target)) return;
 
-  //  Emit the 41-byte line as ONE raw row into a TRUE hunk at the canonical
-  //  `sha1:<uri>` (verbatim in plain AND colour; out.raw appends the '\n').
-  //  URI-013: rebuild the banner via URI.make from the ORIGINAL parsed slots
-  //  (pre-promotion), not a `"sha1:" + body` concat.  ([URI-009]: an empty-`?`/
-  //  `#`-only banner input collapses through the binding — the accepted gap.)
+  //  Emit the 41-byte line as ONE raw row into a TRUE hunk banner (plain==colour).
+  //  URI-014: the word-URI spell `sha1 <uri>` from the ORIGINAL parsed slots
+  //  (pre-promotion) — verb OUT of the scheme; navLink injects be.authority +
+  //  roots the path (strip a leading '/').
   if (sink) {
-    const bannerUri = URI.make("sha1", u.authority, u.path, u.query, u.fragment);
+    const bannerUri = navlib.navLink("sha1", (u.path || "").replace(/^\//, ""), u.query, u.fragment);
     const out = hunkrows(sink, bannerUri);
     out.raw(target);
     out.done();

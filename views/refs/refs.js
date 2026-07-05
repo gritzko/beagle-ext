@@ -26,7 +26,7 @@ function refsOne(repo, sink) {
   const branch = cur.branch || "";
 
   //  JAB-003: each raw() line appends its own "\n"; done() flushes the hunk.
-  const out = hunkrows(sink, navlib.navUri("refs", ""));   // URI-011: refs://name
+  const out = hunkrows(sink, navlib.navLink("refs", ""));   // URI-014: `refs //name` word-uri
   out.raw("project:  " + (repo.project || "(unnamed)"));
   out.raw("wt:       " + repo.wt);
   out.raw("store:    " + repo.storePath);
