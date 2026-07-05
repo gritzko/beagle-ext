@@ -101,8 +101,10 @@ function status() {
     if (p.path && p.path !== ".") { scope = p.path.replace(/^\.\//, ""); break; }
   }
   if (scope && topWt) {
-    const abs = scope[0] === "/" ? scope : join(topWt, scope);
-    return statusOne({ uri: abs }, null);
+    //  WHY-001: a status path is wt-root-relative — a leading `/` is the wt ROOT
+    //  (be.find('/') finds no .be anchor), not the FS root; `/` alone → whole wt.
+    const rel = scope.replace(/^\/+/, "");
+    if (rel) return statusOne({ uri: join(topWt, rel) }, null);
   }
   return statusOne(null, null);
 }

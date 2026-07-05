@@ -167,7 +167,10 @@ function broRun(args, flags, ctx) {
     if (fd === null && io.isatty(0)) fd = 0;
     if (fd === null) fd = 1;
     try {
-      const p = new pager.Pager(fd, { color: true, driveSpell: driveSpell });
+      //  isVerb lets the composer tell a real verb from a bareword path token.
+      const loop = require("core/loop.js");
+      const p = new pager.Pager(fd, { color: true, driveSpell: driveSpell,
+                                      isVerb: loop.isVerb });
       p.setHunks(hunks);
       p.run();
     } finally { if (own) { try { io.close(fd); } catch (e) {} } }

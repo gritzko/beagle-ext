@@ -28,6 +28,7 @@ function tok(tag, end) { return ((tag & 0x1f) << 27) | (end & 0xffffff); }
 const SCHEMES = [
   ["commit:<rev>", "show one commit (message + changed files)"],
   ["diff:<path>?<rev>", "diff a path against a revision"],
+  ["why:<path>", "blame: shade each token by its origin commit"],
   ["log:", "commit history, newest first"],
   ["tree:<path>", "list a tree (a directory in a revision)"],
   ["blob:<path>", "raw bytes of a file object"],

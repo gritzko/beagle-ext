@@ -52,176 +52,8 @@ const patchscope = require("../../shared/patchscope.js");
 const ambient    = require("../../shared/ambient.js");
 const join = pathlib.join;
 
-//  A commit id for the weave is the hi64 of its sha1, a 16-char hex hashlet
-//  (weave.hpp::JABCweaveHi64 reads the first 16 hex chars).  The SAME physical
-//  commit always yields the SAME id, so shared-history tokens coincide and the
-//  ours⊕theirs union dedups them — the DAG fold's whole point.
-function weaveId(sha) { return sha.slice(0, 16); }
-
-//  --- tree → path map ----------------------------------------------------
-//  A commit's tree flattened to { path → { sha, mode, kind } } over every
-//  leaf (file/exec/symlink/gitlink).  Missing commit → empty map.
-function treeMap(reader, commitSha) {
-  const map = Object.create(null);
-  if (!commitSha) return map;
-  let treeSha;
-  try { treeSha = reader.commitTree(commitSha); } catch (e) { return map; }
-  if (!treeSha) return map;
-  reader.readTreeRecursive(treeSha, function (leaf) {
-    map[leaf.path] = { sha: leaf.sha, mode: leaf.mode, kind: leaf.kind };
-  });
-  return map;
-}
-
-//  blob bytes for a leaf sha (Uint8Array); undefined for a missing object or
-//  a non-blob (gitlink).  A symlink blob's bytes are the link target.
-function blobBytes(reader, sha) {
-  if (!sha) return undefined;
-  const obj = reader.getObject(sha);
-  if (!obj || obj.type !== "blob") return undefined;
-  return obj.bytes;
-}
-
-//  file extension (tail after the last '.') — the weave tokenizer selector,
-//  like patch_walk's childext / PATHu8sExt.  No dot → empty (generic).
-function extOf(path) {
-  const slash = path.lastIndexOf("/");
-  const base = slash < 0 ? path : path.slice(slash + 1);
-  const dot = base.lastIndexOf(".");
-  return dot <= 0 ? "" : base.slice(dot + 1);
-}
-
-//  --- the file's blob sha at a commit's tree -----------------------------
-//  Returns the 40-hex blob sha for `path` in `commitSha`'s tree, or undefined
-//  when the file is absent / the path is a tree / a gitlink there.  Cached per
-//  (commit) so a DAG diamond reads each tree once.
-function blobShaAt(reader, treeCache, commitSha, path) {
-  let map = treeCache[commitSha];
-  if (map === undefined) { map = treeMap(reader, commitSha); treeCache[commitSha] = map; }
-  const leaf = map[path];
-  if (!leaf || leaf.kind === "s") return undefined;   // absent or gitlink
-  return leaf.sha;
-}
-
-//  --- per-side full-history weave reconstruction -------------------------
-//  Walk the file's revision DAG from `tip` PARENTS-FIRST, folding each commit
-//  that changes the file's blob onto its parent weave (WEAVENext for a single
-//  parent, WEAVEMerge at a 2+-parent commit).  Mirrors native
-//  build_tip_weave_tunable: the closure replay in topo order, stamping every
-//  revision with its real commit id so the two tips' shared prefix coincides.
-//
-//  Returns { weave, ids } where `ids` is the Set of weave commit-id hashlets
-//  that contributed a token on this side (the scope membership for `merged`).
-//  A side with no history for the file (never present) → weave undefined.
-function buildSideWeave(ctx, tip) {
-  const reader = ctx.reader, path = ctx.path, ext = ctx.ext;
-  const treeCache = ctx.treeCache, weaveCache = ctx.weaveCache;
-  const ids = new Set();
-
-  //  Post-order DFS over parent edges: a commit is folded only after every
-  //  parent it depends on is built.  `weaveCache[sha]` memoises the weave AS
-  //  OF that commit (covering the file's history up to and including it), so a
-  //  diamond merges each shared ancestor once.  An iterative two-colour walk
-  //  keeps deep chains off the JS call stack.
-  const WHITE = 0, GREY = 1;
-  const colour = Object.create(null);
-  const stack = [tip];
-  while (stack.length) {
-    const sha = stack[stack.length - 1];
-    if (weaveCache[sha] !== undefined) { stack.pop(); continue; }
-    const c = colour[sha] || WHITE;
-    if (c === WHITE) {
-      colour[sha] = GREY;
-      let parents;
-      try { parents = reader.commitParents(sha); } catch (e) { parents = undefined; }
-      parents = parents || [];
-      //  Defer this commit until its parents are built; push unbuilt parents.
-      let pending = false;
-      for (const p of parents) {
-        if (p && weaveCache[p] === undefined && colour[p] !== GREY) {
-          stack.push(p); pending = true;
-        }
-      }
-      if (pending) continue;
-    }
-    //  GREY (or WHITE with all parents already done): all parents built — fold
-    //  this commit now.
-    stack.pop();
-    if (weaveCache[sha] !== undefined) continue;
-    weaveCache[sha] = foldCommit(ctx, sha);
-  }
-
-  const w = weaveCache[tip];
-  if (w === undefined || w === null) return { weave: undefined, ids: ids };
-  //  Membership: every commit-id present in this tip's weave is in-scope.  The
-  //  weave's `commits` column already lists exactly the contributors (spine +
-  //  each folding commit), so read it straight off.
-  for (const cid of w.commits) ids.add(cid);
-  return { weave: w, ids: ids };
-}
-
-//  Fold ONE commit into a weave, given its already-built parent weaves.  The
-//  parent baseline is: a single parent's weave (linear step), or WEAVEMerge of
-//  the parents (a merge commit) so the merge's two-sided history is present
-//  before this commit's blob is diffed in.  Returns the new weave, or null
-//  when the file is absent at this commit AND on every parent (no history).
-function foldCommit(ctx, sha) {
-  const reader = ctx.reader, path = ctx.path, ext = ctx.ext;
-  const treeCache = ctx.treeCache, weaveCache = ctx.weaveCache;
-
-  let parents;
-  try { parents = reader.commitParents(sha); } catch (e) { parents = undefined; }
-  parents = (parents || []).filter(function (p) { return weaveCache[p] != null; });
-
-  //  Parent baseline weave (the prior revision the blob is diffed against).
-  let base = null;
-  if (parents.length === 1) {
-    base = weaveCache[parents[0]];
-  } else if (parents.length >= 2) {
-    //  Merge commit: union the parents into one baseline weave first.  Fold
-    //  pairwise left-to-right (WEAVEMerge keys on identity, so order only sets
-    //  the synthetic merge-commit stamp, which carries no token here).
-    base = weaveCache[parents[0]];
-    for (let i = 1; i < parents.length; i++)
-      base = weave.merge(base, weaveCache[parents[i]], weaveId(sha));  // DIFF-010
-  }
-
-  const blobSha = blobShaAt(reader, treeCache, sha, path);
-  if (blobSha === undefined) {
-    //  File absent at this commit.  If a parent carried it, this commit
-    //  DELETES it — fold the empty blob so the deletion is recorded as a
-    //  remover stamped by this commit.  If no parent had it either, there is
-    //  no history to carry (null propagates).
-    if (base === null || base.empty()) return base;   // never present → no-op
-    return weave.fold(base, new Uint8Array(0), ext, weaveId(sha));  // DIFF-010
-  }
-
-  const bytes = blobBytes(reader, blobSha);
-  if (bytes === undefined) return base;                // unreadable → carry parent
-  //  Over the source cap → a BLOB we don't tokenise (weave.js policy); carry the
-  //  parent weave unchanged.  NB: an oversized revision's change is not woven.
-  if (bytes.length > weave.MAX_SOURCE_SIZE) return base;
-
-  //  Optimisation mirroring native's adjacent-equal skip: when the blob is
-  //  byte-identical to the single-parent baseline's alive view, this commit
-  //  did not touch the file — carry the parent weave unchanged (no spurious
-  //  commit id in the scope).
-  if (base !== null && parents.length === 1) {
-    //  The alive view fits the fixed markup buffer (lazy mmap) — no growth.
-    const prev = io.ram(weave.MAX_SOURCE_MARKED_UP);
-    base.alive(prev);
-    if (bytesEq(prev.data(), bytes)) return base;
-  }
-
-  return weave.fold(base, bytes, ext, weaveId(sha));
-}
-
-//  Byte-equality of two Uint8Arrays.
-function bytesEq(a, b) {
-  if (a.length !== b.length) return false;
-  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
-  return true;
-}
+//  Weave reconstruction + tree/blob readers now live in shared/weave.js
+//  (build/makeCtx/weaveId/extOf/treeMap/blobBytes) — the ONE copy `why:` shares.
 
 //  --- per-path 3-way classification (mirrors patch_walk_inner) -----------
 //  Each path is classified from its (fork f, ours o, theirs t) leaves into a
@@ -246,14 +78,14 @@ function classifyAndApply(rc, path, f, o, t) {
 
   if (f && o && t && oEqF && tEqF) { st.noop++; return; }       // unchanged both
   if (f && o && t && oEqF && !tEqF) {                            // only theirs
-    writeLeaf(rc, path, t, blobBytes(reader, tSha));
+    writeLeaf(rc, path, t, weave.blobBytes(reader, tSha));
     st.takeTheirs++; emit(rc, "applied", path); return;
   }
   if (f && o && t && !oEqF && tEqF) { st.noop++; emit(rc, "mod", path); return; } // only ours
   if (f && o && t && oEqT) { st.noop++; return; }                // same change
   if (f && o && t && !tEqF && !oEqT) return mergeApply(rc, path, o);  // both → merge
   if (!f && !o && t) {                                           // theirs added
-    writeLeaf(rc, path, t, blobBytes(reader, tSha));
+    writeLeaf(rc, path, t, weave.blobBytes(reader, tSha));
     st.added++; emit(rc, "applied", path); return;
   }
   if (!f && o && !t) { st.noop++; return; }                      // ours added only
@@ -269,7 +101,7 @@ function classifyAndApply(rc, path, f, o, t) {
   }
   if (f && !o && t) {
     if (tSha === fSha) { st.noop++; return; }                    // ours deleted, theirs clean
-    writeLeaf(rc, path, t, blobBytes(reader, tSha));            // ours del, theirs mod → theirs
+    writeLeaf(rc, path, t, weave.blobBytes(reader, tSha));            // ours del, theirs mod → theirs
     st.modDelKept++; emit(rc, "modl", path); return;
   }
   if (f && !o && !t) { st.noop++; return; }                      // both removed
@@ -281,17 +113,17 @@ function classifyAndApply(rc, path, f, o, t) {
 //  per-side scopes.  Mirrors GRAFMergeWtFileTunable.  A residual conflict
 //  marker reports `cnf` (markers left in the wt; DIS-057 conf→cnf).
 function mergeApply(rc, path, oLeaf) {
-  const ctx = { reader: rc.reader, path: path, ext: extOf(path),
-                treeCache: rc.treeCache, weaveCache: Object.create(null),
-                weaveCap: rc.weaveCap, aliveBuf: rc.aliveBuf };
+  //  ONE shared ctx (rc.treeCache + a fresh weaveCache) so a shared ancestor of
+  //  ours/theirs folds once — weave.build replays the file's commit closure.
+  const ctx = weave.makeCtx(rc.reader, path, rc.treeCache);
 
   //  Reconstruct + union + render through the fixed markup buffers (lazy mmap,
   //  no growth).  If a token-dense file overflows the cap, it is not a text file
   //  we can weave-merge — err out, treat it as a BLOB (failed), don't crash.
   let merged;
   try {
-    const ours = buildSideWeave(ctx, rc.ours);
-    const theirs = buildSideWeave(ctx, rc.theirs);
+    const ours = weave.build(rc.reader, path, rc.ours, ctx);
+    const theirs = weave.build(rc.reader, path, rc.theirs, ctx);
 
     //  Empty-side degeneracy (native's emit_alive_bytes short-circuits): if one
     //  side has no weave, emit the other's tip bytes.
@@ -395,9 +227,9 @@ function patchRun(ctx) {
 
   //  Build the three tree maps; the union of their paths is the walk set.
   const treeCache = Object.create(null);
-  const fMap = treeMap(reader, sc.fork);  treeCache[sc.fork] = fMap;
-  const oMap = treeMap(reader, sc.ours);  treeCache[sc.ours] = oMap;
-  const tMap = treeMap(reader, sc.theirs); treeCache[sc.theirs] = tMap;
+  const fMap = weave.treeMap(reader, sc.fork);  treeCache[sc.fork] = fMap;
+  const oMap = weave.treeMap(reader, sc.ours);  treeCache[sc.ours] = oMap;
+  const tMap = weave.treeMap(reader, sc.theirs); treeCache[sc.theirs] = tMap;
   const paths = Object.create(null);
   for (const k in fMap) paths[k] = true;
   for (const k in oMap) paths[k] = true;

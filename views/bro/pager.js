@@ -106,6 +106,10 @@ function indexAll(hunks, cols) {
 function emitBody(hunk, off, end, color, pass, enc, raw) {
   if (color && hunk.toks && bro.hasDiffSides(hunk.toks))
     return bro.paintDiffRow(hunk.text, hunk.toks, off, end, pass | 0, enc, raw);
+  //  WHY-001: a `why:` blame row (custom-bit runs, no diff sides) rides the same
+  //  wash the pipe --color uses, else it fell to the plain fg-only pass (blank bg).
+  if (color && hunk.toks && bro.hasWhyRuns(hunk.toks))
+    return bro.paintWhyRow(hunk.text, hunk.toks, off, end, enc, raw);
   const text = hunk.text, toks = hunk.toks;
   let ti = 0;
   while (ti < toks.length && (toks[ti] & 0xffffff) <= off) ti++;
@@ -116,7 +120,7 @@ function emitBody(hunk, off, end, color, pass, enc, raw) {
     const tag = ti < toks.length ? String.fromCharCode(65 + ((w >>> 27) & 0x1f)) : "S";
     let clen = [1,1,1,1,1,1,1,1,0,0,0,0,2,2,3,4][text[pos] >> 4];
     if (clen === 0 || pos + clen > end) clen = 1;
-    if (tag === "U") { if (runLo >= 0) { raw(runLo, pos); runLo = -1; } pos += clen; continue; }
+    if (tag === "U" || tag === "O") { if (runLo >= 0) { raw(runLo, pos); runLo = -1; } pos += clen; continue; }
     if (color) {
       const want = bro.cellAnsi(tag, 0, 0);       // PASS_NORMAL, SIDE_EQ
       if (!bro.aEq(want, cur)) {
@@ -159,11 +163,13 @@ function Pager(fd, opts) {
   this.fd = fd;
   this.color = opts && opts.color !== undefined ? opts.color : true;
   this.driveSpell = opts && opts.driveSpell;     // (spell) -> hunks | null
+  this.isVerb = opts && opts.isVerb;             // (w) -> is w a real verb handler?
   this.be = (opts && opts.be) || sessionBe();    // JAB-003: {cwd, wt_root, repo}
   this.view = null;                              // { hunks, rows, scroll, cols }
   this.stack = [];                               // JAB-030: the view BACK-stack
   this.mode = "scroll";                          // "scroll" | "command"
   this.cmd = "";                                 // the address-bar edit buffer
+  this._tab = null;                              // BRO-013: Tab-completion cycle state
   this.pasting = false;                          // inside a bracketed paste burst
   this.message = "";                             // a transient status note
   this.mouse = true;                             // BRO-005: mouse on (`m` toggles)
@@ -222,6 +228,17 @@ const TRANSPORT = { ssh:1, https:1, http:1, git:1, be:1, file:1 };
 
 //  The directory of a URI path (drop the last segment); "" when path-less.
 function dirOf(p) { p = p || ""; const i = p.lastIndexOf("/"); return i >= 0 ? p.slice(0, i) : ""; }
+
+//  BRO-013: the longest common leading substring of a list of strings.
+function _commonPrefix(list) {
+  if (!list.length) return "";
+  let p = list[0];
+  for (let i = 1; i < list.length; i++) {
+    let j = 0; while (j < p.length && j < list[i].length && p[j] === list[i][j]) j++;
+    p = p.slice(0, j);
+  }
+  return p;
+}
 
 
 //  JAB-003: the CURRENT view's anchor URI — the tracked navigated spell, else
@@ -447,6 +464,9 @@ Pager.prototype._keyScroll = function (b) {
 };
 
 Pager.prototype._keyCommand = function (b) {
+  //  BRO-013: Tab path-completes the last word; any OTHER key resets the cycle.
+  if (b === 0x09) { this._tabComplete(); return; }
+  this._tab = null;
   if (b === 0x0d || b === 0x0a) {                        // Enter: apply the spell
     const spell = this.cmd;
     this.mode = "scroll";
@@ -462,6 +482,76 @@ Pager.prototype._keyCommand = function (b) {
   }
   if (b >= 0x20 && b < 0x7f) this.cmd += String.fromCharCode(b);   // printable
 };
+
+//  BRO-013: split this.cmd at the last space — { head (kept prefix), word (the
+//  stem being completed) }.  A leading verb/earlier args stay in head.
+Pager.prototype._lastWord = function () {
+  const i = this.cmd.lastIndexOf(" ");
+  return { head: i >= 0 ? this.cmd.slice(0, i + 1) : "", word: i >= 0 ? this.cmd.slice(i + 1) : this.cmd };
+};
+
+//  BRO-013: complete the last word from the view's hunk paths — a unique match
+//  replaces it, a longer shared prefix extends it, else repeated Tab CYCLES.
+Pager.prototype._tabComplete = function () {
+  const lw = this._lastWord();
+  if (this._tab && this._tab.atCmd === this.cmd) {      // repeat Tab on our output
+    const c = this._tab;
+    c.idx = (c.idx + 1) % c.cands.length;
+    this.cmd = c.head + c.cands[c.idx];
+    c.atCmd = this.cmd;
+    return;
+  }
+  const cands = this._completions(lw.word);
+  if (!cands.length) { this.message = "(no completion)"; return; }
+  if (cands.length === 1) { this.cmd = lw.head + cands[0]; this._tab = null; return; }
+  const pfx = _commonPrefix(cands);
+  if (pfx.length > lw.word.length) { this.cmd = lw.head + pfx; this._tab = null; return; }
+  //  Ambiguous with no extra shared prefix: start a cycle on the full candidates.
+  this.cmd = lw.head + cands[0];
+  this._tab = { stem: lw.word, cands: cands, idx: 0, head: lw.head, atCmd: this.cmd };
+};
+
+//  BRO-013: gather `stem` completions from the view's hunk U/F tokens — a U nav
+//  spell → its wt-relative path, an F → its name; a dir (F+P / U ls|tree) gets `/`.
+Pager.prototype._completions = function (stem) {
+  const v = this.view;
+  const seen = {};
+  if (v) for (const h of v.hunks) {
+    const toks = h.toks, text = h.text;
+    if (!toks) continue;
+    for (let i = 0; i < toks.length; i++) {
+      const tag = String.fromCharCode(65 + ((toks[i] >>> 27) & 0x1f));
+      if (tag !== "U" && tag !== "F") continue;
+      const lo = i > 0 ? (toks[i - 1] & 0xffffff) : 0, hi = toks[i] & 0xffffff;
+      if (hi <= lo) continue;
+      const raw = utf8.Decode(text.slice(lo, hi));
+      let cand = null, isDir = false;
+      if (tag === "U") {                                 // nav spell → wt-rel path
+        const sp = this._splitSpell(raw);
+        const u = this._parse(sp.uri);
+        if (!u.path) continue;
+        cand = u.path.replace(/\/+$/, "");
+        isDir = sp.verb === "ls" || sp.verb === "tree" || sp.verb === "lsr";
+      } else {                                           // F: visible name; F+P = dir
+        cand = raw.replace(/\/+$/, "");
+        const nt = i + 1 < toks.length ? String.fromCharCode(65 + ((toks[i + 1] >>> 27) & 0x1f)) : "";
+        isDir = raw.slice(-1) === "/" || nt === "P";
+      }
+      //  BRO-013: complete on the last path SEGMENT so a bare `re` stem matches a
+      //  `dir/readme.md` entry by its visible name, not its full nav path.
+      const seg = cand.slice(cand.lastIndexOf("/") + 1);
+      if (seg && seg.indexOf(stem) === 0) seen[seg + (isDir ? "/" : "")] = 1;
+    }
+  }
+  let cands = Object.keys(seen);
+  if (!cands.length) cands = this._fsCompletions(stem);   // BRO-013: FS fallback
+  cands.sort();
+  return cands;
+};
+
+//  BRO-013 TODO: FS fallback — readdir the view's context dir (via discover + the
+//  URI class), stat-guess dir-vs-file.  Deferred; hunk tokens cover on-screen paths.
+Pager.prototype._fsCompletions = function (stem) { return []; };
 
 //  Drive a typed spell in-process: hand it to driveSpell (the bro handler wires
 //  the --tlv capture + reparse); on success PUSH the view (back-stack), else
@@ -533,7 +623,7 @@ Pager.prototype._verbUri = function () {
 Pager.prototype._composeCall = function (s) {
   const cur = this._verbUri();
   const ctxUri = cur.uri || (typeof be !== "undefined" && be.navCwd ? be.navCwd() : "");
-  return SPELL.compose(ctxUri, cur.verb, s);
+  return SPELL.compose(ctxUri, cur.verb, s, this.isVerb);
 };
 Pager.prototype._buildSpell = function (c) { return SPELL.buildSpell(c); };
 
@@ -691,7 +781,7 @@ Pager.prototype._screenToByte = function (row, col) {
     const tag = ti < toks.length ? String.fromCharCode(65 + ((toks[ti] >>> 27) & 0x1f)) : "S";
     let clen = [1,1,1,1,1,1,1,1,0,0,0,0,2,2,3,4][text[pos] >> 4];
     if (clen === 0 || pos + clen > r.end) clen = 1;
-    if (tag !== "U") {                            // hidden cells take no column
+    if (tag !== "U" && tag !== "O") {             // hidden cells take no column (WHY-001: O too)
       if (cp === col) return { hunk: hunk, off: pos };
       cp++;
     }
@@ -714,11 +804,18 @@ Pager.prototype._uriAt = function (hunk, off) {
   let ti = 0;
   while (ti < toks.length && (toks[ti] & 0xffffff) <= off) ti++;
   const nxt = ti + 1;
-  if (nxt < toks.length &&
-      String.fromCharCode(65 + ((toks[nxt] >>> 27) & 0x1f)) === "U") {
-    const lo = toks[nxt - 1] & 0xffffff;       // nxt>0 always (ti>=0)
-    const hi = toks[nxt] & 0xffffff;
-    if (hi > lo) return utf8.Decode(hunk.text.slice(lo, hi));
+  //  WHY-001: the click target is the token right AFTER the one under the cursor —
+  //  `U` (verbatim) or `O` (origin: `commit ?<hashlet>#<shade>`, strip `#<shade>`).
+  if (nxt < toks.length) {
+    const ntag = String.fromCharCode(65 + ((toks[nxt] >>> 27) & 0x1f));
+    if (ntag === "U" || ntag === "O") {
+      const lo = toks[nxt - 1] & 0xffffff, hi = toks[nxt] & 0xffffff;
+      if (hi > lo) {
+        let s = utf8.Decode(hunk.text.slice(lo, hi));
+        if (ntag === "O") { const h = s.lastIndexOf("#"); if (h > 0) s = s.slice(0, h); }
+        return s;
+      }
+    }
   }
   //  BRO-012: an `F` issue-key token has NO producer `U`; derive its ticket
   //  file URI from the token TEXT (todo/<TOPIC>/<KEY>.{md,txt,mkd}).  The

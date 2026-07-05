@@ -138,6 +138,122 @@ function hasDiffSides(toks) {
   return false;
 }
 
+//  WHY-001: a `why:` hunk marks each washed token with a hidden `O` (origin) token
+//  right after it, bytes = `commit ?<hashlet>#<shade>` (hue from the hashlet, paleness
+//  from the shade).  hasWhyRuns → route to the why renderer; `O`/`U` bytes are hidden.
+function hasWhyRuns(toks) {
+  for (let i = 0; i < toks.length; i++)
+    if (TOK_TAG(toks[i]) === "O") return true;
+  return false;
+}
+
+//  WHY-001: per-commit HUE = a saturated xterm-cube direction from the sha (12 vivid
+//  hues); the wash blends it toward white by the commit's log-age `shade` (0 newest
+//  .. 255 oldest) so older = paler.  Even the newest keeps a light tint (fg stays readable).
+const WHY_HUES = [[5,0,0],[5,3,0],[5,5,0],[3,5,0],[0,5,0],[0,5,3],
+                  [0,5,5],[0,3,5],[0,0,5],[3,0,5],[5,0,5],[5,0,3]];
+function paleHue(sha, shade) {
+  let h = 0;
+  for (let i = 0; i < 12 && i < sha.length; i++) h = (h * 31 + sha.charCodeAt(i)) >>> 0;
+  const b = WHY_HUES[h % WHY_HUES.length];
+  //  readable band: newest ~0.3 (saturated pastel) .. oldest ~0.8 (faint tint, never
+  //  pure white 231) — so even the oldest commit keeps a visible wash.
+  const p = 0.3 + 0.5 * (Math.max(0, Math.min(255, shade | 0)) / 255);
+  const R = Math.round(b[0] + p * (5 - b[0])), G = Math.round(b[1] + p * (5 - b[1])),
+        B = Math.round(b[2] + p * (5 - b[2]));
+  return aBg256(16 + 36 * R + 6 * G + B);
+}
+
+//  WHY-001: the bg for a visible token — PEEK the next token; if it's `O`, read its
+//  `commit ?<hashlet>#<shade>` (hue from hashlet, paleness from shade).  Else A0 (white).
+function whyBgAt(text, toks, ti) {
+  const nx = ti + 1;
+  if (nx >= toks.length || TOK_TAG(toks[nx]) !== "O") return A0;
+  const s = utf8.Decode(text.slice(toks[nx - 1] & 0xffffff, toks[nx] & 0xffffff));
+  const q = s.lastIndexOf("?"), h = s.indexOf("#", q + 1);
+  if (q < 0) return A0;
+  const hl = h > q ? s.slice(q + 1, h) : s.slice(q + 1);
+  const shade = h >= 0 ? parseInt(s.slice(h + 1), 10) || 0 : 0;
+  return /^[0-9a-f]{6,40}$/.test(hl) ? paleHue(hl, shade) : A0;
+}
+
+//  WHY-001: paint ONE display row [off, end) of a `why:` blame hunk (the twin of
+//  paintDiffRow) — each cell's fg = themeAt(tag), OR'd with its commit pastel bg
+//  (whyBgAt); `U` click-target bytes hidden.  Same batched-raw + minimal-SGR
+//  contract: `enc(str)` appends SGR/ASCII, `raw(lo,hi)` the verbatim text slice.
+function paintWhyRow(text, toks, off, end, enc, raw) {
+  const ntoks = toks.length;
+  let ti = 0;
+  while (ti < ntoks && TOK_END(toks[ti]) <= off) ti++;
+  let cur = A0, runLo = -1, pos = off;
+  while (pos < end) {
+    while (ti < ntoks && TOK_END(toks[ti]) <= pos) ti++;
+    const tag = ti < ntoks ? TOK_TAG(toks[ti]) : "S";
+    const ch = text[pos];
+    let clen = UTF8_LEN[ch >> 4];
+    if (clen === 0 || pos + clen > end) clen = 1;
+    //  WHY-001: `U` (underline/click) and `O` (origin bg+click) bytes are hidden.
+    if (tag === "U" || tag === "O") { if (runLo >= 0) { raw(runLo, pos); runLo = -1; } pos += clen; continue; }
+    const want = ti < ntoks ? aOr(themeAt(tag), whyBgAt(text, toks, ti)) : A0;
+    if (!aEq(want, cur)) {
+      if (runLo >= 0) { raw(runLo, pos); runLo = -1; }
+      enc(deltaSGR(want, cur)); cur = want;
+    }
+    if (runLo < 0) runLo = pos;
+    pos += clen;
+  }
+  if (runLo >= 0) raw(runLo, pos);
+  const r = resetSGR(cur); if (r) enc(r);
+}
+
+//  WHY-001: STRING form of paintWhyRow (the pager frame is a JS string) — same
+//  per-cell fg+commit-bg walk, text DECODED to real codepoints (BRO-011).
+function paintWhyRowStr(text, toks, off, end) {
+  let out = "";
+  paintWhyRow(text, toks, off, end,
+              function (s) { out += s; },
+              function (lo, hi) { if (hi > lo) out += utf8.Decode(text.subarray(lo, hi)); });
+  return out;
+}
+
+//  WHY-001: render a `why:` blame hunk in colour — banner then per-line body,
+//  each row painted by paintWhyRow (commit pastel bg OR'd onto the syntax fg).
+//  Returns utf8 bytes.  cols default 200 (the pipe-mode width; rarely wraps).
+function colorWhyHunk(uriStr, text, toks, cols) {
+  cols = cols || 200;
+  const chunks = [];
+  const enc = function (s) { if (s.length) chunks.push(utf8.Encode(s)); };
+  const raw = function (lo, hi) { if (hi > lo) chunks.push(text.subarray(lo, hi)); };
+  if (uriStr && uriStr.length) bannerColor(uriStr, cols, enc);
+  const tlen = text.length;
+  let off = 0;
+  while (off < tlen) {
+    const end = rowEnd({ text: text, toks: toks }, off, cols);
+    const rowEndByte = end < tlen && text[end] === 0x0a ? end : end;
+    paintWhyRow(text, toks, off, rowEndByte, enc, raw);
+    if (rowEndByte < tlen && text[rowEndByte] === 0x0a) { raw(rowEndByte, rowEndByte + 1); off = rowEndByte + 1; }
+    else off = rowEndByte > off ? rowEndByte : off + 1;
+  }
+  let total = 0; for (const c of chunks) total += c.length;
+  const all = new Uint8Array(total); let o = 0;
+  for (const c of chunks) { all.set(c, o); o += c.length; }
+  return all;
+}
+
+//  WHY-001: --plain for a `why:` hunk — the visible bytes only.  The native HUNK
+//  cursor hides `U` but NOT `O`, so a why hunk's --plain routes here: emit each
+//  non-`U`/`O` token span verbatim (that IS the file content the wash sits over).
+function whyPlain(text, toks) {
+  const b = io.buf(text.length + 8);
+  let pos = 0;
+  for (let i = 0; i < toks.length; i++) {
+    const end = toks[i] & 0xffffff, tag = TOK_TAG(toks[i]);
+    if (tag !== "U" && tag !== "O" && end > pos) b.feed(text.subarray(pos, end));
+    pos = end;
+  }
+  return b.data().slice();
+}
+
 //  --- bro_cell_ansi: (fg tag, pass, side) -> ansi64 -----------------------
 function cellAnsi(tag, pass, side) {
   let want = themeAt(tag);
@@ -165,7 +281,7 @@ function rowEndPass(text, toks, tlen, off, cols, pass) {
     const side = ti < ntoks ? TOK_SIDE(toks[ti]) : SIDE_EQ;
     const tag  = ti < ntoks ? TOK_TAG(toks[ti]) : "S";
     const ch = text[pos];
-    const hidden = tag === "U" ||
+    const hidden = tag === "U" || tag === "O" ||
                    (pass === PASS_RM && side === SIDE_IN) ||
                    (pass === PASS_IN && side === SIDE_RM);
     if (ch === 0x0a && !hidden) break;
@@ -188,7 +304,7 @@ function classifyLines(text, toks) {
     while (ti < ntoks && TOK_END(toks[ti]) <= off) ti++;
     const side = ti < ntoks ? TOK_SIDE(toks[ti]) : SIDE_EQ;
     const tag  = ti < ntoks ? TOK_TAG(toks[ti]) : "S";
-    if (tag === "U") continue;
+    if (tag === "U" || tag === "O") continue;
     if (text[off] === 0x0a) {
       out.push({ lo: lineLo, hi: off, inB: inB, rmB: rmB, eqB: eqB, bnd: side });
       lineLo = off + 1; inB = rmB = eqB = 0;
@@ -446,7 +562,7 @@ function rowEnd(hunk, off, cols) {
     while (ti < toks.length && (toks[ti] & 0xffffff) <= pos) ti++;
     const tag = ti < toks.length ? TOK_TAG(toks[ti]) : "S";
     const ch = text[pos];
-    const hidden = tag === "U";
+    const hidden = tag === "U" || tag === "O";   // WHY-001: O bytes take no column
     if (ch === 0x0a && !hidden) break;       // visible '\n' ends the row
     let clen = UTF8_LEN[ch >> 4];
     if (clen === 0 || pos + clen > tlen) clen = 1;
@@ -617,6 +733,23 @@ function renderHunkLog(log, mode) {
       chunks.push(b); total += b.length;
       continue;
     }
+    //  WHY-001: a `why:` blame hunk (hidden `O` runs) paints each token's commit
+    //  pastel bg via colorWhyHunk (the diff renderer's why twin).
+    if (mode === "color" && log.toks && hasWhyRuns(log.toks)) {
+      let uriStr = "";
+      try { const u = log.uri; uriStr = typeof u === "string" ? u : utf8.Decode(u); }
+      catch (e) { uriStr = ""; }
+      const b = colorWhyHunk(uriStr, log.text, log.toks, 200);
+      chunks.push(b); total += b.length;
+      continue;
+    }
+    //  WHY-001: --plain for a why hunk goes through whyPlain (the native cursor
+    //  hides `U` but not `O`), else the O bytes leak into the plain text.
+    if (mode !== "color" && log.toks && hasWhyRuns(log.toks)) {
+      const b = whyPlain(log.text, log.toks);
+      chunks.push(b); total += b.length;
+      continue;
+    }
     const cap = (tlen + ulen + 64) * (mode === "color" ? 10 : 2) + 256;
     const o = io.buf(cap);
     if (mode === "color") log.color(o); else log.plain(o);
@@ -658,6 +791,17 @@ module.exports = {
   //  exported for the pager (indexRows/paintRow pass-awareness) and tests.
   colorDiffHunk: colorDiffHunk,
   hasDiffSides: hasDiffSides,
+  //  WHY-001: the blame-colour renderer + its hue helper (shared with why.js /
+  //  the golden, so the view and the renderer agree on the pastel).
+  colorWhyHunk: colorWhyHunk,
+  whyPlain: whyPlain,
+  hasWhyRuns: hasWhyRuns,
+  paleHue: paleHue,
+  whyBgAt: whyBgAt,
+  //  WHY-001: the per-ROW blame painter (twin of paintDiffRow) + its string form,
+  //  so the pager routes a why hunk through the SAME wash the pipe --color uses.
+  paintWhyRow: paintWhyRow,
+  paintWhyRowStr: paintWhyRowStr,
   cellAnsi: cellAnsi,
   deltaSGR: deltaSGR,
   resetSGR: resetSGR,

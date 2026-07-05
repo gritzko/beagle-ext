@@ -54,7 +54,10 @@ function mergeUri(ctx, t) {
   const auth = t.authority !== undefined ? t.authority : ctx.authority;
   let path = ctx.path, frag = ctx.fragment;
   if (t.path) {
-    path = t.path[0] === "/" ? t.path : joinPath(ctx.path || "", t.path);
+    //  URI-011b: a BARE or `/`-led path is WT-RELATIVE (rootless, replaces the
+    //  context path); only `./`/`../` is context-relative (joins it AS A DIR).
+    path = t.path[0] === "." ? joinPath(ctx.path || "", t.path)
+                             : t.path.replace(/^\/+/, "");
     if (auth !== undefined && path && path[0] !== "/") path = "/" + path;
     if (t.fragment === undefined) frag = undefined;     // path moved → drop #anchor
   }
@@ -63,12 +66,16 @@ function mergeUri(ctx, t) {
   return URI.make(scheme, auth, path, query, frag) || "";
 }
 
-//  shapeArg0(ctxUri, items) → { arg0, rest }.  SHIFTS the first URI-shaping token
-//  off `items` to update arg 0 (else the context stays); the remainder is raw REST.
-function shapeArg0(ctxUri, items) {
+//  shapeArg0 → { arg0, rest }.  A leading `-` = default context + raw REST; else the
+//  first unquoted token shapes arg 0 (bareIsUri: a bareword is a wt-relative path).
+function shapeArg0(ctxUri, items, bareIsUri) {
   const ctx = parse(ctxUri);
+  if (items.length && !items[0].q && items[0].tok === "-") {
+    items.shift();                                   // `:word - a b` → ctx + raw REST
+    return { arg0: bareCtx(ctx), rest: items.map(function (it) { return it.tok; }) };
+  }
   let arg0;
-  if (items.length && !items[0].q && uriShaping(items[0].tok))
+  if (items.length && !items[0].q && (bareIsUri || uriShaping(items[0].tok)))
     arg0 = mergeUri(ctx, parse(items.shift().tok));
   else
     arg0 = bareCtx(ctx);
@@ -77,13 +84,16 @@ function shapeArg0(ctxUri, items) {
 
 //  compose from a raw spell STRING (the pager address bar): shell-split, keep each
 //  token's quote flag, PEEL a leading bareword verb, then shape arg 0 + rest.
-function compose(ctxUri, verbFallback, spell) {
+function compose(ctxUri, verbFallback, spell, isVerb) {
   const sp = argline.shellSplit(spell || "");
   const items = sp.toks.map(function (t, i) { return { tok: t, q: !!sp.split[i] }; });
   let verb = verbFallback || "";
-  if (items.length && !items[0].q && /^[a-zA-Z][a-zA-Z0-9]*$/.test(items[0].tok))
+  //  Peel a leading bareword verb — but with an isVerb probe, only a REAL verb
+  //  (else `verbs` in an `ls` view shadows the path retarget → a stray 2nd hunk).
+  if (items.length && !items[0].q && /^[a-zA-Z][a-zA-Z0-9]*$/.test(items[0].tok) &&
+      (!isVerb || isVerb(items[0].tok)))
     verb = items.shift().tok;
-  const s = shapeArg0(ctxUri, items);
+  const s = shapeArg0(ctxUri, items, true);   // pager: a bareword IS a URI part
   return { verb: verb, arg0: s.arg0, rest: s.rest };
 }
 

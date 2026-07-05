@@ -377,7 +377,8 @@ function _openPager(hunks) {
   if (fd === null) fd = 1;
   try {
     const broh = require(_here + "/views/bro/bro.js");
-    const p = new pager.Pager(fd, { color: true, driveSpell: broh.driveSpell });
+    const p = new pager.Pager(fd, { color: true, driveSpell: broh.driveSpell,
+                                    isVerb: function (w) { return _isVerb(w, _here); } });
     p.setHunks(hunks);
     p.run();
   } finally { if (own) { try { io.close(fd); } catch (e) {} } }
@@ -386,5 +387,8 @@ function _openPager(hunks) {
 //  JSQUE-016: always required (via the be/main.js entry shim), so export
 //  run/cli; the shim self-runs cli() when invoked directly.
 if (typeof module !== "undefined")
-  module.exports = { run: run, cli: cli };
-else cli(process.argv); 
+  //  isVerb: the pager's composer peels a leading token as a verb ONLY if it is a
+  //  real handler (else it's a wt-relative path) — the SAME probe cli() dispatches on.
+  module.exports = { run: run, cli: cli,
+                     isVerb: function (w) { return _isVerb(w, _here); } };
+else cli(process.argv);
