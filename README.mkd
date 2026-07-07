@@ -1,0 +1,19 @@
+#   Beagle the SCM
+
+This is the JavaScript implementation of Beagle SCM.
+The only dependency is [JAB][j] the JavaScript runtime.
+Symlink/mv this as a `be/` dir in cwd or any higher dir 
+(e.g. `$HOME/be/). Jab will pick it up.
+
+See the [wiki][w] and guides for [usage patterns][u]. 
+This implementation is TUI-centric, any command opens
+a pager.
+
+All the heavy-lifting is done by [libdog][d] through
+JAB bindings. So, if this set of command does not suit 
+you, then complain to Claude, and please share the results.
+
+[j]: https://github.com/gritzko/jab/
+[u]: https://replicated.wiki/meta/work
+[w]: https://replicated.wiki/wiki/Verbs
+[d]: https://github.com/gritzko/libdog
