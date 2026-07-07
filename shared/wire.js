@@ -72,6 +72,8 @@ function classify(remoteUri, verb) {
   //  Remote: ssh.  Strip a leading '/' (HOME-relative convention).
   if (path[0] === "/") path = path.slice(1);
   const sshBin = io.getenv("SSH_BIN") || "ssh";
+  //  URI userinfo (`ssh://git@host/...`) rides the ssh destination.
+  const dest = u.user ? (u.user + "@" + host) : host;
   const isKeeper = scheme === "be" || scheme === "keeper";
   if (isKeeper) {
     //  `ssh host keeper <verb> <path>?<sel>` — keeper protocol.  Honour
@@ -81,10 +83,10 @@ function classify(remoteUri, verb) {
     const cmd = remPath
       ? ("PATH=" + remPath + ":$PATH exec keeper " + verb + " " + shq(sp))
       : ("keeper " + verb + " " + shq(sp));
-    return { bin: sshBin, argv: [sshBin, host, cmd], ssh: true };
+    return { bin: sshBin, argv: [sshBin, dest, cmd], ssh: true };
   }
   //  Vanilla git over ssh.
-  return { bin: sshBin, argv: [sshBin, host, "git-" + verb + " " + shq(path)],
+  return { bin: sshBin, argv: [sshBin, dest, "git-" + verb + " " + shq(path)],
            ssh: true };
 }
 

@@ -4,12 +4,15 @@
 //  ulog.js (the sub wtlog anchor).  Implements [Submodules] Recursion §1:
 //
 //    GET pre-order — after the parent's own files are written, each gitlink
-//    leaf is MOUNTED: fetch the child shard from the SAME source (the parent's
-//    remote with the project swapped to the child [Title]), CLONE it as a
-//    sibling shard at `<beDir>/<title>/` (flat, same level as the parent —
-//    [Store] layout), WRITE the sub wtlog anchor `<wt>/<path>/.be`, and CHECK
-//    OUT the commit named by the parent's gitlink pin.  The same-source fetch
-//    falls back to the `.gitmodules` URL when it fails.  The child wt tracks a
+//    leaf is MOUNTED: fetch the child shard from the SAME source (a beagle
+//    store swaps the `?/<proj>` selector to the child [Title]; a git repo
+//    WITH a worktree — path not ending `.git` — serves the sub's own checkout
+//    at `<path>/<subpath>`; SUBS-047), CLONE it as a sibling shard at
+//    `<beDir>/<title>/` (flat, same level as the parent — [Store] layout),
+//    WRITE the sub wtlog anchor `<wt>/<path>/.be`, and CHECK OUT the commit
+//    named by the parent's gitlink pin.  The same-source fetch falls back to
+//    the `.gitmodules` URL (nearest enclosing file) when it fails, per
+//    [Title] retrieval preference.  The child wt tracks a
 //    SYNTHETIC branch `/<title>/.<parent>[/<parent_branch>]` ([Submodules]
 //    bullet 1) — recorded in the sub's tip row.
 //
@@ -60,6 +63,21 @@ function gitmodulesUrl(wt, subpath) {
   return require("./gitmodules.js").urlOf(wt, subpath);
 }
 
+//  SUBS-047: the official url for `subpath` off the NEAREST enclosing
+//  `.gitmodules` — a nested sub (`dog/abc`) is declared in `dog/.gitmodules`
+//  as `abc`, never in the root file, so a root-only lookup returns "".
+function declaredUrl(wt, subpath) {
+  let base = wt, rest = subpath;
+  for (;;) {
+    const u = gitmodulesUrl(base, rest);
+    if (u) return u;
+    const cut = rest.indexOf("/");
+    if (cut < 0) return "";
+    base = join(base, rest.slice(0, cut));
+    rest = rest.slice(cut + 1);
+  }
+}
+
 //  [Title] from a `.gitmodules` URL basename — `.git` + trailing `/` stripped
 //  (`…/libabc.git` → `libabc`, `be:/s/.be?/sub` → `sub`).  A `?/<proj>`
 //  selector wins (its last segment IS the title); else the path basename.
@@ -95,25 +113,28 @@ function syntheticBranch(title, parentTitle, parentBranch) {
   return b;
 }
 
-//  Build the SAME-SOURCE child remote URI from the parent's parsed remote: the
-//  parent fetched `<scheme>:<path>?/<parentProj>[/branch]`; the child swaps the
-//  `?/<proj>` selector to the child title (same store, sibling project).
-//  Returns "" when the parent has no usable same-source remote.
-function sameSourceUri(source, title) {
-  if (!source) return "";
-  //  source.raw is the parent's remote URI; rebuild it with `?/<title>`.
-  //  URI-013: LEFT as a hand-compose for BYTE-PARITY.  `u.authority` here already
-  //  carries the leading `//` (the binding returns the slotted form), so the old
-  //  `"//" + u.authority` DOUBLES it (`ssh:////host/...`) for an authority-bearing
-  //  (remote-ssh) source — a latent bug.  Routing through `URI.make(u.scheme,
-  //  u.authority, u.path, "/" + title)` would EMIT THE CORRECT single `//` and so
-  //  CHANGE the output string — a behaviour change a byte-parity refactor must not
-  //  make.  Fix belongs with the same-source-remote-submodule work, not here.
-  const u = new URI(source.raw);
-  const scheme = u.scheme ? u.scheme + ":" : "";
-  const auth = (u.authority != null && u.authority !== "") ? "//" + u.authority : "";
-  const path = u.path || "";
-  return scheme + auth + path + "?/" + title;
+//  SUBS-047: the SAME-SOURCE child URIs, tried IN ORDER before the official
+//  `.gitmodules` url ([Submodules] §1) — the parent's remote re-addressed at
+//  the child, composed via URI.make ONLY (URI-013: the old hand-compose
+//  doubled the slotted authority into `ssh:////host/...`, so the same-source
+//  fetch never reached the peer).  Two source shapes:
+//    beagle store (source.local / be: / keeper: / a `.be` path) — a sibling
+//      project in the same store: swap the `?/<proj>` selector to the [Title];
+//    git repo WITH a worktree (path NOT ending `.git`) — the sub's own
+//      checkout nested at `<path>/<subpath>`;
+//    a bare `.git` source serves no subs — no same-source candidate.
+function sameSourceUris(source, title, subpath) {
+  if (!source || !source.raw) return [];
+  let u; try { u = new URI(source.raw); } catch (e) { return []; }
+  const scheme = u.scheme || "";
+  const path = (u.path || "").replace(/\/+$/, "");
+  const beagleish = source.local || scheme === "be" || scheme === "keeper" ||
+                    path.slice(-3) === ".be";
+  if (beagleish)
+    return [URI.make(u.scheme, u.authority, u.path, "/" + title)];
+  if (path.slice(-4) !== ".git" && subpath)
+    return [URI.make(u.scheme, u.authority, path + "/" + subpath)];
+  return [];
 }
 
 //  Fetch the child pack from `uri` (keeper/git wire).  Returns { pack, tip,
@@ -185,7 +206,10 @@ function mount(opts) {
   if (!isFullSha(pin))
     throw "be get: sub " + subpath + " has no resolvable gitlink pin";
 
-  const url = gitmodulesUrl(wt, subpath);
+  //  SUBS-047: the official url resolves through the NEAREST enclosing
+  //  `.gitmodules` (a nested `dog/abc` is declared in `dog/.gitmodules`), so
+  //  the fallback — and the [Title] — work for subs at any depth.
+  const url = declaredUrl(wt, subpath);
   const title = titleFromUrl(url) || basename(subpath);
   if (!title)
     throw "be get: cannot derive a title for sub " + subpath +
@@ -225,13 +249,19 @@ function mount(opts) {
       if (!havePin) try { havePin = !!store.open(shard, "").getObject(pin); } catch (e) {}
     }
 
+    //  SUBS-047: the same-source candidates, tried before the official url in
+    //  BOTH the local-reuse and the wire branches below.
+    const sames = sameSourceUris(opts.source, title, subpath);
+
     //  SUBS-046: LOCAL-SOURCE reuse (get.js localish path, NO wire): a `file:`/
     //  scheme-less child whose pin already lives on-disk is mounted by REDIRECTING
     //  the sub `.be` at that store + checkout; else fall through to the wire fetch.
     if (!havePin) {
-      const sameUri = sameSourceUri(opts.source, title);
       let ls = null;
-      const su = localSourceUri(sameUri); if (su) ls = resolveLocalStore(su, pin);
+      for (const s of sames) {
+        const su = localSourceUri(s); if (su) ls = resolveLocalStore(su, pin);
+        if (ls) break;
+      }
       if (!ls) { const uu = localSourceUri(url); if (uu) ls = resolveLocalStore(uu, pin); }
       if (ls) {
         const oldPin = currentSubPin(anchorPath);
@@ -247,16 +277,16 @@ function mount(opts) {
     }
 
     if (!havePin) {
-      //  D4: same-source fetch first (the parent's remote, project swapped), then
-      //  the `.gitmodules` URL fallback.  Fetch by the EXACT pin so the checkout
-      //  target rides the pack.
-      const sameUri = sameSourceUri(opts.source, title);
-      let f = tryFetch(sameUri, pin);
-      let usedUri = sameUri;
+      //  D4: same-source fetch first (the parent's remote re-addressed at the
+      //  child — project swap or worktree-nested path), then the `.gitmodules`
+      //  URL fallback.  Fetch by the EXACT pin so the checkout target rides
+      //  the pack.
+      let f = null, usedUri = "";
+      for (const s of sames) { f = tryFetch(s, pin); if (f) { usedUri = s; break; } }
       if (!f && url) { f = tryFetch(url, pin); usedUri = url; }
       if (!f)
         throw "be get: SUBFETCH cannot fetch sub " + subpath + " (" + title +
-              ") from " + (sameUri || "(no same-source)") +
+              ") from " + (sames.length ? sames.join(", ") : "(no same-source)") +
               (url ? " or " + url : "") + " — child unreachable";
 
       //  Clone/land the child shard as a sibling at `<beDir>/<title>/` ([Store]
@@ -307,5 +337,6 @@ function mount(opts) {
 }
 
 module.exports = { mount: mount, gitmodulesUrl: gitmodulesUrl,
-                   titleFromUrl: titleFromUrl, syntheticBranch: syntheticBranch,
-                   sameSourceUri: sameSourceUri };
+                   declaredUrl: declaredUrl, titleFromUrl: titleFromUrl,
+                   syntheticBranch: syntheticBranch,
+                   sameSourceUris: sameSourceUris };

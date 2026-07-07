@@ -658,7 +658,7 @@ function ensureShard(shard) {
   if (!exists(path)) createShard(shard);
 }
 
-module.exports = { open: open, frameSha: frameSha,
+module.exports = { open: open, shardDir: shardDir, frameSha: frameSha,
                    hashlet60FromBytes: hashlet60FromBytes,
                    TYPE_NAME: TYPE_NAME, NAME_TYPE: NAME_TYPE,
                    createShard: createShard, set: set, tombstone: tombstone,

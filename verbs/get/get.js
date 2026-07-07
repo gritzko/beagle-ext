@@ -198,28 +198,36 @@ function resolvePin(k, hex) {
 }
 
 function seedRemote(rem, wt) {
-  const beDir = join(wt, ".be");
-  const fresh = !exists(beDir);
-  const proj = rem.proj || "repo";
+  //  GET-041: an ESTABLISHED worktree is NEVER a clone destination — its `.be`
+  //  anchor references the real shard (a secondary wt's `.be` is a redirect
+  //  FILE; minting `<wt>/.be/<proj>` under it ENOTDIR-crashed the ingest).
+  //  Resolve the anchor AT wt and land the pack in THAT shard; green-field
+  //  (no own anchor — an ANCESTOR anchor is the test-firewall `.be`, not this
+  //  wt) fresh-clones into `<wt>/.be` as before.
+  let info; try { info = be.find(wt); } catch (e) { info = undefined; }
+  if (info && info.wt !== wt) info = undefined;
   const f = wire.fetch(rem.raw, rem.branch || "");
   const tip = f.want;
   if (!tip || !isFullSha(tip)) throw "be get: peer gave no tip";
   const branch = rem.branch || f.branch || "";
-  const shard = join(beDir, proj);
-  const wtl = join(beDir, "wtlog");
-  let oldTip = "";
-  if (fresh) {
+  if (!info) {                                   // green-field: fresh clone
+    const beDir = join(wt, ".be");
+    const proj = rem.proj || "repo";
     ingest.clone(f.pack, beDir, proj, tip, rem.raw);
     const anchor = URI.make("file", undefined, beDir + "/" + proj + "/");
-    writeWtlog(wtl, [{ verb: "get", uri: anchor },
-                     { verb: "get", uri: URI.make(undefined, undefined, undefined, branch, tip) }]);
-  } else {
-    oldTip = oldTipOf(wtl);
-    ingest.add(f.pack, shard, rem.raw, tip);
-    appendWtlog(wtl, [{ verb: "get", uri: URI.make(undefined, undefined, undefined, branch, tip) }]);
+    writeWtlog(join(beDir, "wtlog"),
+               [{ verb: "get", uri: anchor },
+                { verb: "get", uri: URI.make(undefined, undefined, undefined, branch, tip) }]);
+    return { k: store.open(wt, proj), tip, oldTip: "", fresh: true, branch };
   }
-  const k = store.open(wt, proj);
-  return { k, tip, oldTip, fresh, branch };
+  //  UPDATE: the anchor's own store/shard (the project is the wt's identity,
+  //  never the `?/proj` guess); reader opened AFTER the pack lands.
+  const shard = store.shardDir(info.storePath, info.project);
+  const oldTip = oldTipOf(info.bePath);
+  ingest.add(f.pack, shard, rem.raw, tip);
+  appendWtlog(info.bePath, [{ verb: "get", uri: URI.make(undefined, undefined, undefined, branch, tip) }]);
+  const k = store.open(info.storePath, info.project);
+  return { k, tip, oldTip, fresh: false, branch };
 }
 
 //  D7: a CACHED host read — `//host?branch` resets from the local store's
@@ -373,7 +381,7 @@ function fanoutWholeTree(ctx, r, wt, force) {
   //  first, kept in push order), then file rows — new+upd interleaved lex,
   //  THEN del lex.  The fan-out arrives in queue order, so SORT at the flush.
   ctx.outSort = function (rows) { return sortGetRows(rows); };
-  ctx._finalize = flushGet;   // JAB-003: flush the one get hunk after the queue drains
+  ctx._finalize = finalizeGet;   // JAB-003 + SUBS-047: sweep dirs, flush the get hunk
 
   //  Resolution-at-entry: pin the root NEW + OLD tree shas.  Old empty on a fresh
   //  clone OR a --force reset (re-write everything, discard dirty); else the real
@@ -544,7 +552,7 @@ function restorePath(ctx, k, wt, path, query, curSha, curBranch) {
                branch: curBranch, ts: ctx.T0, kinds: {}, dels: 0, rows: [], head: null,
                force: force, noPrune: true };
   ctx.outSort = function (rows) { return sortGetRows(rows); };
-  ctx._finalize = flushGet;   // JAB-003: flush the one get hunk after the queue drains
+  ctx._finalize = finalizeGet;   // JAB-003 + SUBS-047: sweep dirs, flush the get hunk
   getOut(ctx).banner("get", URI.make(undefined, undefined, undefined, curBranch || "", srcSha.slice(0, 8)), ctx.T0);
 
   const enqueue = [];
@@ -674,9 +682,14 @@ function reconcileDir(row, ctx) {
     }
     if (ne) {                                   // a (changed) file/exe/lnk/sub
       g.kinds[rel] = kindOf(ne.mode);
+      //  SUBS-047 dir→GITLINK: the old dir's tracked files are swept
+      //  SYNCHRONOUSLY by the mount leaf (oldDirTree) — queued delete leaves
+      //  would dispatch AFTER the mount and clobber the fresh sub checkout.
+      const subOverDir = kindOf(ne.mode) === "s" && oe && oe.isDir;
       enqueue.push({ verb: "get", _leaf: true, rel: rel, newSha: ne.sha,
-                     oldSha: (oe && !oe.isDir ? oe.sha : "") });
-      if (oe && oe.isDir)                        // old dir → recurse to delete
+                     oldSha: (oe && !oe.isDir ? oe.sha : ""),
+                     oldDirTree: subOverDir ? oe.sha : "" });
+      if (oe && oe.isDir && !subOverDir)         // old dir → recurse to delete
         enqueue.push({ verb: "get", _dir: rel + "/", newTree: "", oldTree: oe.sha });
       continue;
     }
@@ -707,14 +720,31 @@ function leaf(row, ctx) {
     //  JS-075: fire the unlink only for a GENUINE removal — the entry had an
     //  old sha (was tracked) — never from a `#`/`?` string-parse artifact.
     if (!oldSha) return;
-    try { io.unlink(full); out.row(rel, "del", g.ts); g.dels++; } catch (e) {}
+    //  SUBS-047 gitlink→absent: UNMOUNT the sub — the whole sub wt (files +
+    //  `.be` anchor) goes; io.unlink on a dir is EISDIR (the old silent no-op
+    //  left the removed sub fully populated).  The sibling shard keeps its
+    //  objects ([Store]: GC is epoch-based, a drop is a refs tombstone).
+    //  ONLY a real mount (its `.be` anchor exists) is removed — a stale
+    //  unmounted gitlink dir may hold user files, so it is left in place.
+    if (kind === "s") {
+      if (exists(join(full, ".be")))
+        try { io.rmdir(full, true); out.row(rel, "del", g.ts); g.dels++; } catch (e) {}
+      return;
+    }
+    try { io.unlink(full); out.row(rel, "del", g.ts); g.dels++;
+          markDelDir(g, rel); } catch (e) {}
     return;
   }
   //  DIS-058 D2-D5: a gitlink leaf is MOUNTED + recursed (pre-order): fetch the
   //  child shard from the same source, clone it as a sibling shard, write the
   //  sub wtlog anchor, check out the pinned commit, then descend into the sub's
   //  OWN gitlinks.  `newSha` IS the parent gitlink pin (the 160000 entry sha).
-  if (kind === "s") return mountGitlink(g, rel, newSha, out);
+  //  SUBS-047: a dir→gitlink type change first sweeps the old dir's tracked
+  //  files (synchronously — see reconcileDir), THEN mounts over what remains.
+  if (kind === "s") {
+    if (row.oldDirTree) sweepOldTree(g, rel, row.oldDirTree, out);
+    return mountGitlink(g, rel, newSha, out);
+  }
 
   const obj = g.k.getObject(newSha);
   if (!obj) return;                             // unresolved → skip
@@ -754,6 +784,30 @@ function leaf(row, ctx) {
   //  Clean (un-edited), forced, or non-mergeable kind → clean-overwrite.
   checkout.materialise(g.wt, rel, { kind: kind }, bytes);
   out.row(rel, existed ? "upd" : "new", g.ts);
+}
+
+//  SUBS-047: remove a replaced dir's TRACKED files before its gitlink mounts —
+//  unlink each old-tree leaf, then rmdir the emptied dirs bottom-up (plain
+//  rmdir: a dir kept alive by untracked user files survives, and the mount
+//  re-mkdirs the root anyway).
+function sweepOldTree(g, rel, treeSha, out) {
+  const dirs = {};
+  g.k.readTreeRecursive(treeSha, function (l) {
+    const p = rel + "/" + l.path;
+    try { io.unlink(join(g.wt, p)); out.row(p, "del", g.ts); g.dels++; } catch (e) {}
+    for (let i = p.indexOf("/"); i >= 0; i = p.indexOf("/", i + 1))
+      dirs[p.slice(0, i)] = 1;
+  });
+  const down = Object.keys(dirs).sort().reverse();     // children before parents
+  for (const d of down)
+    try { io.rmdir(join(g.wt, d)); } catch (e) {}      // non-empty → keep
+}
+
+//  SUBS-047: remember a deleted path's parent dir so the del-sweep terminal can
+//  collapse dirs the deletes emptied (top-level files have no dir to mark).
+function markDelDir(g, rel) {
+  const cut = rel.lastIndexOf("/");
+  if (cut > 0) (g.delDirs || (g.delDirs = {}))[rel.slice(0, cut)] = 1;
 }
 
 //  DIS-058 D2-D5 (pre-order sub mount): mount the gitlink at `rel` pinned at
@@ -882,11 +936,38 @@ function extOf(path) {
 }
 
 //  del-sweep terminal (get_drain_unlinks, GET.c:668): the post-order sweep
-//  point after the reconcile fans out its delete leaves.  JS has no rmdir leaf
-//  (checkout.js note), so the empty-dir collapse is a no-op; the per-path `del`
-//  rows ARE the durable effect (already emitted).  JSQUE-020: the former
-//  back-scan barrier only tallied an UNREAD ctx._get.delSwept — dropped.
+//  point after the reconcile fans out its delete leaves.  SUBS-047: the FIFO
+//  dispatches this fold BEFORE the reconcile's later fan-out rows (it is
+//  enqueued 2nd), so the REAL sweep rides finalizeGet (after the drain); this
+//  row stays a cheap early pass for whatever already deleted.
 function delSweep(row, ctx) {
+  sweepDelDirs(ctx);
+}
+
+//  SUBS-047: collapse the dirs the delete leaves emptied — plain rmdir
+//  deepest-first, then walk each chain upward until a dir refuses (untracked
+//  content keeps it alive).  The per-path `del` rows stay the durable record.
+function sweepDelDirs(ctx) {
+  const g = ctx && ctx._get;
+  if (!g || !g.delDirs) return;
+  const dirs = Object.keys(g.delDirs).sort().reverse();
+  g.delDirs = null;
+  for (let d of dirs) {
+    for (;;) {
+      try { io.rmdir(join(g.wt, d)); } catch (e) { break; }   // non-empty → stop
+      const cut = d.lastIndexOf("/");
+      if (cut <= 0) break;
+      d = d.slice(0, cut);
+    }
+  }
+}
+
+//  SUBS-047: the after-drain terminal — sweep emptied dirs, then flush the one
+//  accumulated get hunk.  Both the loop (ctx._finalize) and the plain-args
+//  driver end through here.
+function finalizeGet(ctx) {
+  sweepDelDirs(ctx);
+  flushGet(ctx);
 }
 
 //  Edge flush comparator (native get layout): pulled-commit `post` rows first
@@ -961,9 +1042,10 @@ function get() {
     if (res && res.enqueue && res.enqueue.length)
       for (const r of res.enqueue) q.push(r);
   }
-  //  JAB-004: flush the ONE accumulated get hunk after the queue drains (the
-  //  plain branch's ctx._finalize is the loop ctx, not this synthetic one).
-  flushGet(ctx);
+  //  JAB-004 + SUBS-047: after the queue drains, sweep the emptied dirs and
+  //  flush the ONE accumulated get hunk (the plain branch's ctx._finalize is
+  //  the loop ctx, not this synthetic one).
+  finalizeGet(ctx);
 }
 
 //  jab injects module.exports for a required module; the loop requires this as
