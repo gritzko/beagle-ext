@@ -32,6 +32,30 @@ function merge(a, b, hash) {
   return w;
 }
 
+//  BE-010: the synthetic revision id for the wt's on-disk edit, folded onto the
+//  OURS side of a per-file weave (mirrors native WEAVE_WT_SRC in graf/GET.c).  A
+//  reserved 16-hex hashlet that never collides with a real commit id (the hi64
+//  of a sha1), so its tokens read as an ours-side edit under `scope`.
+const WT_SRC = "00000000005774ed";
+
+//  BE-010: fold the wt's on-disk `bytes` onto the OURS-side weave as a FINAL
+//  synthetic WT_SRC revision layer — the ours side reflects the wt's CURRENT
+//  bytes (uncommitted user edits / a prior absorption), not just the ours
+//  COMMIT's history (the DEEP part: build() reconstructs from commits only and
+//  never reads disk).  Mirrors graf_fold_wt_layer: skip when the bytes match the
+//  ours tip alive view (native's used_next==NO → caller keeps the commit weave)
+//  or overflow the source cap.  Returns { weave, layered }: `layered` true when a
+//  layer was added (the caller then adds WT_SRC to the ours scope/ids).
+function foldWt(oursWeave, bytes, ext) {
+  if (!oursWeave || bytes == null) return { weave: oursWeave, layered: false };
+  if (bytes.length > MAX_SOURCE_SIZE) return { weave: oursWeave, layered: false };
+  //  adjacent-equal skip: wt identical to the ours tip => no synthetic layer.
+  const prev = io.ram(MAX_SOURCE_MARKED_UP);
+  oursWeave.alive(prev);
+  if (bytesEq(prev.data(), bytes)) return { weave: oursWeave, layered: false };
+  return { weave: fold(oursWeave, bytes, ext, WT_SRC), layered: true };
+}
+
 //  ===========================================================================
 //  File-weave RECONSTRUCTION — replay a file's whole commit-DAG closure through
 //  fold/merge to build its attribution weave AS OF a tip.  Was duplicated in
@@ -182,4 +206,6 @@ module.exports = { fold: fold, merge: merge,
   MAX_SOURCE_SIZE: MAX_SOURCE_SIZE, MAX_SOURCE_MARKED_UP: MAX_SOURCE_MARKED_UP,
   //  DIFF-010: file-weave reconstruction (was patch.js buildSideWeave + fileweave.js).
   build: build, makeCtx: makeCtx, weaveId: weaveId, extOf: extOf,
-  treeMap: treeMap, blobBytes: blobBytes, blobShaAt: blobShaAt };
+  treeMap: treeMap, blobBytes: blobBytes, blobShaAt: blobShaAt,
+  //  BE-010: the wt-on-disk edit fold-layer (mirrors native WEAVE_WT_SRC).
+  foldWt: foldWt, WT_SRC: WT_SRC };

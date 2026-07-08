@@ -50,7 +50,32 @@ const hunkrows  = require("../../shared/hunkrows.js");
 //  bridges be↔ctx for the defensive direct-handler shape.
 const patchscope = require("../../shared/patchscope.js");
 const ambient    = require("../../shared/ambient.js");
+//  BE-010: the ONE reg-file wt read (wtread) + the git-blob framing (sha) — the
+//  ours side of a per-file weave is the wt's CURRENT bytes, so PATCH must probe
+//  disk (not just the commit trees) to tell a clean baseline from a dirty edit.
+const wtread     = require("../../shared/wtread.js");
+const sha        = require("../../shared/util/sha.js");
 const join = pathlib.join;
+
+//  BE-010: read a wt regular file's on-disk bytes via the ONE reg-file read
+//  (wtread), or null (absent / not a regular file).  The ours-side wt layer.
+function wtBytesAt(wtRoot, path) {
+  const full = join(wtRoot, path);
+  let ls; try { ls = io.lstat(full); } catch (e) { return null; }
+  if (ls.kind !== "reg") return null;
+  return wtread.readFileBytes(full, ls.size);
+}
+
+//  BE-010: YES iff the wt's on-disk bytes at `path` DIVERGE from the committed
+//  `baseSha` blob (an uncommitted edit).  Reuses the classify.wtEqBase idiom
+//  (frame the wt bytes as a git blob, compare shas) over the ONE reg-file read.
+//  A missing/irregular/unreadable file is NOT dirty (the caller keeps clean arms).
+function wtDirty(wtRoot, path, baseSha) {
+  if (!baseSha) return false;
+  const bytes = wtBytesAt(wtRoot, path);
+  if (bytes == null) return false;
+  return sha.frameSha("blob", bytes) !== baseSha;
+}
 
 //  Weave reconstruction + tree/blob readers now live in shared/weave.js
 //  (build/makeCtx/weaveId/extOf/treeMap/blobBytes) — the ONE copy `why:` shares.
@@ -78,6 +103,12 @@ function classifyAndApply(rc, path, f, o, t) {
 
   if (f && o && t && oEqF && tEqF) { st.noop++; return; }       // unchanged both
   if (f && o && t && oEqF && !tEqF) {                            // only theirs
+    //  BE-010: committed ours == base and only theirs changed — BUT the wt may
+    //  carry uncommitted edits (spec PATCH.mkd §"Weave merge": the ours side is
+    //  the wt's current bytes).  A clean baseline clean-takes theirs; a DIRTY
+    //  file routes into the 3-way weave (wt bytes folded onto ours), so disjoint
+    //  regions merge and a true overlap fences — never a silent clobber.
+    if (wtDirty(rc.wtRoot, path, oSha)) return mergeApply(rc, path, o);
     writeLeaf(rc, path, t, weave.blobBytes(reader, tSha));
     st.takeTheirs++; emit(rc, "applied", path); return;
   }
@@ -93,10 +124,13 @@ function classifyAndApply(rc, path, f, o, t) {
   if (!f && o && t && oEqT) { st.noop++; return; }               // add/add same
   //  Structural delete asymmetry (modify/delete) — content side wins.
   if (f && o && !t) {
-    if (oSha === fSha) {                                         // theirs deleted, ours clean
+    //  BE-010: theirs deleted.  The commit side says ours==base (clean), but the
+    //  content side that wins is the wt's CURRENT bytes — a DIRTY uncommitted
+    //  edit must be kept (modl), never unlinked.  Only a truly-clean wt deletes.
+    if (oSha === fSha && !wtDirty(rc.wtRoot, path, oSha)) {      // theirs deleted, ours clean
       try { deleteLeaf(rc, path); st.deleted++; }
       catch (e) { st.failed++; emit(rc, "failed", path); }
-    } else { st.modDelKept++; emit(rc, "modl", path); }         // theirs del, ours mod → keep ours
+    } else { st.modDelKept++; emit(rc, "modl", path); }         // theirs del, ours mod/dirty → keep ours
     return;
   }
   if (f && !o && t) {
@@ -125,16 +159,31 @@ function mergeApply(rc, path, oLeaf) {
     const ours = weave.build(rc.reader, path, rc.ours, ctx);
     const theirs = weave.build(rc.reader, path, rc.theirs, ctx);
 
+    //  BE-010 (the DEEP part): build() reconstructs the ours weave from the ours
+    //  COMMIT's history ONLY — it never reads disk, so a naive re-route would
+    //  still drop the wt's uncommitted bytes.  Fold the wt's on-disk bytes onto
+    //  the ours side as a final synthetic WT_SRC layer (mirrors native
+    //  graf_fold_wt_layer), and add WT_SRC to the ours scope so the folded edit
+    //  reads as an ours-side contribution when the merge renders.
+    let ourWeave = ours.weave, ourIds = ours.ids;
+    if (ourWeave) {
+      const fl = weave.foldWt(ourWeave, wtBytesAt(rc.wtRoot, path), weave.extOf(path));
+      if (fl.layered) {
+        ourWeave = fl.weave;
+        ourIds = new Set(ourIds); ourIds.add(weave.WT_SRC);
+      }
+    }
+
     //  Empty-side degeneracy (native's emit_alive_bytes short-circuits): if one
     //  side has no weave, emit the other's tip bytes.
-    if (!ours.weave && !theirs.weave) { rc.st.failed++; emit(rc, "failed", path); return; }
-    if (!ours.weave)   merged = aliveOf(rc, theirs.weave);
-    else if (!theirs.weave) merged = aliveOf(rc, ours.weave);
+    if (!ourWeave && !theirs.weave) { rc.st.failed++; emit(rc, "failed", path); return; }
+    if (!ourWeave)   merged = aliveOf(rc, theirs.weave);
+    else if (!theirs.weave) merged = aliveOf(rc, ourWeave);
     else {
       //  Union ours⊕theirs (shared tokens dedup by identity), then render the
       //  two sides' scopes with fences into the fixed markup buffer (lazy mmap).
-      const wm = weave.merge(ours.weave, theirs.weave, "0000000000000000");
-      const oScope = wm.scope(setArr(ours.ids));
+      const wm = weave.merge(ourWeave, theirs.weave, "0000000000000000");
+      const oScope = wm.scope(setArr(ourIds));
       const tScope = wm.scope(setArr(theirs.ids));
       const out = io.ram(weave.MAX_SOURCE_MARKED_UP);
       wm.merged([oScope, tScope], out);
@@ -174,8 +223,13 @@ function writeBytes(rc, path, leaf, bytes) {
   checkout.materialise(rc.wtRoot, path, leaf, bytes);
   rc.wrote.push(path);
 }
+//  BE-010: unlink the wt path, letting a REAL failure SURFACE.  The prior inner
+//  try{}catch{} swallowed every io.unlink error, so the caller's
+//  `catch(e){ st.failed++ }` was DEAD and `st.deleted` counted phantom deletes
+//  (an unlink that never happened).  Now the caller counts `deleted` only on a
+//  true unlink and routes a genuine failure to `failed`.
 function deleteLeaf(rc, path) {
-  try { io.unlink(join(rc.wtRoot, path)); } catch (e) {}
+  io.unlink(join(rc.wtRoot, path));
 }
 
 //  Per-file status row (deferred to the banner, native emits inline rows).
