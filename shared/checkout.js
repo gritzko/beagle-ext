@@ -20,6 +20,9 @@
 
 const pathlib = require("./util/path.js");   // JSQUE-016: path.js -> shared/util/
 const join = pathlib.join, dirname = pathlib.dirname, safeRel = pathlib.safeRel;
+//  BE-030: every worktree fs path is computed THROUGH resolve() (discover.wtpath),
+//  so a checkout write/read/unlink honours the nav CONTEXT + stays confined.
+const wtpath = require("../core/discover.js").wtpath;
 
 function statKind(p) { try { return io.stat(p).kind; } catch (e) { return undefined; } }
 
@@ -68,9 +71,9 @@ function writeFile(wtRoot, rel, bytes) {
   //  BE-011: leaf-local worktree confinement (defense-in-depth) — a `..`/reserved
   //  rel from a direct caller must refuse here, not just in materialise.
   if (!safeRel(rel)) throw "checkout: unsafe path " + rel;
-  const full = join(wtRoot, rel);
+  const full = wtpath(wtRoot, rel);
   const d = dirname(rel);            // "." for a top-level rel → no parent
-  if (d && d !== ".") { try { io.mkdir(join(wtRoot, d)); } catch (e) {} }
+  if (d && d !== ".") { try { io.mkdir(wtpath(wtRoot, d)); } catch (e) {} }
   clearPath(full);                                  // drop a stale dir/file/link
   let fd;
   fd = io.open(full, "c");                          // create/truncate
@@ -89,9 +92,9 @@ function writeFile(wtRoot, rel, bytes) {
 function writeSymlink(wtRoot, rel, target) {
   //  BE-011: leaf-local worktree confinement (defense-in-depth), as writeFile.
   if (!safeRel(rel)) throw "checkout: unsafe path " + rel;
-  const full = join(wtRoot, rel);
+  const full = wtpath(wtRoot, rel);
   const d = dirname(rel);
-  if (d && d !== ".") { try { io.mkdir(join(wtRoot, d)); } catch (e) {} }
+  if (d && d !== ".") { try { io.mkdir(wtpath(wtRoot, d)); } catch (e) {} }
   clearPath(full);                                  // drop a stale dir/file/link
   io.symlink(target, full);
 }
@@ -107,7 +110,7 @@ function materialise(wtRoot, rel, leaf, bytes) {
   }
   writeFile(wtRoot, rel, bytes);
   if (leaf.kind === "x") {
-    try { io.chmod(join(wtRoot, rel), 0o755); } catch (e) {}
+    try { io.chmod(wtpath(wtRoot, rel), 0o755); } catch (e) {}
   }
 }
 
@@ -183,7 +186,7 @@ function apply(keeper, tipSha, wtRoot, opts) {
     //  the link target verbatim (git stores a symlink as a blob of the path).
     const obj = keeper.getObject(leaf.sha);
     const bytes = obj ? obj.bytes : new Uint8Array(0);
-    const full = join(wtRoot, rel);
+    const full = wtpath(wtRoot, rel);
     const existed = !!before[rel];
     if (existed && leafUnchanged(full, leaf, bytes)) return;  // no row
     //  GET-040: NON-force never clobbers a DIRTY tracked file (on-disk differs
@@ -208,7 +211,7 @@ function apply(keeper, tipSha, wtRoot, opts) {
     //  the OLD tree, gone from the new); an UNTRACKED path (in neither) is LEFT.
     //  `get!` (force) is the sole clean-reset that may remove untracked/dirty.
     if (!force && !oldMap[rel]) continue;
-    try { io.unlink(join(wtRoot, rel)); rows.push({ verb: "del", path: rel }); }
+    try { io.unlink(wtpath(wtRoot, rel)); rows.push({ verb: "del", path: rel }); }
     catch (e) {}
   }
 

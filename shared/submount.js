@@ -38,6 +38,8 @@ const ambient  = require("./ambient.js");   // GET-040: the global force flag
 const pathlib  = require("./util/path.js");
 const sha      = require("./util/sha.js");
 const join = pathlib.join, basename = pathlib.basename, safeRel = pathlib.safeRel;
+//  BE-030: worktree fs paths go THROUGH resolve() (context-confined wtpath).
+const wtpath = require("../core/discover.js").wtpath;
 const isFullSha = sha.isFullSha;
 
 function exists(p) { try { io.stat(p); return true; } catch (e) { return false; } }
@@ -220,8 +222,8 @@ function mount(opts) {
           " (no `.gitmodules` url)";
 
   const shard = join(beDir, title);
-  const subWt = join(wt, subpath);
-  const anchorPath = join(subWt, ".be");
+  const subWt = wtpath(wt, subpath);
+  const anchorPath = wtpath(subWt, ".be");
   const branch = syntheticBranch(title, opts.parentTitle, opts.parentBranch);
 
   //  GET-037: ATOMICITY — a sub-mount that fails part-way (an unreachable child,

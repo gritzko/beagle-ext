@@ -52,7 +52,10 @@ const ambient = require("../../shared/ambient.js");
 //  BE-011: worktree-open confinement — wtJoin THROWS NAVESCAPE on a `..` climb;
 //  the local join dup (was defined below) is retired for pathlib.join.
 const pathlib = require("../../shared/util/path.js");
-const join = pathlib.join, wtJoin = pathlib.wtJoin;
+//  BE-030: worktree fs paths go THROUGH resolve() — wtpath is the
+//  resolve-backed, context-confined replacement for the old wtJoin.
+const wtpath = require("../../core/discover.js").wtpath;
+const join = pathlib.join;
 
 //  JSQUE-010: the `put:` banner + per-row lines now render through the emit sink
 //  (ctx.out, JSQUE-005), not a local render.js call — the loop does ONE flush.
@@ -142,13 +145,13 @@ function stageArg(eng, repo, uri) {
   let reframed = false, origRaw = raw;
   if (!isDir) {
     let kind;
-    try { kind = io.lstat(wtJoin(repo.wt, raw)).kind; } catch (e) {}
+    try { kind = io.lstat(wtpath(repo.wt, raw)).kind; } catch (e) {}
     if (kind === "dir") { raw = raw + "/"; isDir = true; reframed = true; }
   }
   if (isDir) {
     if (raw !== "") {
       let kind;
-      try { kind = io.lstat(wtJoin(repo.wt, raw.replace(/\/$/, ""))).kind; } catch (e) {}  // BE-011
+      try { kind = io.lstat(wtpath(repo.wt, raw.replace(/\/$/, ""))).kind; } catch (e) {}  // BE-011
       if (kind !== "dir") { pushSkip(raw, "does not exist"); return { ops: ops, items: items }; }
     }
     const ex = eng.expandDir(raw);
@@ -177,7 +180,7 @@ function commitOps(repo, ops, floorTs) {
   if (stageOps.length === 0) {
     for (const op of ops)
       if (op.path === null && op.stampTs != null)
-        trySetMtime(wtJoin(repo.wt, op.restamp), op.stampTs);   // BE-011
+        trySetMtime(wtpath(repo.wt, op.restamp), op.stampTs);   // BE-011
     return 0;
   }
   const rows = [];
@@ -187,11 +190,11 @@ function commitOps(repo, ops, floorTs) {
   let ri = 0;
   for (const op of ops) {
     if (op.path === null) {
-      if (op.stampTs != null) trySetMtime(wtJoin(repo.wt, op.restamp), op.stampTs);  // BE-011
+      if (op.stampTs != null) trySetMtime(wtpath(repo.wt, op.restamp), op.stampTs);  // BE-011
       continue;
     }
     const ts = assigned[ri++];
-    if (op.restamp) trySetMtime(wtJoin(repo.wt, op.restamp), ts);   // BE-011
+    if (op.restamp) trySetMtime(wtpath(repo.wt, op.restamp), ts);   // BE-011
   }
   return stageOps.length;
 }
@@ -492,7 +495,7 @@ function subMountPrefix(repo, rel) {
 //  full top-relative path under the `put:` banner; tallies feed PUTNONE.
 function stageInSub(repo, pfx, uri, ctx) {
   const out = putOut(ctx);
-  const subRepo = be.find(join(repo.wt, pfx));
+  const subRepo = be.find(wtpath(repo.wt, pfx));
   const subK = store.open(subRepo.storePath, subRepo.project);
   const u = new URI(uri);
   let subUri = normRel(u.path).slice(pfx.length + 1);
@@ -574,7 +577,7 @@ function put() {
   if (_be && _be.authority && repo && repo.wt)
     argv = SPELL.bindRest(argv, function (p) {
       if (!p) return true;
-      try { return io.lstat(wtJoin(repo.wt, p)).kind === "dir"; } catch (e) { return true; }  // BE-011
+      try { return io.lstat(wtpath(repo.wt, p)).kind === "dir"; } catch (e) { return true; }  // BE-011
     });
   ctx.args = argv;
   return putRun(ctx, argv, argv.length ? argv[0] : "");

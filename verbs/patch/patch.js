@@ -34,6 +34,9 @@ const checkout  = require("../../shared/checkout.js");
 const conflict  = require("../../shared/conflict.js");
 const ulog      = require("../../shared/ulog.js");
 const pathlib   = require("../../shared/util/path.js");
+//  BE-030: worktree fs paths go THROUGH resolve() — wtpath is the
+//  resolve-backed, context-confined replacement for the old wtJoin.
+const wtpath = require("../../core/discover.js").wtpath;
 //  DIFF-010: the shared grow-on-"out full" WEAVE fold/merge retry (mirrors
 //  loop.js:128-142) — a large per-file weave no longer throws "out full".
 const weave     = require("../../shared/weave.js");
@@ -55,12 +58,12 @@ const ambient    = require("../../shared/ambient.js");
 //  disk (not just the commit trees) to tell a clean baseline from a dirty edit.
 const wtread     = require("../../shared/wtread.js");
 const sha        = require("../../shared/util/sha.js");
-const join = pathlib.join, wtJoin = pathlib.wtJoin;   // BE-011: wtJoin confines wt-opens
+const join = pathlib.join;   // BE-011: wtJoin confines wt-opens
 
 //  BE-010: read a wt regular file's on-disk bytes via the ONE reg-file read
 //  (wtread), or null (absent / not a regular file).  The ours-side wt layer.
 function wtBytesAt(wtRoot, path) {
-  const full = wtJoin(wtRoot, path);               // BE-011
+  const full = wtpath(wtRoot, path);               // BE-011
   let ls; try { ls = io.lstat(full); } catch (e) { return null; }
   if (ls.kind !== "reg") return null;
   return wtread.readFileBytes(full, ls.size);
@@ -229,7 +232,7 @@ function writeBytes(rc, path, leaf, bytes) {
 //  (an unlink that never happened).  Now the caller counts `deleted` only on a
 //  true unlink and routes a genuine failure to `failed`.
 function deleteLeaf(rc, path) {
-  io.unlink(wtJoin(rc.wtRoot, path));              // BE-011
+  io.unlink(wtpath(rc.wtRoot, path));              // BE-011
 }
 
 //  Per-file status row (deferred to the banner, native emits inline rows).
@@ -349,7 +352,7 @@ function patchRun(ctx) {
     let stamp = ulog.ronStepMs(ts, -2);              // pat (clean apply) = base
     if (statusOf[p] === "merged") stamp = ulog.ronStepMs(ts, -1);  // mrg
     else if (statusOf[p] === "cnf") stamp = ts;       // cnf
-    try { io.setMtime(wtJoin(info.wt, p), stamp); } catch (e) {}   // BE-011
+    try { io.setMtime(wtpath(info.wt, p), stamp); } catch (e) {}   // BE-011
   }
 
   emitBanner(ctx, sc, rc.rows, ts);

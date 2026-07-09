@@ -8,12 +8,14 @@
 "use strict";
 
 const safeRel = require("./util/path.js").safeRel;   // BE-026: source gate
+//  BE-030: worktree fs paths go THROUGH resolve() (context-confined wtpath).
+const wtpath = require("../core/discover.js").wtpath;
 
 //  parse(wtRoot) → [{ name, path, url }] in DECLARATION order, one entry per
 //  `[submodule "<name>"]` block that declared a `path`; deduped by `path`
 //  keeping the FIRST.  Absent/unreadable `<wtRoot>/.gitmodules` → [].
 function parse(wtRoot) {
-  const p = (wtRoot.endsWith("/") ? wtRoot : wtRoot + "/") + ".gitmodules";
+  const p = wtpath(wtRoot, ".gitmodules");
   let text;
   try { text = utf8.Decode(io.mmap(p, "r").data()); } catch (e) { return []; }
   const out = [], seen = {};

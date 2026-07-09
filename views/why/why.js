@@ -14,6 +14,8 @@ const weave     = require("../../shared/weave.js");
 const dag       = require("../../shared/dag.js");
 const navlib    = require("../../shared/nav.js");
 const pathlib   = require("../../shared/util/path.js");
+//  BE-030: worktree fs paths go THROUGH resolve() (context-confined wtpath).
+const wtpath = require("../../core/discover.js").wtpath;
 const ambient   = require("../../shared/ambient.js");
 const isFullSha = shalib.isFullSha;
 
@@ -233,7 +235,7 @@ function whyOne(arg) {
     //  BE-011: wtJoin confines spec.path to the wt root; an untrusted `..` climb
     //  throws NAVESCAPE — refuse (never fold a silent outside read into blame).
     let full;
-    try { full = pathlib.wtJoin(repo.wt, spec.path); }
+    try { full = wtpath(repo.wt, spec.path); }
     catch (e) { io.log("why: " + e + "\n"); return; }
     const wtBytes = readWtFile(full);
     if (wtBytes !== undefined && wtBytes.length <= weave.MAX_SOURCE_SIZE)

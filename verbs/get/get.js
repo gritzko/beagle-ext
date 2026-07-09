@@ -31,6 +31,9 @@ const checkout = require("../../shared/checkout.js");
 const relate   = require("../../shared/relate.js");
 const ingest   = require("../../shared/ingest.js");
 const pathlib  = require("../../shared/util/path.js");
+//  BE-030: worktree fs paths go THROUGH resolve() — wtpath is the
+//  resolve-backed, context-confined replacement for the old wtJoin.
+const wtpath = require("../../core/discover.js").wtpath;
 const ulog     = require("../../shared/ulog.js");
 const sha      = require("../../shared/util/sha.js");
 //  JAB-003: get emits a TRUE hunk (accumulated across dispatches, flushed once).
@@ -43,7 +46,7 @@ const uriarg   = require("../../shared/uri.js");       // URI-015: scp remote �
 const join = pathlib.join, dirname = pathlib.dirname;
 //  BE-011: wtJoin confines a wt-open to the tree (NAVESCAPE on a `..` climb);
 //  merge/split compose in-tree paths over segments (no raw `a + "/" + b`).
-const wtJoin = pathlib.wtJoin, merge = pathlib.merge, split = pathlib.split;
+const merge = pathlib.merge, split = pathlib.split;
 const isFullSha = sha.isFullSha;
 
 const writeWtlog = ulog.write;
@@ -325,14 +328,14 @@ function dispatchRow(row, ctx) {
   if (ctx._get && row && row._leaf) return leaf(row, ctx);
   if (ctx._get && row && row._dir !== undefined) return reconcileDir(row, ctx);
   if (ctx._get) return handleReconcileOrLeaf(uri, ctx);   // a fan-out child (root)
-  //  URI-011/GET-041: a `//name` nav authority names a LOCAL worktree SOURCE.
-  //  authorityRepo scopes it in place (right for read verbs), but get must CLONE
-  //  FROM it into io.cwd() — so `jab get //journal/be` checks the tree out into
-  //  cwd exactly like `jab get file:<wt>`.  Only when the target dir differs from
-  //  the source wt (else cwd IS the source: an in-place re-get of its tree).
-  const B = globalThis.be;
-  if (B && B.authority && B.repo && B.repo.wt && io.cwd() !== B.repo.wt)
-    return handleSeed("file:" + B.repo.wt, ctx);
+  //  BE-030: a `//name` nav authority is the CONTEXT (be.authority), NOT a clone
+  //  SOURCE.  A bare `:get` under it refreshes the CONTEXT tree — inRepoSeed on
+  //  be.repo (info.bePath) — never handleSeed into raw io.cwd(): with cwd in a
+  //  SUBMODULE, that wrote the parent's tip into the SUB's `.be` and checked the
+  //  parent out over it.  An EXPLICIT remote/clone source still routes to
+  //  handleSeed (io.cwd destination).  Retiring the pager pre-merge so a verb sees
+  //  `(context, RAW args)` — distinguishing an EXPLICIT `//other` clone-source from
+  //  the INJECTED context — is a SEPARATE follow-up.
   if (isRemoteSeed(uri)) return handleSeed(uri, ctx);     // remote/clone/cached
   return inRepoSeed(uri, ctx);                            // D1-D4 in-repo forms
 }
@@ -630,9 +633,10 @@ function dirtyOverlapCheck(k, newTree, oldTree, wt, fresh) {
   const conflicts = [];
   k.readTreeRecursive(newTree, function (l) {
     if (oldPaths[l.path] !== undefined) return;     // had a baseline → mergeable
-    //  BE-011: an UNTRUSTED remote-tree leaf; leave the checkout.materialise
-    //  safeRel guard ("unsafe path", JS-065) to refuse a `..` climb, not wtJoin.
-    const full = join(wt, l.path);
+    //  BE-030/JS-065: an UNTRUSTED remote-tree leaf — skip a `..`/reserved name
+    //  (the write leaf refuses it with "unsafe path"), then read via resolve.
+    if (!pathlib.safeRel(l.path)) return;
+    const full = wtpath(wt, l.path);
     if (!exists(full)) return;                       // no on-disk overlay
     const obj = k.getObject(l.sha);
     const bytes = obj ? obj.bytes : new Uint8Array(0);
@@ -730,9 +734,11 @@ function leaf(row, ctx) {
   const rel = row.rel || "";
   const newSha = row.newSha || "";       // "" = delete leaf (removed path)
   const oldSha = row.oldSha || "";
-  //  BE-011: `rel` may be an UNTRUSTED remote-tree leaf; the checkout.materialise
-  //  safeRel guard ("unsafe path", JS-065) is the confinement — keep plain join.
-  const full = join(g.wt, rel);
+  //  BE-030/JS-065: `rel` is an UNTRUSTED remote-tree leaf — refuse a `..`/reserved
+  //  name with the SAME "unsafe path" guard as checkout.materialise, BEFORE any fs
+  //  touch (read OR unlink); then the abs path is resolve-backed like every access.
+  if (!pathlib.safeRel(rel)) throw "checkout: unsafe path " + rel;
+  const full = wtpath(g.wt, rel);
   const kind = g.kinds[rel] || "f";
 
   if (!newSha) {                                // delete LEAF (removed path)
@@ -815,13 +821,13 @@ function sweepOldTree(g, rel, treeSha, out) {
     //  BE-011: compose the sub-leaf rel over SEGMENTS (merge), open via wtJoin
     //  (NAVESCAPE on a climb) — no raw `rel + "/" + l.path` string math.
     const p = merge(split(rel).concat(split(l.path)));
-    try { io.unlink(wtJoin(g.wt, p)); out.row(p, "del", g.ts); g.dels++; } catch (e) {}
+    try { io.unlink(wtpath(g.wt, p)); out.row(p, "del", g.ts); g.dels++; } catch (e) {}
     for (let i = p.indexOf("/"); i >= 0; i = p.indexOf("/", i + 1))
       dirs[p.slice(0, i)] = 1;
   });
   const down = Object.keys(dirs).sort().reverse();     // children before parents
   for (const d of down)
-    try { io.rmdir(wtJoin(g.wt, d)); } catch (e) {}     // BE-011; non-empty → keep
+    try { io.rmdir(wtpath(g.wt, d)); } catch (e) {}     // BE-011; non-empty → keep
 }
 
 //  SUBS-047: remember a deleted path's parent dir so the del-sweep terminal can
@@ -882,7 +888,7 @@ function recurseSubMounts(g, rel, m, out, depth) {
   m.k.readTreeRecursive(tree, function (l) {
     if (l.kind === "s") links.push({ path: l.path, pin: l.sha });
   });
-  const subWt = wtJoin(g.wt, rel);               // BE-011; the mounted sub's wt on disk
+  const subWt = wtpath(g.wt, rel);               // BE-011; the mounted sub's wt on disk
   for (const l of links) {
     const sp = rel + "/" + l.path;
     //  GET-037: gate the grandchild on the sub's own `.gitmodules` (SUBS-043); an
@@ -975,7 +981,7 @@ function sweepDelDirs(ctx) {
   g.delDirs = null;
   for (let d of dirs) {
     for (;;) {
-      try { io.rmdir(wtJoin(g.wt, d)); } catch (e) { break; }   // BE-011; non-empty → stop
+      try { io.rmdir(wtpath(g.wt, d)); } catch (e) { break; }   // BE-011; non-empty → stop
       const cut = d.lastIndexOf("/");
       if (cut <= 0) break;
       d = d.slice(0, cut);

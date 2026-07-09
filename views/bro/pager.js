@@ -16,6 +16,8 @@ const bro = require("view/bro.js");
 const theme = require("view/theme.js");
 //  JAB-003: repo/worktree discovery (io.cwd walk-up) for the session context.
 const discover = require("core/discover.js");
+//  BE-030: worktree fs paths go THROUGH resolve() (context-confined wtpath).
+const wtpath = discover.wtpath;
 //  BE-027: the ONE in-tree path calculator — resolveInTree collapses `.`/`..` and
 //  THROWS "NAVESCAPE" on a climb above the tree root (no hand-rolled `..` math).
 const path = require("shared/util/path.js");
@@ -611,7 +613,7 @@ Pager.prototype._fsCompletions = function (stem) {
   //  BE-027: CONFINE the readdir dir to the wt root — resolveInTree collapses the
   //  stem's `..` under the view path and THROWS on a climb above the wt, so a
   //  traversal stem opens NOTHING outside the tree (NAVESCAPE → no completions).
-  let dir; try { dir = path.wtJoin(root, path.resolveInTree(vp, sub)); }
+  let dir; try { dir = wtpath(root, path.resolveInTree(vp, sub)); }
   catch (e) { return []; }
   let ents; try { ents = io.readdir(dir); } catch (e) { return []; }
   const out = [];
@@ -691,12 +693,17 @@ Pager.prototype._verbUri = function () {
 //  every OTHER token is REST — the verb's natural slot — handed through RAW.  A
 //  non-URI first token keeps the context as arg 0.  Returns { verb, arg0, rest }.
 //  URI-011: compose the address-bar spell into { verb, arg0, rest } via the
-//  SHARED composer (shared/spell.js).  Context = the tracked view URI, else the
-//  cwd (`//WT/path`).  Kept as a method so the driver test drives it directly.
+//  SHARED composer (shared/spell.js).  Kept as a method so the driver test drives
+//  it directly.  [Nav]: context changes ONLY by navigation (a click / a :spell) —
+//  read the TRACKED nav URI (view.uri, set by _runSpell/_driveApply), else the cwd
+//  context (navCwd, //name rel SRC_ROOT).  NEVER _verbUri().uri: that scavenges
+//  hunks[0]'s banner, so a bare :status under a fresh `jab diff` would collapse the
+//  context onto row 0's `file#L` instead of staying //WT-wide.  The verb still
+//  falls back off the view (a diff view keeps `diff` for a slot-edit).
 Pager.prototype._composeCall = function (s) {
-  const cur = this._verbUri();
-  const ctxUri = cur.uri || (typeof be !== "undefined" && be.navCwd ? be.navCwd() : "");
-  return SPELL.compose(ctxUri, cur.verb, s, this.isVerb);
+  const v = this.view;
+  const ctxUri = (v && v.uri) || (typeof be !== "undefined" && be.navCwd ? be.navCwd() : "");
+  return SPELL.compose(ctxUri, this._verbUri().verb, s, this.isVerb);
 };
 Pager.prototype._buildSpell = function (c) { return SPELL.buildSpell(c); };
 

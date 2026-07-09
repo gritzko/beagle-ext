@@ -26,7 +26,8 @@
 const wtlog    = require("../../shared/wtlog.js");
 const store    = require("../../shared/store.js");
 const classify = require("../../shared/classify.js");
-const wtJoin   = require("../../shared/util/path.js").wtJoin;   // BE-011: wt confinement
+//  BE-030: worktree fs paths go THROUGH resolve() (context-confined wtpath).
+const wtpath   = require("../../core/discover.js").wtpath;
 const ambient  = require("../../shared/ambient.js");   // JAB-004: ctx→be bridge
 const match    = require("./match.js");
 const ext2lang = require("./ext.js");
@@ -182,7 +183,7 @@ function walkLive(repo, log, k, want, visit) {
     const rel = r.path;
     if (seen[rel]) continue; seen[rel] = 1;
     if (!extGate(rel, want)) continue;
-    const full = wtJoin(repo.wt, rel);   // BE-011: classifier path (trusted); confined
+    const full = wtpath(repo.wt, rel);   // BE-011: classifier path (trusted); confined
     const bytes = readFileBytes(full);
     if (bytes) visit(rel, bytes);
   }

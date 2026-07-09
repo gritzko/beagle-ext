@@ -40,6 +40,8 @@
 "use strict";
 
 const pathlib = require("./util/path.js");   // JSQUE-016: util libs -> shared/util/
+//  BE-030: worktree fs paths go THROUGH resolve() (context-confined wtpath).
+const wtpath = require("../core/discover.js").wtpath;
 const shalib = require("./util/sha.js");
 const ulog = require("./ulog.js");           // DIS-057: ronStepMs (ms-correct band)
 const join = pathlib.join;
@@ -71,7 +73,7 @@ function wtScan(wtRoot, ignore) {
     if (nm[nm.length - 1] !== "/") continue;          // dirs only
     const dirRel = nm.slice(0, -1);
     if (ignore.match(dirRel, true)) continue;
-    const full = join(wtRoot, dirRel);
+    const full = wtpath(wtRoot, dirRel);
     if (statKind(join(full, ".git")) !== undefined) { nestedPrefixes.push(dirRel + "/"); continue; }
     const beKind = statKind(join(full, ".be"));
     if (beKind === "reg") nestedPrefixes.push(dirRel + "/");
@@ -86,7 +88,7 @@ function wtScan(wtRoot, ignore) {
     const rel = nm;
     if (ignore.match(rel, false)) continue;
     if (underNested(rel)) continue;
-    const full = join(wtRoot, rel);
+    const full = wtpath(wtRoot, rel);
     //  io.lstat does NOT follow symlinks (FILELStat), so a dangling link
     //  stats fine — and it carries mtime (ron60 BigInt, JS-042) for the
     //  date column directly, no subprocess.
@@ -108,7 +110,7 @@ function statKind(p) { try { return io.stat(p).kind; } catch (e) { return undefi
 //  Mirrors CLASS.c::CLASSWtEqBase (symlink → hash of the link target).
 function wtEqBase(wtRoot, rel, baseSha) {
   if (!isFullSha(baseSha)) return false;
-  const full = join(wtRoot, rel);
+  const full = wtpath(wtRoot, rel);
   let st;
   try { st = io.lstat(full); } catch (e) { return false; }
   let content;
@@ -462,7 +464,7 @@ function classifyDir(be, wtlogReader, keeperReader, scopePfx) {
   //  BE-028: defensive floor — resolveInTree THROWS NAVESCAPE on any `..` climb
   //  above the wt root, so a lexical scopePfx can never readdir outside the wt.
   const scopeRel = pathlib.resolveInTree("", scopePfx || "");
-  const scopeAbs = scopeRel ? join(wtRoot, scopeRel) : wtRoot;
+  const scopeAbs = scopeRel ? wtpath(wtRoot, scopeRel) : wtRoot;
   const dirSet = {};            // immediate REAL-wt-dir name → 1 (recursable)
   const baseDir = {};           // names the BASELINE records as a dir/mount
 

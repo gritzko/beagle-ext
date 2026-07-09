@@ -17,6 +17,8 @@
 "use strict";
 
 const store   = require("../../shared/store.js");
+//  BE-030: worktree fs paths go THROUGH resolve() (context-confined wtpath).
+const wtpath = require("../../core/discover.js").wtpath;
 const wtlog   = require("../../shared/wtlog.js");
 const shalib  = require("../../shared/util/sha.js");
 const recurse = require("../../core/recurse.js");
@@ -274,8 +276,8 @@ function diffWtTree(k, baseTreeSha, repo, color, ctx, prefix, out) {
     const isLink = F.links[p] !== undefined;
     const fsha = isLink ? F.links[p] : F.files[p];
     if (fsha === undefined) continue;          // no base side → wholly-new, skip
-    const wt = isLink ? readWtLink(pathlib.wtJoin(repo.wt, p))
-                      : readWtFile(pathlib.wtJoin(repo.wt, p));   // BE-011: classifier path, confined
+    const wt = isLink ? readWtLink(wtpath(repo.wt, p))
+                      : readWtFile(wtpath(repo.wt, p));   // BE-011: classifier path, confined
     if (wt === undefined) {
       //  BASE_ONLY: deleted/missing in wt → base blob vs empty.
       diffFile(p, blobBytes(k, fsha), undefined, false, "", color, out);
@@ -299,7 +301,7 @@ function diffWtTree(k, baseTreeSha, repo, color, ctx, prefix, out) {
       else if ((sp + "/").indexOf(prefix) !== 0) continue;   // out of dir scope
     }
     if (!recurse.isMount(repo.wt, sp)) continue;
-    let subRepo; try { subRepo = be.find(pathlib.join(repo.wt, sp)); } catch (e) { continue; }
+    let subRepo; try { subRepo = be.find(wtpath(repo.wt, sp)); } catch (e) { continue; }
     const subK = store.open(subRepo.storePath, subRepo.project);
     const subBase = (wtlog.open(subRepo).baselineTip() || {}).sha || "";
     const subTree = subBase ? subK.commitTree(subBase) : null;
@@ -536,7 +538,7 @@ function diffOne(arg) {
     const baseTree = baseSha ? k.commitTree(baseSha) : null;
     const rel = spec.path.replace(/\/+$/, "");
     let dir = spec.path !== "" && spec.path !== rel;        // trailing slash
-    if (spec.path && !dir) { try { dir = io.lstat(pathlib.wtJoin(repo.wt, rel)).kind === "dir"; } catch (e) {} }
+    if (spec.path && !dir) { try { dir = io.lstat(wtpath(repo.wt, rel)).kind === "dir"; } catch (e) {} }
     if (spec.path && dir) {
       //  DIFF-012: a DIR path scopes the wt diff to that subtree (the classifier
       //  dirty set under `<dir>/`), not a single-file read.
@@ -558,7 +560,7 @@ function diffOne(arg) {
       //  BE-011: wtJoin confines the untrusted spec.path; a `..` climb above the
       //  wt root throws NAVESCAPE — refuse (never a silent outside read).
       let wtAbs;
-      try { wtAbs = pathlib.wtJoin(repo.wt, spec.path); }
+      try { wtAbs = wtpath(repo.wt, spec.path); }
       catch (e) { io.log("diff: " + e + "\n"); return; }
       let onLink = false;
       try { onLink = io.lstat(wtAbs).kind === "lnk"; } catch (e) {}
@@ -614,7 +616,7 @@ function subMountSplit(k, parentTreeSha, repo, path, ctx) {
   //  genuinely added file.  Only a LIVE mount resolves to the sub shard.
   if (!recurse.isMount(repo.wt, best)) return null;
   let subRepo;
-  try { subRepo = be.find(pathlib.join(repo.wt, best)); } catch (e) { return null; }
+  try { subRepo = be.find(wtpath(repo.wt, best)); } catch (e) { return null; }
   let subK;
   try { subK = store.open(subRepo.storePath, subRepo.project); }
   catch (e) { return null; }

@@ -25,6 +25,8 @@
 "use strict";
 
 const path = require("../shared/util/path.js");   // BE-026: wtJoin confinement
+//  BE-030: worktree fs paths go THROUGH resolve() (context-confined wtpath).
+const wtpath = require("./discover.js").wtpath;
 
 //  YES iff `<wt>/<subpath>/.be` is a regular file (a live mount).
 //  Mirrors SNIFFSubIsMount: only a mounted sub is recursed.
@@ -35,7 +37,7 @@ function isMount(wtRoot, subpath) {
   //  BE-026: confine the (untrusted `.gitmodules`) subpath — a `..`/abs escape
   //  throws NAVESCAPE, refused as no-mount (never lstat/stat OUTSIDE the wt).
   let base;
-  try { base = path.wtJoin(wtRoot, subpath); } catch (e) { return false; }
+  try { base = wtpath(wtRoot, subpath); } catch (e) { return false; }
   try { if (io.lstat(base).kind === "lnk") return false; } catch (e) {}
   const p = base + "/.be";
   try { return io.stat(p).kind === "reg"; } catch (e) { return false; }
@@ -73,7 +75,7 @@ function walk(repo, prefix, visit, opts) {
     if (!isMount(repo.wt, subPath)) continue;
     //  BE-026: confine before be.find (belt-and-suspenders past the isMount gate).
     let subWt;
-    try { subWt = path.wtJoin(repo.wt, subPath); } catch (e) { continue; }
+    try { subWt = wtpath(repo.wt, subPath); } catch (e) { continue; }
     let subRepo;
     try { subRepo = be.find(subWt); } catch (e) { continue; }
     const sub = gitlinks ? gitlinks[subPath] : { path: subPath };
@@ -98,7 +100,7 @@ function resolveRepoForPath(repo, relPath) {
     const sub = segs.slice(i, hit).join("/");
     //  BE-026: confine the descended segment before be.find (NAVESCAPE → stop).
     let subWt;
-    try { subWt = path.wtJoin(repo.wt, sub); } catch (e) { break; }
+    try { subWt = wtpath(repo.wt, sub); } catch (e) { break; }
     let subRepo;
     try { subRepo = be.find(subWt); } catch (e) { break; }
     repo = subRepo; prefix = joinPrefix(prefix, sub); i = hit;

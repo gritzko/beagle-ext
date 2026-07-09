@@ -32,6 +32,8 @@ const shalib = require("./util/sha.js");
 const classify = require("./classify.js");
 const ignorelib = require("./util/ignore.js");
 const join = pathlib.join;
+//  BE-030: worktree fs paths go THROUGH resolve() (context-confined wtpath).
+const wtpath = require("../core/discover.js").wtpath;
 const basename = pathlib.basename;
 const isFullSha = shalib.isFullSha;
 const frameSha = shalib.frameSha;
@@ -60,7 +62,7 @@ const { readFileBytes } = require("./wtread.js");   // CODE-020: shared wt read
 //  Git-blob sha of the on-disk path at `rel` (symlink → hash of its target,
 //  CLASS.c::CLASSWtEqBase).  undefined when unreadable / not a leaf kind.
 function diskSha(wtRoot, rel) {
-  const full = join(wtRoot, rel);
+  const full = wtpath(wtRoot, rel);
   let st;
   try { st = io.lstat(full); } catch (e) { return undefined; }
   let content;
@@ -225,7 +227,7 @@ function prep(be, wtlogReader, storeReader) {
         //  "exists but is not stageable"; truly absent reads "does not
         //  exist" (DIS-034).
         let onDisk = false;
-        try { io.lstat(join(wtRoot, raw)); onDisk = true; } catch (e) {}
+        try { io.lstat(wtpath(wtRoot, raw)); onDisk = true; } catch (e) {}
         return { stage: false,
                  reason: onDisk ? "exists but is not stageable" : "does not exist" };
       }
@@ -291,8 +293,8 @@ function prep(be, wtlogReader, storeReader) {
         if (!sb) throw PUTDSTBAD;
         dst = dstInRaw + sb;
       }
-      const srcFull = join(wtRoot, srcRaw);
-      const dstFull = join(wtRoot, dst);
+      const srcFull = wtpath(wtRoot, srcRaw);
+      const dstFull = wtpath(wtRoot, dst);
       const srcHere = statExists(srcFull);
       const dstHere = statExists(dstFull);
 
@@ -306,7 +308,7 @@ function prep(be, wtlogReader, storeReader) {
       //  Dest parent dir must exist (no mkdir -p).
       const dstDir = pathlib.dirname(dst);
       if (dstDir && dstDir !== "." && dstDir !== "/") {
-        const ddFull = join(wtRoot, dstDir);
+        const ddFull = wtpath(wtRoot, dstDir);
         let dst_st;
         try { dst_st = io.lstat(ddFull); } catch (e) { throw PUTNODIR; }
         if (dst_st.kind !== "dir") throw PUTNODIR;

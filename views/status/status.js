@@ -33,6 +33,8 @@ const render   = require("../../view/render.js");
 const theme    = require("../../view/theme.js");
 const navlib   = require("../../shared/nav.js");        // URI-011: full-URI nav helper
 const join     = require("../../shared/util/path.js").join;   // DIS-060: scope path
+//  BE-030: worktree fs paths go THROUGH resolve() (context-confined wtpath).
+const wtpath = require("../../core/discover.js").wtpath;
 //  JAB-004: render.js's dateCol/verbCol/writeStdout/shQuote are no longer
 //  used here — the emit sink (core/emit.js) owns all column formatting at the
 //  flush edge, and the fork machinery (shQuote) is gone.
@@ -104,7 +106,7 @@ function status() {
     //  WHY-001: a status path is wt-root-relative — a leading `/` is the wt ROOT
     //  (be.find('/') finds no .be anchor), not the FS root; `/` alone → whole wt.
     const rel = scope.replace(/^\/+/, "");
-    if (rel) return statusOne({ uri: join(topWt, rel) }, null);
+    if (rel) return statusOne({ uri: wtpath(topWt, rel) }, null);
   }
   return statusOne(null, null);
 }
@@ -421,7 +423,7 @@ function computeDivergence(k, log, cur) {
 //  YES iff `<wt>/<subpath>/.be` is a regular file (a live mount).
 //  Mirrors SNIFFSubIsMount: only a mounted sub is classified/recursed.
 function isMount(wtRoot, subpath) {
-  const p = (wtRoot.endsWith("/") ? wtRoot : wtRoot + "/") + subpath + "/.be";
+  const p = wtpath(wtRoot, subpath + "/.be");
   try { return io.stat(p).kind === "reg"; } catch (e) { return false; }
 }
 

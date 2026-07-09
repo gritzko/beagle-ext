@@ -55,7 +55,10 @@ const SNIFFFAIL = "SNIFFFAIL";
 //  BE-011: worktree-open confinement — wtJoin THROWS NAVESCAPE on any `..`
 //  climb above the wt root; the local join dup is retired for pathlib.join.
 const pathlib = require("../../shared/util/path.js");
-const join = pathlib.join, wtJoin = pathlib.wtJoin;
+//  BE-030: worktree fs paths go THROUGH resolve() — wtpath is the
+//  resolve-backed, context-confined replacement for the old wtJoin.
+const wtpath = require("../../core/discover.js").wtpath;
+const join = pathlib.join;
 function statExists(p) { try { io.lstat(p); return true; } catch (e) { return false; } }
 function statKind(p) { try { return io.lstat(p).kind; } catch (e) { return undefined; } }
 
@@ -83,7 +86,7 @@ function bareSweepSubs(repo, prefix, items) {
       subK.readTreeRecursive(eng.baseTreeSha, function (leaf) {
         if (leaf.kind === "s") return;
         if (stage.isMeta(leaf.path)) return;
-        if (statExists(wtJoin(subRepo.wt, leaf.path))) return;   // BE-011
+        if (statExists(wtpath(subRepo.wt, leaf.path))) return;   // BE-011
         rows.push({ uri: leaf.path });
         items.push({ type: "row", path: subPrefix + "/" + leaf.path });
       });
@@ -119,7 +122,7 @@ function delStage(repo, k, pathRaws, force) {
       k.readTreeRecursive(eng.baseTreeSha, function (leaf) {
         if (leaf.kind === "s") return;             // gitlink subtree, skip
         if (stage.isMeta(leaf.path)) return;
-        if (statExists(wtJoin(repo.wt, leaf.path))) return;   // BE-011
+        if (statExists(wtpath(repo.wt, leaf.path))) return;   // BE-011
         rows.push({ uri: leaf.path });
         items.push({ type: "row", path: leaf.path });
       });
@@ -145,7 +148,7 @@ function delStage(repo, k, pathRaws, force) {
     //  BE-011: wtJoin confines the UNTRUSTED CLI arg — a `..` climb throws
     //  NAVESCAPE here (before any stat/unlink), refusing the out-of-tree open.
     let isDir = raw === "" || raw[raw.length - 1] === "/";
-    if (!isDir && statKind(wtJoin(repo.wt, raw)) === "dir") isDir = true;
+    if (!isDir && statKind(wtpath(repo.wt, raw)) === "dir") isDir = true;
     if (isDir) {
       const dirRaw = raw === "" ? "" : (raw[raw.length - 1] === "/" ? raw : raw + "/");
       const r = delDir(repo, eng, wtl, dirRaw, force);
@@ -167,7 +170,7 @@ function delStage(repo, k, pathRaws, force) {
 
   //  File-form pass (after every dir arg), in arg order.
   if (!dirtyRaw) for (const raw of files) {
-    const full = wtJoin(repo.wt, raw);       // BE-011: NAVESCAPE on `..` climb
+    const full = wtpath(repo.wt, raw);       // BE-011: NAVESCAPE on `..` climb
     if (statExists(full)) {
       //  Dirty-gate (DIS-004): mtime ∈ stamp-set ⇒ tracked-clean; a mtime
       //  miss is only a HINT — bytes still == baseline blob ⇒ clean; `force`
@@ -209,7 +212,7 @@ function delStage(repo, k, pathRaws, force) {
 function delDir(repo, eng, wtl, dirRaw, force) {
   const prefix = dirRaw;     // ends in "/" (or "" = reporoot)
   //  BE-011: wtJoin confines the UNTRUSTED dir arg (NAVESCAPE on a `..` climb).
-  if (prefix !== "" && statKind(wtJoin(repo.wt, prefix.replace(/\/$/, ""))) !== "dir")
+  if (prefix !== "" && statKind(wtpath(repo.wt, prefix.replace(/\/$/, ""))) !== "dir")
     return { dirty: false, unlinked: 0, existed: false };   // already absent
 
   //  Descendants on disk = wt-scan entries under the prefix (meta skipped
@@ -230,7 +233,7 @@ function delDir(repo, eng, wtl, dirRaw, force) {
   }
   //  Apply: unlink every descendant.
   let n = 0;
-  for (const rel of desc) { try { io.unlink(wtJoin(repo.wt, rel)); n++; } catch (e) {} }  // BE-011
+  for (const rel of desc) { try { io.unlink(wtpath(repo.wt, rel)); n++; } catch (e) {} }  // BE-011
   return { dirty: false, unlinked: n, existed: true };
 }
 
@@ -342,7 +345,7 @@ function deleteVerb() {
   if (_be && _be.authority && repo && repo.wt)
     argv = SPELL.bindRest(argv, function (p) {
       if (!p) return true;
-      const k = statKind(wtJoin(repo.wt, p));    // BE-011: NAVESCAPE on `..`
+      const k = statKind(wtpath(repo.wt, p));    // BE-011: NAVESCAPE on `..`
       return k === undefined || k === "dir";
     });
   return delRun(ctx, argv);

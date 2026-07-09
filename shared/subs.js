@@ -36,6 +36,8 @@
 "use strict";
 
 const join = require("./util/path.js").join;   // JSQUE-016: util libs -> shared/util/
+//  BE-030: worktree fs paths go THROUGH resolve() (context-confined wtpath).
+const wtpath = require("../core/discover.js").wtpath;
 const isFullSha = require("./util/sha.js").isFullSha;
 
 function statKind(p) { try { return io.stat(p).kind; } catch (e) { return undefined; } }
@@ -46,7 +48,7 @@ function lstatKind(p) { try { return io.lstat(p).kind; } catch (e) { return unde
 //  is never a mount.  Mirror SNIFFSubIsMount's NOFOLLOW guard.
 function isMountAt(subWt) {
   if (lstatKind(subWt) === "lnk") return false;
-  return isFile(join(subWt, ".be"));
+  return isFile(wtpath(subWt, ".be"));
 }
 
 function libDir() {
@@ -132,7 +134,7 @@ function enumerate(repo, keeperReader, baselineTreeSha) {
     if (leaf.kind === "s") links.push({ path: leaf.path, pin: leaf.sha });
   });
   for (const l of links) {
-    const subWt = join(repo.wt, l.path);
+    const subWt = wtpath(repo.wt, l.path);
     const mounted = isMountAt(subWt);
     let cls = { bucket: "ok", stale: "", r4: "", title: "", ts: 0n };
     if (mounted) cls = classifyMount(repo, l.path, l.pin);
@@ -146,7 +148,7 @@ function enumerate(repo, keeperReader, baselineTreeSha) {
 }
 
 //  mountWtDir(repo, subPath) → absolute sub-mount wt dir (for recursion).
-function mountWtDir(repo, subPath) { return join(repo.wt, subPath); }
+function mountWtDir(repo, subPath) { return wtpath(repo.wt, subPath); }
 
 module.exports = {
   enumerate: enumerate,

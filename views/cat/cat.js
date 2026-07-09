@@ -9,6 +9,8 @@
 "use strict";
 
 const store = require("../../shared/store.js");
+//  BE-030: worktree fs paths go THROUGH resolve() (context-confined wtpath).
+const wtpath = require("../../core/discover.js").wtpath;
 const pathlib = require("../../shared/util/path.js");   // BE-011: wtJoin confinement
 const ambient = require("../../shared/ambient.js");   // JAB-004: ctx→be bridge
 const bro   = require("../../view/bro.js");
@@ -158,7 +160,7 @@ function catOne(arg) {
   //  wt root throws NAVESCAPE; refuse cleanly (never a silent outside read).
   let full = null;
   if (!ref) {
-    try { full = pathlib.wtJoin(repo.wt, path); }
+    try { full = wtpath(repo.wt, path); }
     catch (e) { io.log("cat: " + e + "\n"); return; }
   }
   let bytes = ref ? readRefBytes(k, ref, path) : readFileBytes(full);

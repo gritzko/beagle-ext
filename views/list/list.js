@@ -19,6 +19,8 @@ const render     = require("../../view/render.js");
 const theme      = require("../../view/theme.js");
 const navlib     = require("../../shared/nav.js");
 const pathlib    = require("../../shared/util/path.js");
+//  BE-030: worktree fs paths go THROUGH resolve() (context-confined wtpath).
+const wtpath = require("../../core/discover.js").wtpath;
 const join       = pathlib.join;
 const isFullSha  = shalib.isFullSha;
 
@@ -139,7 +141,7 @@ function listOne(arg) {
   const topWt = repo.wt;
   let absScope;
   if (path && path[0] === "/") absScope = path;
-  else                         absScope = pathlib.wtJoin(topWt, path || "");
+  else                         absScope = wtpath(topWt, path || "");
   absScope = noSlash(absScope);
 
   const scopePfx = relDir(repo.wt, absScope);            // rel to the owning wt

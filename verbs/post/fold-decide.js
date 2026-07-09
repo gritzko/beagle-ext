@@ -32,9 +32,12 @@
 //  JSQUE-016: decide.js -> verbs/post/fold-decide.js (post's OWN fold helper);
 //  shared/ kernel via ../../ .
 const pathlib = require("../../shared/util/path.js");
+//  BE-030: worktree fs paths go THROUGH resolve() — wtpath is the
+//  resolve-backed, context-confined replacement for the old wtJoin.
+const wtpath = require("../../core/discover.js").wtpath;
 const shalib = require("../../shared/util/sha.js");
 const classify = require("../../shared/classify.js");
-const join = pathlib.join, wtJoin = pathlib.wtJoin;   // BE-011: wtJoin confines wt-opens
+const join = pathlib.join;   // BE-011: wtJoin confines wt-opens
 const isFullSha = shalib.isFullSha;
 const frameSha = shalib.frameSha;
 
@@ -54,7 +57,7 @@ function skipMeta(rel) {
 const { readFileBytes } = require("../../shared/wtread.js");   // CODE-020
 //  target; regular/exec → hash of the bytes.  undefined on read failure.
 function hashWtPath(wtRoot, rel, kind) {
-  const full = wtJoin(wtRoot, rel);                // BE-011
+  const full = wtpath(wtRoot, rel);                // BE-011
   let st;
   try { st = io.lstat(full); } catch (e) { return undefined; }
   let content;
@@ -214,7 +217,7 @@ function decide(be, wtlogReader, storeReader, narrow) {
 //  the merge surfaced without a base entry).  Mirrors wtScan's kind probe.
 function kindAt(wtRoot, rel) {
   let st;
-  try { st = io.lstat(wtJoin(wtRoot, rel)); } catch (e) { return "f"; }   // BE-011
+  try { st = io.lstat(wtpath(wtRoot, rel)); } catch (e) { return "f"; }   // BE-011
   if (st.kind === "lnk") return "l";
   if (st.kind === "reg") return (st.mode && (st.mode & 0o111)) ? "x" : "f";
   return "f";

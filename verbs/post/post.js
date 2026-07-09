@@ -30,6 +30,9 @@ const dag      = require("../../shared/dag.js");
 const ulog     = require("../../shared/ulog.js");
 const uri      = require("../../shared/uri.js");   // JAB-005: total arg parse
 const pathlib  = require("../../shared/util/path.js");
+//  BE-030: worktree fs paths go THROUGH resolve() — wtpath is the
+//  resolve-backed, context-confined replacement for the old wtJoin.
+const wtpath = require("../../core/discover.js").wtpath;
 const shalib   = require("../../shared/util/sha.js");
 const subs     = require("../../shared/subs.js");     // DIS-058 D6: sub enum
 const wire     = require("../../shared/wire.js");      // GIT-013: wire push
@@ -39,7 +42,7 @@ const ingest   = require("../../shared/ingest.js");    // GIT-016: remote-track 
 //  retiring the ctx.out columnar path for post.
 const hunkrows = require("../../shared/hunkrows.js");
 const ambient  = require("../../shared/ambient.js");   // JAB-004: ctx→be bridge
-const join = pathlib.join, wtJoin = pathlib.wtJoin;   // BE-011: wtJoin confines wt-opens
+const join = pathlib.join;   // BE-011: wtJoin confines wt-opens
 const isFullSha = shalib.isFullSha;
 
 //  --- author identity from <store>/.be/config (TOML) ---------------------
@@ -472,7 +475,7 @@ function postSubs(info, ctx) {
   const subList = subs.enumerate(info, reader, baseTree);
   for (const s of subList) {
     if (!s.mounted) continue;                       // unmounted gitlink → skip
-    const subWt = join(info.wt, s.path);
+    const subWt = wtpath(info.wt, s.path);
     let subInfo;
     try { subInfo = be.find(subWt); } catch (e) { continue; }
 
@@ -698,7 +701,7 @@ function postOne(info, ctx, row) {
                  ts: stamp }]);
   for (const d of dres.decisions) {
     if (d.verb !== "add") continue;
-    try { io.setMtime(wtJoin(info.wt, d.path), stamp); } catch (e) {}   // BE-011
+    try { io.setMtime(wtpath(info.wt, d.path), stamp); } catch (e) {}   // BE-011
   }
 
   //  The `post:` banner (POST-018): a commit confirmation row, then the

@@ -21,6 +21,8 @@ const wtlog    = require("../../shared/wtlog.js");
 const store    = require("../../shared/store.js");
 const classify = require("../../shared/classify.js");
 const pathlib  = require("../../shared/util/path.js");
+//  BE-030: worktree fs paths go THROUGH resolve() (context-confined wtpath).
+const wtpath = require("../../core/discover.js").wtpath;
 const join     = pathlib.join;
 const ambient  = require("../../shared/ambient.js");   // JAB-004: ctx→be bridge
 const render   = require("../../view/render.js");
@@ -135,7 +137,7 @@ function lsOne(uri, verb, ctx, queue, rdCache) {
   //  climb above the wt); an absolute path is a trusted lsr recursion child.
   let absScope;
   if (uri && uri[0] === "/") absScope = uri;
-  else                       absScope = pathlib.wtJoin(topWt, uri || "");
+  else                       absScope = wtpath(topWt, uri || "");
   absScope = noSlash(absScope);
 
   //  The OWNING repo of the scope — be.find re-discovers a submodule's shard
