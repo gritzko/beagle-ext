@@ -227,6 +227,18 @@ function _ctxHost(context) {
   return "";
 }
 
+//  BE-030: the context's PATH — the TRUSTED in-repo dir the untrusted `rel`
+//  resolves against (the old `base` arg, now folded INTO the context).  A path-less
+//  context (`//name`) → "" = the tree root.  Same URI-object-or-string tolerance
+//  as _ctxHost; an untrusted path must ride `rel`, never be planted here.
+function _ctxPath(context) {
+  if (context && typeof context === "object") return context.path || "";   // a URI
+  if (typeof context === "string") {
+    try { return (uri._parse(context) || {}).path || ""; } catch (e) { return ""; }
+  }
+  return "";
+}
+
 //  BE-030: `rel` is a PATH, not a URI — reject an authority (`//other`) or a
 //  scheme (`git://…`) via the URI binding (no hand-parsing).  A tree SWAP is the
 //  nav layer's job, NEVER the fs resolver's; this closes the `//OTHER` escape.
@@ -242,21 +254,23 @@ function _relPath(rel) {
   return u.path || "";
 }
 
-//  BE-030: resolve(context, base, rel) → the ABSOLUTE fs path, CONFINED to the
-//  CONTEXT's tree — `context` (a URI object) names the tree, `base` is the TRUSTED
-//  in-repo directory the relative arg resolves against (typically the context's own
-//  path), `rel` is the UNTRUSTED relative arg.  The 3-arg supersedes the old
-//  `resolve(base, ref)`: `rel` is AUTHORITY-BLIND (no `//other`, no `scheme:` — a
-//  tree swap can no longer ride the arg slot), and resolveInTree THROWS "NAVESCAPE"
-//  on any `..` that climbs above the tree root, so the result can NEVER leave
-//  $SRC_ROOT/<name>.  A rooted `/x` rel addresses the tree root (drops `base`);
-//  ""/"." context host → the LAUNCH tree (find(cwd)).  Throws on escape / bad name.
-function resolve(context, base, rel) {
+//  BE-030: resolve(context, rel) → the ABSOLUTE fs path, CONFINED to the CONTEXT's
+//  tree.  `context` (a URI object) carries BOTH the tree NAME (its authority) and
+//  the TRUSTED in-repo dir the relative arg resolves against (its PATH); `rel` is
+//  the UNTRUSTED relative arg.  Folds the old `base` INTO the context — the current
+//  dir was always the context's own path, so it is no longer passed twice; a caller
+//  whose context path is UNTRUSTED (wtdir) strips it into `rel`.  `rel` is
+//  AUTHORITY-BLIND (no `//other`, no `scheme:` — a tree swap can no longer ride the
+//  arg slot), and resolveInTree THROWS "NAVESCAPE" on any `..` that climbs above the
+//  tree root, so the result can NEVER leave $SRC_ROOT/<name>.  A rooted `/x` rel
+//  addresses the tree root (drops the context path); ""/"." context host → the
+//  LAUNCH tree (find(cwd)).  Throws on escape / bad name.
+function resolve(context, rel) {
   const host = _ctxHost(context);
   const relPath = _relPath(rel);                      // throws on a //other / scheme
-  //  A rooted `/x` addresses the tree root (base dropped); else `rel` resolves
-  //  against the trusted in-repo `base` dir.  resolveInTree NORMALISES `rel`.
-  const basePath = relPath[0] === "/" ? "" : (base || "");
+  //  A rooted `/x` addresses the tree root (context path dropped); else `rel`
+  //  resolves against the context's trusted in-repo path.  resolveInTree NORMALISES.
+  const basePath = relPath[0] === "/" ? "" : _ctxPath(context);
   const sub = pathlib.resolveInTree(basePath, relPath);   // throws on climb-out
   if (host === "" || host === ".") {                  // `//` / `//.` → launch tree
     const wt = find(io.cwd()).wt;                     // throws when repo-less
@@ -282,12 +296,12 @@ function wtdir(uriStr) {
   if (host === "" || host === ".") {                  // `//` / `//.` → launch tree
     try { return find(io.cwd()).wt; } catch (e) { return null; }
   }
-  //  BE-030: compose + CONFINE via resolve(context, base, rel).  The nav URI `u`
-  //  is the CONTEXT (its `.host` names the tree); its path is the (untrusted) rel —
-  //  a `..` climb / bad authority throws NAVESCAPE and PROPAGATES (the CLI REFUSES
-  //  loudly, never adopting an outside tree).  resolve throws ONLY on escape, never
-  //  on a plain not-found → safe to let fly.
-  const dir = resolve(u, "", u.path || "");
+  //  BE-030: compose + CONFINE via resolve(context, rel).  The nav URI's path is
+  //  UNTRUSTED, so the context is host-ONLY (`//host`, empty trusted path) and the
+  //  path rides `rel` — a `..` climb / bad authority throws NAVESCAPE and PROPAGATES
+  //  (the CLI REFUSES loudly, never adopting an outside tree).  resolve throws ONLY
+  //  on escape, never on a plain not-found → safe to let fly.
+  const dir = resolve("//" + host, u.path || "");
   //  Confirm `//name` is a REAL anchored worktree AT/BELOW $SRC_ROOT/host (not an
   //  ancestor store find() walked up to).  `dir` is `..`-free now, so this prefix
   //  compare is a sound EXISTENCE check, no longer a (broken) security boundary.
@@ -353,13 +367,13 @@ function wtpath(wt, rel) {
     ctx = navCwd(wt) || "";
     if (ctx) {                                        // the context must reproduce wt
       const c = uri._parse(ctx);
-      try { if (resolve(c, c.path || "", "") !== wt) ctx = ""; } catch (e) { ctx = ""; }
+      try { if (resolve(c, "") !== wt) ctx = ""; } catch (e) { ctx = ""; }
     }
     _wtCtx[wt] = ctx;
   }
   if (!ctx) return pathlib.wtJoin(wt, rel);           // outside $SRC_ROOT → plain confine
   const c = uri._parse(ctx);
-  const abs = resolve(c, c.path || "", rel || "");    // resolve-backed, context-honoured
+  const abs = resolve(c, rel || "");                  // resolve-backed, context-honoured
   //  keep wtJoin's WT-level boundary: resolve() confines to the TREE (for a
   //  submodule that is the parent tree), so refuse a path that climbs OUT of `wt`.
   if (abs !== wt && abs.indexOf(wt + "/") !== 0)

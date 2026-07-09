@@ -68,6 +68,12 @@ function mergeUri(ctx, t) {
 
 //  shapeArg0 → { arg0, rest }.  A leading `-` = default context + raw REST; else the
 //  first unquoted token shapes arg 0 (bareIsUri: a bareword is a wt-relative path).
+//  [Nav]/URI-011: REST tokens stay RAW wt-relative — arg 0 carries the `//authority`
+//  (authorityRepo hoists+strips it to scope the repo), and the REST are already the
+//  wt-relative paths the verb stages, so they must NOT gain a `//authority` (only
+//  arg 0's is stripped downstream; an authority left on a rest arg stages a bogus
+//  `//WT/path` row).  Retiring put/delete bindRest (arg0-dir rebasing) is what fixes
+//  the cross-dir `:put core/x test/y` → `core/test/y` mis-scope.
 function shapeArg0(ctxUri, items, bareIsUri) {
   const ctx = parse(ctxUri);
   if (items.length && !items[0].q && items[0].tok === "-") {

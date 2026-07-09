@@ -46,8 +46,6 @@ const hunkrows = require("../../shared/hunkrows.js");
 //  JAB-004: plain-args PUT owns its arg parse (classifyArg/seedCtx retired) —
 //  keeps resolve only for isHexish + resolveHex; ambient bridges be↔ctx.
 const resolve = require("../../core/resolve.js");
-//  URI-011: the shared composer — bindRest binds rest paths under arg 0's context.
-const SPELL = require("../../shared/spell.js");
 const ambient = require("../../shared/ambient.js");
 //  BE-011: worktree-open confinement — wtJoin THROWS NAVESCAPE on a `..` climb;
 //  the local join dup (was defined below) is retired for pathlib.join.
@@ -570,15 +568,10 @@ function put() {
   };
   let argv = [];
   for (let i = 0; i < arguments.length; i++) argv.push(String(arguments[i]));
-  //  URI-011: inside a nav context (be.authority set, e.g. `:put a.txt` in a
-  //  `//WT/dir` view), arg 0 is the context dir and the rest bind UNDER it; put
-  //  decides file-vs-dir by lstat'ing the wt.  Bare CLI puts (no authority) are
-  //  untouched — each arg stays an independent target.
-  if (_be && _be.authority && repo && repo.wt)
-    argv = SPELL.bindRest(argv, function (p) {
-      if (!p) return true;
-      try { return io.lstat(wtpath(repo.wt, p)).kind === "dir"; } catch (e) { return true; }  // BE-011
-    });
+  //  [Nav]/URI-011: multi-arg puts resolve EACH arg against the context in the
+  //  composer (shared/spell.js shapeArg0, symmetric with arg 0) — every argv entry
+  //  is already a context-resolved path, so NO arg0-dir rebasing here (the old
+  //  bindRest mis-scoped a cross-dir `:put core/x test/y` to `core/test/y`).
   ctx.args = argv;
   return putRun(ctx, argv, argv.length ? argv[0] : "");
 }

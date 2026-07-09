@@ -44,8 +44,6 @@ const recurse = require("../../core/recurse.js");     // SUBS-044: mounted-sub w
 //  retiring ctx.out for the `delete:` table.
 const hunkrows = require("../../shared/hunkrows.js");
 const ambient  = require("../../shared/ambient.js");   // JAB-004: ctx→be bridge
-//  URI-011: the shared composer — bindRest binds rest paths under arg 0's context.
-const SPELL = require("../../shared/spell.js");
 //  JAB-004: plain-args DELETE owns its fan-out INLINE via classifyArgLocal — a
 //  `?br` tombstone vs a path/dir row, no resolve.*/hex (delBranch drops by name).
 
@@ -338,16 +336,10 @@ function deleteVerb() {
                 T0: ron.now(), flags: flags };
   let argv = [];
   for (let i = 0; i < arguments.length; i++) argv.push(String(arguments[i]));
-  //  URI-011: inside a nav context (be.authority set), arg 0 is the context dir
-  //  and the rest bind UNDER it; delete decides file-vs-dir by statting the wt.
-  //  Bare CLI deletes (no authority) are untouched — each arg an independent target.
-  const repo = _be && _be.repo;
-  if (_be && _be.authority && repo && repo.wt)
-    argv = SPELL.bindRest(argv, function (p) {
-      if (!p) return true;
-      const k = statKind(wtpath(repo.wt, p));    // BE-011: NAVESCAPE on `..`
-      return k === undefined || k === "dir";
-    });
+  //  [Nav]/URI-011: multi-arg deletes resolve EACH arg against the context in the
+  //  composer (shared/spell.js shapeArg0, symmetric with arg 0) — every argv entry
+  //  is already a context-resolved path, so NO arg0-dir rebasing here (the old
+  //  bindRest mis-scoped a cross-dir `:delete core/x test/y` to `core/test/y`).
   return delRun(ctx, argv);
 }
 
