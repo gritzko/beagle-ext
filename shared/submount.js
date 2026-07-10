@@ -105,13 +105,19 @@ function titleFromUrl(url) {
   return b;
 }
 
-//  The synthetic branch the child wt tracks ([Submodules] bullet 1):
-//  `/<title>/.<parent>[/<parent_branch>]`.  A sub of a sub climbs the same
-//  rule; here we record one level (the immediate parent), which round-trips
-//  through the wtlog as the sub's `?<branch>` token.
+//  SUBS-048: the synthetic branch the child wt tracks ([Submodules] bullet 1):
+//  `/<title>/.<parent>/.<grandparent>[/<gp_branch>]`.  A SYNTHETIC parent branch
+//  (leading `/` — the parent is itself a sub) folds INTO the dotted chain: its
+//  own `/<parent>` head is already emitted as `.<parent>`, so only the tail
+//  rides (`/libabc` + `.libdog` + tail-of(`/libdog/.jab`) → `/libabc/.libdog/.jab`);
+//  a PLAIN parent branch stays the last undotted segment.
 function syntheticBranch(title, parentTitle, parentBranch) {
   let b = "/" + title + "/." + (parentTitle || "parent");
-  if (parentBranch) b += "/" + parentBranch;
+  if (parentBranch && parentBranch[0] === "/") {
+    const tail = parentBranch.slice(1);
+    const cut = tail.indexOf("/");
+    if (cut >= 0) b += tail.slice(cut);
+  } else if (parentBranch) b += "/" + parentBranch;
   return b;
 }
 

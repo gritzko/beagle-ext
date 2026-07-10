@@ -216,7 +216,10 @@ function seedRemote(rem, wt) {
   const branch = rem.branch || f.branch || "";
   if (!info) {                                   // green-field: fresh clone
     const beDir = join(wt, ".be");
-    const proj = rem.proj || "repo";
+    //  GET-042: the git→beagle border — the [Title] is the OFFICIAL URL's
+    //  basename (`…/jab.git` → `jab`); beagle→beagle URIs carry `?/title`
+    //  explicitly (rem.proj).  Improvise "repo" only when both are absent.
+    const proj = rem.proj || submount.titleFromUrl(rem.raw) || "repo";
     ingest.clone(f.pack, beDir, proj, tip, rem.raw);
     const anchor = URI.make("file", undefined, beDir + "/" + proj + "/");
     writeWtlog(join(beDir, "wtlog"),
