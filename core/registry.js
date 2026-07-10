@@ -25,8 +25,8 @@ function convention(mod) {
 //  GIT-016: verbs register by FILE — a bareword resolves to verbs/<verb>/<verb>.js
 //  here (no explicit list); `head` (verbs/head/head.js) is picked up automatically.
 //  build(verbs, requireFn): map each distinct verb name to its handler.
-//  `requireFn` is the be-relative require of the CALLING module (so the
-//  upward be/-scan finds the shard nearest loop.js, not cwd); default the
+//  `requireFn` is the shard-relative require of the CALLING module (so the
+//  upward jsrc/-scan finds the shard nearest loop.js, not cwd); default the
 //  global require.  A verb whose module does not export a handler is left
 //  ABSENT (null) from the table — cli() then refuses the verb.
 //  JAB-004: a converted entry is `{jab:"args",fn}` so cli() routes plain dispatch.
@@ -40,7 +40,7 @@ function build(verbs, requireFn) {
     //  (verbs/<verb>/) — get/put/post/delete/patch — and the verbless VIEWS
     //  (views/<view>/) — the read-only projectors (ls/cat/diff/spot/…), which
     //  the loop dispatches by URI scheme exactly like a verb.  Try views/ then
-    //  verbs/ (the names are disjoint); the be-relative scan (require.cpp)
+    //  verbs/ (the names are disjoint); the shard-relative scan (require.cpp)
     //  finds the shard nearest the requirer.
     try { mod = req("views/" + verb + "/" + verb + ".js"); }
     catch (e) {
@@ -54,13 +54,13 @@ function build(verbs, requireFn) {
   return table;
 }
 
-//  BE-029: locate a verb's handler file by BE-CLIMBING from `startDir` (default
-//  cwd) — at each ancestor try `<dir>/be/verbs/<w>/<w>.js` then `.../views/…`,
-//  ceiling at $HOME, first hit wins.  This mirrors jab's own upward be/-scan
-//  (require.cpp resolveBe) but anchors on CWD, so a nested be/ shard (e.g.
-//  `html/be` for publication) supplies its OWN verbs while core/shared still
-//  load from the parent be/ the loop launched from.  Returns the abs path or
-//  null.  Distinct from JAB-030's `_here` probe, which sees one root only.
+//  BE-029: locate a verb's handler file by CLIMBING from `startDir` (default
+//  cwd) — at each ancestor try `<dir>/jsrc/verbs/<w>/<w>.js` then `.../views/…`,
+//  ceiling at $HOME, first hit wins.  This mirrors jab's own upward jsrc/-scan
+//  (require.cpp resolveJsrc) but anchors on CWD, so a nested jsrc/ shard
+//  supplies its OWN verbs while core/shared still load from the parent shard
+//  the loop launched from.  Returns the abs path or null.  Distinct from
+//  JAB-030's `_here` probe, which sees one root only.
 //  BE-041: an optional `dirs` narrows the scan to one tree — ["verbs"] probes
 //  the MUTATING verbs only (the pager's act-button gate), default both.
 function verbFile(w, startDir, dirs) {
@@ -68,7 +68,7 @@ function verbFile(w, startDir, dirs) {
   const home = io.getenv("HOME");
   for (;;) {
     for (const d of dirs || ["verbs", "views"]) {
-      const p = dir + "/be/" + d + "/" + w + "/" + w + ".js";
+      const p = dir + "/jsrc/" + d + "/" + w + "/" + w + ".js";
       try { if (io.stat(p)) return p; }
       catch (e) {}                            // ENOENT — keep climbing
     }

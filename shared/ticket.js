@@ -1,6 +1,7 @@
 //  shared/ticket.js — BRO-012: the ONE ticket-code resolver both click paths
 //  converge on.  An issue key `ABC-123` (the tokenizers' `F` token) names a
-//  ticket file at `todo/<TOPIC>/<KEY>.{md,txt,mkd}` under a worktree root; this
+//  ticket file at `todo/<TOPIC>/<KEY>.{md,txt,mkd}` (thin) or
+//  `todo/<TOPIC>/<KEY>/README.<ext>` (fat) under a worktree root; this
 //  maps a key → a `cat://<name>/todo/<TOPIC>/<KEY>.<ext>` nav URI.  The RESOLVER
 //  owns root order (be.todoRoot()): explicit $TODO_ROOT, then the CURRENT wt
 //  root, then the OPEN/launch wt root; the first whose file exists wins.
@@ -48,14 +49,16 @@ function scanKeys(str) {
   return out;
 }
 
-//  BRO-012: does `dir/todo/<TOPIC>/<KEY>.<ext>` exist for some ext?  `dir` is an
+//  BRO-012: does `dir/todo/<TOPIC>/<KEY>.<ext>` (thin) or the fat
+//  `dir/todo/<TOPIC>/<KEY>/README.<ext>` exist for some ext?  `dir` is an
 //  absolute wt root (from be.wtdir).  Returns the repo-relative path of the
-//  first hit (md → txt → mkd), or null.  No path is ever handed to a URI raw —
-//  the caller composes the nav URI through the URI class.
+//  first hit (per ext: thin then fat, md → txt → mkd), or null.  No path is
+//  ever handed to a URI raw — the caller composes through the URI class.
 function findFile(dir, rel) {
   for (const ext of EXTS) {
-    const p = rel + "." + ext;
-    try { io.stat(join(dir, p)); return p; } catch (e) { /* absent → next ext */ }
+    for (const p of [rel + "." + ext, rel + "/README." + ext]) {
+      try { io.stat(join(dir, p)); return p; } catch (e) { /* absent → next */ }
+    }
   }
   return null;
 }

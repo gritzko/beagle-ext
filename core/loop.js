@@ -47,8 +47,8 @@ const pager = require(_here + "/views/bro/pager.js");
 //                    just forwards the rows).
 //    opts.repo     : the opened repo handle (forwarded in ctx; loop is agnostic).
 //    opts.out      : the emit sink (JSQUE-005); a no-op stub is used if absent.
-//    opts.require  : the be-relative require of the caller (so the registry's
-//                    require(verb) scans the right be/ shard); default global.
+//    opts.require  : the shard-relative require of the caller (so the registry's
+//                    require(verb) scans the right jsrc/ shard); default global.
 //  Returns { dispatched, order } — dispatched count + the verb-dispatch order
 //  (the proof the loop drove the queue; the real run cares only about effects).
 function run(opts) {
@@ -106,10 +106,10 @@ function _nullSink() {
 }
 
 //  JAB-030: the verb-vs-URI gate (Design decision b).  A word is a VERB iff a
-//  handler file exists at verbs/<w>/<w>.js OR views/<w>/<w>.js under the be/ root
+//  handler file exists at verbs/<w>/<w>.js OR views/<w>/<w>.js under the jsrc/ root
 //  (_here).  The [a-zA-Z0-9]+ shape test is the caller's; this is the file probe.
 //  BE-029: the probe now BE-CLIMBS from cwd (registry.verbFile), so a nested
-//  be/ shard's verbs are seen while core/shared still load from `_here` (the
+//  jsrc/ shard's verbs are seen while core/shared still load from `_here` (the
 //  launched be/ up-tree).  `here` is ignored (kept for call-site compat).
 function _isVerb(w, here) {
   return registry.verbFile(w) !== null;
@@ -323,7 +323,7 @@ function _cli(argv, opts2) {
 
   //  JAB-004: the DUAL-CONVENTION fork — a CONVERTED verb (`{jab:"args"}`) runs
   //  the PLAIN path; a LEGACY verb keeps resolve.seed→queue; BOTH share the edge.
-  //  BE-029: resolve via the cwd-climb (a nested be/ shard wins), not a single
+  //  BE-029: resolve via the cwd-climb (a nested jsrc/ shard wins), not a single
   //  `_here` root; require the resolved abs path with loop.js's own require.
   const conv = registry.resolveVerb(verb, undefined, require);
   const out = emit.create({ color: color });   // JAB-025: tty/--color gate
