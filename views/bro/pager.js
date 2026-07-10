@@ -24,6 +24,9 @@ const path = require("shared/util/path.js");
 //  URI-011: the shared `word(context_uri, …rest)` spell composer — one classifier
 //  for BOTH the address bar and the CLI (core/loop.js), so they compose alike.
 const SPELL = require("shared/spell.js");
+//  BE-036: the shared shell-splitter — the pager plays the shell to glob-expand
+//  a word spell's arg words (split the typed line into words), same tokens as SPELL.
+const argline = require("shared/argline.js");
 //  BRO-012: the shared ticket-code resolver — an `F` issue-key token with no
 //  adjacent `U` derives its target (todo/<TOPIC>/<KEY>.{md,txt,mkd}) from here.
 const TICKET = require("shared/ticket.js");
@@ -254,6 +257,44 @@ function _commonPrefix(list) {
     p = p.slice(0, j);
   }
   return p;
+}
+
+//  BE-036: compile ONE glob path-segment (`*` any run, `?` one char, `[...]` a
+//  class; a leading `!`/`^` negates) to an anchored RegExp; all else is literal.
+function _globToRe(seg) {
+  let re = "^";
+  for (let i = 0; i < seg.length; i++) {
+    const c = seg[i];
+    if (c === "*") re += "[^/]*";
+    else if (c === "?") re += "[^/]";
+    else if (c === "[") {
+      let j = i + 1, neg = "";
+      if (seg[j] === "!" || seg[j] === "^") { neg = "^"; j++; }
+      let cls = "";
+      if (seg[j] === "]") { cls += "\\]"; j++; }        // a literal ] as first member
+      while (j < seg.length && seg[j] !== "]") {
+        cls += "\\^]".indexOf(seg[j]) >= 0 ? "\\" + seg[j] : seg[j]; j++;
+      }
+      if (j >= seg.length) re += "\\[";                 // an unterminated `[` → literal
+      else { re += "[" + neg + cls + "]"; i = j; }
+    } else re += c.replace(/[.+^${}()|\\]/g, "\\$&");
+  }
+  return new RegExp(re + "$");
+}
+
+//  BE-036: is this ARG word a glob to expand?  A `?ref`/`#frag`/`-flag` slot edit
+//  or a `scheme:` URI word is NOT — only a bare/`./` path word holding *, ?, or [.
+function _isGlobWord(w) {
+  if (!w || w[0] === "?" || w[0] === "#" || w[0] === "-") return false;
+  if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(w)) return false;
+  return /[*?[]/.test(w);
+}
+
+//  BE-036: re-serialize ONE token for the re-split spell — single-quote it iff it
+//  was quoted or holds whitespace (an embedded `'` via the `'\''` shell idiom).
+function _reQuote(tok, q) {
+  if (!q && !/\s/.test(tok)) return tok;
+  return "'" + tok.replace(/'/g, "'\\''") + "'";
 }
 
 
@@ -707,6 +748,66 @@ Pager.prototype._composeCall = function (s) {
 };
 Pager.prototype._buildSpell = function (c) { return SPELL.buildSpell(c); };
 
+//  BE-036: expand a glob WORD (`*`/`?`/`[...]` per segment) to its sorted matches
+//  over Tab-completion's confined walk (resolveInTree/wtJoin; NAVESCAPE → none).
+//  A `./` stem resolves against the VIEW dir, a bare stem against the wt root;
+//  output keeps the typed shape (_compTok: `./`-rel → `./x`, bare → wt-relative)
+//  so the verbs resolve each match as if the user had typed it.  Dotfiles skipped
+//  unless the pattern segment itself starts with `.` (the shell convention).
+Pager.prototype._glob = function (pattern) {
+  const rel = pattern.slice(0, 2) === "./" || pattern.slice(0, 3) === "../";
+  const root = (this.be && (this.be.wt_root || this.be.cwd)) || io.cwd();
+  const viewPath = (this._parse(this._verbUri().uri).path || "").replace(/^\/+|\/+$/g, "");
+  const segs = path.split(pattern.replace(/^\.\//, ""));    // drop a leading "./"
+  let frontier = [rel ? viewPath : ""];                     // wt-rel dirs to walk from
+  for (const seg of segs) {
+    const next = [];
+    if (!/[*?[]/.test(seg)) {                               // a literal (incl. `.`/`..`)
+      for (const d of frontier) { try { next.push(path.resolveInTree(d, seg)); } catch (e) {} }
+    } else {
+      const re = _globToRe(seg), dot = seg[0] === ".";
+      for (const d of frontier) {
+        let dir; try { dir = path.wtJoin(root, d); } catch (e) { continue; }
+        let ents; try { ents = io.readdir(dir); } catch (e) { continue; }
+        for (const raw of ents) {
+          const nm = raw.replace(/\/+$/, "");
+          if (nm === "." || nm === ".." || (nm[0] === "." && !dot)) continue;
+          if (re.test(nm)) next.push(d ? d + "/" + nm : nm);
+        }
+      }
+    }
+    frontier = next;
+    if (!frontier.length) break;
+  }
+  frontier.sort();
+  const self = this;
+  return frontier.map(function (full) { return self._compTok(full, viewPath, rel); });
+};
+
+//  BE-036: the pager plays the shell — shell-split the word spell, expand each
+//  glob ARG word IN PLACE (the leading verb + schemed/`?`/`#` words left as-is),
+//  re-serialize.  No glob word → the spell UNCHANGED; a zero-match glob → null
+//  (failglob: an addr-bar message, spell NOT dispatched — bash's silent pass-
+//  through would feed the literal pattern to a destructive `delete`).
+Pager.prototype._globSpell = function (s) {
+  const sp = argline.shellSplit(s), toks = sp.toks, q = sp.split || [];
+  let start = 0;                                            // peel a leading real verb
+  if (toks.length && !q[0] && /^[a-zA-Z][a-zA-Z0-9]*$/.test(toks[0]) &&
+      (!this.isVerb || this.isVerb(toks[0]))) start = 1;
+  let hit = false;
+  const out = [];
+  for (let i = 0; i < toks.length; i++) {
+    if (i >= start && !q[i] && _isGlobWord(toks[i])) {
+      const m = this._glob(toks[i]);
+      if (!m.length) { this.message = "no match: " + toks[i]; return null; }
+      hit = true;
+      for (const w of m) out.push({ tok: w, q: false });
+    } else out.push({ tok: toks[i], q: !!q[i] });
+  }
+  if (!hit) return s;                                       // nothing expanded → as typed
+  return out.map(function (it) { return _reQuote(it.tok, it.q); }).join(" ");
+};
+
 //  DIS-060/[Nav]/URI-011: apply a typed address-bar spell through the composer —
 //  build the `verb(context_uri, …rest)` call, drive it, and TRACK arg 0 as the
 //  view URI so the next spell inherits it.  Replaces the per-slot inherit + the
@@ -714,19 +815,19 @@ Pager.prototype._buildSpell = function (c) { return SPELL.buildSpell(c); };
 Pager.prototype._applySpell = function (cmd) {
   const s = (cmd || "").trim();
   if (!s) return;
-  const c = this._composeCall(s);
-  //  BE-039: hand the verb the context AS CONTEXT (c.context, via driveSpell) + args
-  //  RAW; a verb-call does not navigate, so TRACK the nav context (not arg0's path) as
-  //  the view URI.  A slot-edit has context "" → track the merged arg0 (unchanged).
-  this._driveApply(this._buildSpell(c), c.verb, c.context || c.arg0, c.context);
+  //  BE-036: expand glob ARG words (*, ?, [...]) to their wt-confined matches
+  //  BEFORE composing, so `put *.c` stages each file; failglob (null) → no dispatch.
+  const g = this._globSpell(s);
+  if (g === null) return;
+  const c = this._composeCall(g);
+  this._driveApply(this._buildSpell(c), c.verb, c.arg0);
 };
 
 //  DIS-060: drive a resolved spell + track the view's (verb, uri).  Shared by the
 //  slot-edit path (a recomposed URI) and the message-call path (a raw spell).
-//  BE-039: `context` (the nav scope) rides through to the verb; "" for a slot-edit.
-Pager.prototype._driveApply = function (spell, verb, uri, context) {
+Pager.prototype._driveApply = function (spell, verb, uri) {
   try {
-    const hunks = this.driveSpell ? this.driveSpell(spell, context) : null;
+    const hunks = this.driveSpell ? this.driveSpell(spell) : null;
     if (!hunks || hunks.length === 0) { this.message = "no hunks: " + spell; return; }
     this.pushView(hunks);
     this.view.verb = verb;
