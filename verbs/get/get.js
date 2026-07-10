@@ -1063,4 +1063,8 @@ function get() {
 //  jab injects module.exports for a required module; the loop requires this as
 //  the `get` verb handler.  JAB-004: opt into plain-args dispatch.
 get.jab = "args";
+//  PATCH-011: patch's fetch leg reuses the ONE remote classifier + the
+//  worktree→store redirect resolver (GET-038) — no second URI/store parse.
+get.parseRemote = parseRemote;
+get.resolveLocalSource = resolveLocalSource;
 module.exports = get;

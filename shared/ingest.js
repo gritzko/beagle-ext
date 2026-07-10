@@ -72,6 +72,48 @@ function buildIndex(shard, logName, fileId) {
 //  file_id = the keeper-log's 10-digit sequence prefix (0000000001 → 1).
 function fileIdOf(logName) { return parseInt(logName, 10) || 1; }
 
+//  PATCH-011: ONE combined `.keeper.idx` run covering EVERY pack-log in the
+//  shard.  The rolling per-log runs may miss older logs (the TEST-003 quirk),
+//  blinding the reader to the wt's OWN history right when patch needs the
+//  ours/fork trees — a fetch that lands objects must leave the WHOLE shard
+//  readable.  Same entry formats as buildIndex (keeper/KEEP.h).
+function reindexShard(shard) {
+  const logs = [];
+  try {
+    for (const nm of io.readdir(shard))
+      if (/^\d{10}\.keeper$/.test(nm)) logs.push(nm);
+  } catch (e) {}
+  logs.sort();
+  const scans = [];
+  let total = 0;
+  for (const nm of logs) {
+    const pk = git.pack.mmap(join(shard, nm), "r");
+    pk.buffer.watermark = pk.byteLength;
+    const buf = io.buf((pk.count || 0) * 16 + 256);
+    let ents; try { ents = pk.scan(buf); } catch (e) { ents = null; }
+    if (!ents) continue;                 // thin/odd log — reader walk-fallback
+    scans.push({ nm: nm, pk: pk, ents: ents });
+    total += ents.length / 2 + 1;
+  }
+  if (!scans.length) return;
+  const mem = abc.ram("HEAPwh128", total + 8);
+  const FIRST = 12n, PACK = 0xfn;
+  for (const s of scans) {
+    const fid = BigInt(fileIdOf(s.nm));
+    mem.push((((FIRST << 20n) | fid) << 4n) | PACK,
+             (BigInt(s.ents.length / 2) << 32n) | (BigInt(s.pk.byteLength) - 12n));
+    for (let i = 0; i * 2 < s.ents.length; i++) {
+      const off = s.ents[i * 2 + 1] & 0xffffffffffn;
+      mem.push(s.ents[i * 2], (off << 24n) | (fid << 4n) | 1n);
+    }
+  }
+  mem.sort();
+  const path = join(shard, ron.encode(ron.now()) + ".keeper.idx");
+  const out = abc.book("HEAPwh128", path, mem.size);
+  abc.merge([mem], out);
+  abc.close(out);
+}
+
 function clone(packBytes, beDir, proj, tip, remoteUri) {
   try { io.mkdir(beDir); } catch (e) {}
   const shard = join(beDir, proj);
@@ -100,10 +142,9 @@ function logName(n) {
   return s + ".keeper";
 }
 
-//  add(): land another full pack into an EXISTING shard as the next-numbered
-//  pack-log, and append the new tip to the shard's refs (remote-track + the
-//  local `post ?#` trunk row).  Used by the remote re-get (update) path.
-function add(packBytes, shard, remoteUri, tip) {
+//  PATCH-011: land a pack into an EXISTING shard as the next-numbered pack-log,
+//  OBJECTS ONLY — no refs append (patch's fetch leg must not move local tips).
+function land(packBytes, shard) {
   let max = 0;
   try {
     for (const nm of io.readdir(shard)) {
@@ -114,6 +155,13 @@ function add(packBytes, shard, remoteUri, tip) {
   const nm = logName(max + 1);
   writeBytes(join(shard, nm), packLogBytes(packBytes));
   buildIndex(shard, nm, fileIdOf(nm));
+}
+
+//  add(): land another full pack into an EXISTING shard as the next-numbered
+//  pack-log, and append the new tip to the shard's refs (remote-track + the
+//  local `post ?#` trunk row).  Used by the remote re-get (update) path.
+function add(packBytes, shard, remoteUri, tip) {
+  land(packBytes, shard);   // PATCH-011: the shared objects-only landing core
   //  JS-073: append the new tip rows via ulog.append (native in-place booked
   //  append) — survivors keep their ORIGINAL ts; only the new rows get a stamp.
   //  URI-013: `origin` row LEFT hand-composed ([URI-009] present-empty `?` +
@@ -138,5 +186,5 @@ function saveRemoteRef(shard, remoteUri, tip) {
   ulog.append(join(shard, "refs"), [{ verb: "get", uri: origin + "#" + tip }]);
 }
 
-module.exports = { clone, add, buildIndex, writeBytes,
+module.exports = { clone, add, land, reindexShard, buildIndex, writeBytes,
                    packLogBytes, logName, fileIdOf, saveRemoteRef };

@@ -55,6 +55,9 @@ const hunkrows  = require("../../shared/hunkrows.js");
 //  bridges be↔ctx for the defensive direct-handler shape.
 const patchscope = require("../../shared/patchscope.js");
 const ambient    = require("../../shared/ambient.js");
+//  PATCH-011: the fetch-first leg — a TRANSPORT source's objects land in the
+//  local shard BEFORE the (then all-local) triple resolve.
+const fetchleg   = require("./fetchleg.js");
 //  BE-010: the ONE reg-file wt read (wtread) + the git-blob framing (sha) — the
 //  ours side of a per-file weave is the wt's CURRENT bytes, so PATCH must probe
 //  disk (not just the commit trees) to tell a clean baseline from a dirty edit.
@@ -267,11 +270,21 @@ function patch() {
 patch.jab = "args";
 module.exports = patch;
 
-//  PATCH-010: scope resolution — a TREE-shaped arg (`file:<path>` | `//WT`) is
-//  resolved HERE (the verb owns address resolution); the rest ride patchscope.
-function resolveScope(arg, wtl, reader) {
+//  PATCH-010/011: source routing — the verb owns address resolution:
+//    ?<br> | ?<br>! | #<sha> | bare ref → patchscope's classic legs (null here)
+//    //WT → the tree leg, LOCAL store only;  file:<wt-path> → the tree leg,
+//        a FOREIGN-store wt fetches its cur tip's closure first (PATCH-011);
+//    file:<store>[?/<proj>] | be: | ssh:/http(s): → the PATCH-011 fetch leg;
+//    anything else → patchscope's ONE uniform PATCHFAIL refusal.
+//  Returns { tip, branch } with the objects now LOCAL, or null (classic arg).
+function resolveSource(info, arg) {
+  if (fetchleg.isFetchable(arg)) return fetchleg.fetchSource(info, arg);
   const shape = patchscope.parseShape(arg);      // throws the loud refusal
-  if (shape.scope !== "TREE") return patchscope.resolve(arg, wtl, reader);
+  if (shape.scope !== "TREE") return null;
+  //  PATCH-011: a query-less file:<path> whose `.be` is a DIR is a STORE
+  //  source — the fetch leg (tip = its trunk), incl. the dead-source refusal.
+  if (!shape.nav && !fetchleg.isWtPath(shape.tree))
+    return fetchleg.fetchSource(info, arg);
   //  PATCH-010: `//WT` via discover.wtdir (nav-confined); `file:<path>` anchors
   //  via discover.find (abs or cwd-relative — the GET-038 local-source idiom).
   const dir = shape.nav ? discover.wtdir(shape.tree) : shape.tree;
@@ -282,12 +295,15 @@ function resolveScope(arg, wtl, reader) {
   const cur = wtlog.open(src).curTip();
   if (!cur || !cur.sha)
     throw "PATCHFAIL: source tree '" + shape.tree + "' has no cur tip";
-  //  PATCH-010: LOCAL-store gate — a tip our shard lacks is the cross-store
-  //  case; the download-first leg is PATCH-011, refuse loudly until it lands.
-  if (!reader.getObject(cur.sha))
-    throw "PATCHFAIL: source tip " + cur.sha +
-          " is not in the local store (fetch leg: PATCH-011)";
-  return patchscope.resolveTree(cur.sha, cur.branch, wtl, reader);
+  if (!shape.nav && src.storePath !== info.storePath) {
+    //  PATCH-011: the wt anchors ANOTHER store — fetch the tip's closure from
+    //  THAT store first; the absorb below is then the ordinary local patch.
+    fetchleg.fetchWtTip(info, src, cur.sha, arg);
+  } else if (!store.open(info.storePath, info.project).getObject(cur.sha)) {
+    //  PATCH-010: `//WT` (and a same-store wt) stays local-only.
+    throw "PATCHFAIL: source tip " + cur.sha + " is not in the local store";
+  }
+  return { tip: cur.sha, branch: cur.branch };
 }
 
 //  JAB-004: the run core (plain entry + the sub re-entry share it).  Resolves
@@ -295,16 +311,27 @@ function resolveScope(arg, wtl, reader) {
 //  here we open the store reader + wtlog and call patchscope.resolve ourselves
 //  (a pre-pinned ctx.triple, from the sub re-entry, is honoured as-is).
 function patchRun(ctx) {
-  const info = ctx.repo || be.find(ctx.arg || undefined);
+  //  PATCH-011: a scheme'd source arg never reaches be.find (it is a source
+  //  URI, not a context path) — the repo is the ambient/cwd context.
+  const schemed = !ctx.triple && fetchleg.isSchemed(ctx.arg || "");
+  const info = ctx.repo || be.find(schemed ? undefined : (ctx.arg || undefined));
   ctx.repo = info;
   const wtl = wtlog.open(info);
+  //  PATCH-010/011: resolve + (when foreign) FETCH the source FIRST — the
+  //  reader below must see the landed objects; a fetch failure refuses loudly
+  //  here, BEFORE any wt mutation.
+  const src = ctx.triple ? null : resolveSource(info, ctx.arg || "");
   const reader = store.open(info.storePath, info.project);
 
   //  Scope + the ours/theirs/fork commit triple.  The plain path has NO central
   //  seed (resolve.seed no longer pins ctx.triple), so PATCH pins its OWN triple
   //  from its commit arg via patchscope.resolve over the same wtl + reader.  A
-  //  sub re-entry supplies ctx.triple directly (the advanced sub pins).
-  const sc = ctx.triple || resolveScope(ctx.arg || "", wtl, reader);
+  //  sub re-entry supplies ctx.triple directly (the advanced sub pins).  A
+  //  tree/store/wire source hands its now-local tip to patchscope.resolveTree
+  //  (the PATCH-010 rebase point — the wholeTriple stopgap is gone).
+  const sc = ctx.triple ||
+      (src ? patchscope.resolveTree(src.tip, src.branch, wtl, reader)
+           : patchscope.resolve(ctx.arg || "", wtl, reader));
   if (!sc) throw "PATCHFAIL: a patch URI is required (`?<br>` | `?<br>!` | `#<sha>`)";
 
   //  Build the three tree maps; the union of their paths is the walk set.
