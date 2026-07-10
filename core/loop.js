@@ -235,6 +235,12 @@ function contextRepo(ctxUri) {
 
 function _statKind(p) { try { return io.stat(p).kind; } catch (e) { return undefined; } }
 
+//  BE-032: does a context string carry a `//` authority slot (however empty)?
+function _hasAuthority(s) {
+  try { return uri._parse(String(s || "")).authority !== undefined; }
+  catch (e) { return false; }
+}
+
 //  --- JSQUE-008: the canonical CLI entry (argv -> seed -> run -> flush) ---
 //  The SHARED integrated entry every later verb reuses: argv lowers to a verb +
 //  positional args + flags; the repo + its ambient coordinates are pinned ONCE
@@ -371,8 +377,16 @@ function _cli(argv, opts2) {
   //  threaded from the pager (opts2.context) so RAW args resolve relative to it
   //  (put/delete descend a mount per-arg); a miss / plain CLI falls to cwd — unchanged.
   else if (opts2.context && (nav = contextRepo(opts2.context))) { repo = nav.repo; authority = nav.authority; ctxDir = nav.dir; }
-  else try { repo = be.find(); ctxDir = opts2.reentry ? repo.wt : io.cwd(); }
-       catch (e) { /* repo-less verb reads be.repo=null */ }
+  else {
+    //  BE-032: a mutation's RELATIVE context (no `//` authority slot — a stale
+    //  tracked path like `sub/`) must refuse LOUDLY: the silent cwd fallback
+    //  posted in the WRONG repo.  An authority-formed miss keeps the fallback
+    //  (harness cells name trees the local SRC_ROOT cannot resolve).
+    if (opts2.context && _isMutation(verb) && !_hasAuthority(opts2.context))
+      throw "NAVNONE: context " + opts2.context + " is no worktree";
+    try { repo = be.find(); ctxDir = opts2.reentry ? repo.wt : io.cwd(); }
+    catch (e) { /* repo-less verb reads be.repo=null */ }
+  }
   mintBe({ repo: repo, sink: sink, out: out, format: mode, force: force, flags: flags,
            verb: verb, authority: authority, ctxDir: ctxDir });
   const pargs = args.map(function (t) { return argline.scalar(t); });

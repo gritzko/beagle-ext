@@ -678,6 +678,9 @@ Pager.prototype._runSpell = function (spell) {
   try {
     const s = this._resolveSpell(spell);
     if (!s) return;
+    //  BE-032: the PREVIOUS context (the authority donor), captured pre-push.
+    const prev = this._verbUri().uri ||
+                 (typeof be !== "undefined" && be.navCwd ? be.navCwd() : "");
     const hunks = this.driveSpell ? this.driveSpell(s) : null;
     if (!hunks || hunks.length === 0) { this.message = "no hunks: " + s; return; }
     this.pushView(hunks);
@@ -686,9 +689,25 @@ Pager.prototype._runSpell = function (spell) {
     //  (`#L`, `?ref`) resolves against the address, not the whole word spell.
     const sp = this._splitSpell(s);
     this.view.verb = sp.verb;
-    this.view.uri  = sp.uri;
+    //  BE-032: a click IS navigation — a root-relative target (launch-tree banners
+    //  omit the `//`) inherits the previous //authority, keeping the tracked
+    //  context scopeable; else the next `:post`/`:put` fell back to the LAUNCH repo.
+    this.view.uri  = this._fillAuth(sp.uri, prev);
     this.view.wrap = wrapFor(sp.verb);           // BRO-014: type default (W override)
   } catch (e) { this.message = "err: " + String(e); }
+};
+
+//  BE-032: fill a scheme-less, authority-less target's `//authority` slot from the
+//  previous context (URI-012's click twin); ?ref/#frag-only and schemed/authority-
+//  carrying targets pass through untouched.  Composed via URI.make, no string math.
+Pager.prototype._fillAuth = function (uri, prevUri) {
+  if (!uri) return uri;
+  const t = this._parse(uri);
+  if (t.scheme !== undefined || t.authority !== undefined || !t.path) return uri;
+  const prev = this._parse(prevUri || "");
+  if (prev.authority === undefined) return uri;
+  const path = t.path[0] === "/" ? t.path : "/" + t.path;
+  return URI.make(undefined, prev.authority, path, t.query, t.fragment) || uri;
 };
 
 //  DIS-060: total URI parse — never throws (an empty URI on malformed input).
