@@ -153,9 +153,6 @@ function readAddBytes(wtRoot, d) {
 //  trees (parent-first), and every `add` blob; then builds its idx.  Pack
 //  WRITE = git.pack.book/header/feed/finish; idx = ingest.buildIndex.
 function writePack(shard, wtRoot, commitBody, rootTreeSha, treeBodies, decisions) {
-  const logName = nextLogName(shard);
-  const path = join(shard, logName);
-
   //  Upper-bound the pack size: every object's content + generous per-record
   //  framing slack (header + zlib never exceeds content + 256 in practice).
   let cap = commitBody.length + 256;
@@ -174,28 +171,44 @@ function writePack(shard, wtRoot, commitBody, rootTreeSha, treeBodies, decisions
   }
   cap += 64;
 
-  const pk = git.pack.book(path, cap);
-  pk.header();
-  //  1. commit first.
+  //  JS-117: append to the tail of the highest log under the size threshold,
+  //  else open a fresh NNNNNNNNNN.keeper (empty shard / over cap).
+  const tgt = ingest.appendTarget(shard);
+  const path = join(shard, tgt.logName);
+  if (!tgt.append) {
+    const pk = git.pack.book(path, cap);
+    pk.header();
+    feedPack(pk, commitBody, rootTreeSha, treeBodies, addBytes);
+    pk.finish();
+    abc.close(pk);
+    ingest.buildIndex(shard, tgt.logName, tgt.fileId);
+  } else {
+    //  JS-117: build the pack in RAM, append its records (past the 12-byte
+    //  header); records+sync THEN idx run — a torn tail is unindexed = dead.
+    const scr = git.pack.over(new Uint8Array(cap));
+    scr.header();
+    feedPack(scr, commitBody, rootTreeSha, treeBodies, addBytes);
+    scr.finish();
+    const recLen = Number(scr.buffer.watermark) - 12;
+    const records = scr.subarray(12, 12 + recLen).slice();
+    const firstOff = ingest.appendRecords(path, records);
+    ingest.indexAppended(shard, tgt.fileId, firstOff, scr, recLen);
+  }
+  idxmaint.compactAfterAdd(shard);   // JS-116: restore the 1/8 run ladder
+  return tgt.logName;
+}
+
+//  JS-117: feed the pack body — commit, trees parent-first (treeBodies is DFS
+//  post-order, so reverse; empty tree when the set is all-unlink), then blobs.
+function feedPack(pk, commitBody, rootTreeSha, treeBodies, addBytes) {
   pk.feed("commit", commitBody, -1, null);
-  //  2. trees parent-first (root → leaves): treeBodies is DFS post-order
-  //  (children before parents), so reverse it.
   if (rootTreeSha) {
     for (let i = treeBodies.length - 1; i >= 0; i--)
       pk.feed("tree", treeBodies[i].body, -1, null);
   } else {
     pk.feed("tree", EMPTY_TREE_BODY, -1, null);
   }
-  //  3. blobs.
   for (const bytes of addBytes) pk.feed("blob", bytes, -1, null);
-  pk.finish();
-  abc.close(pk);
-
-  //  Build the native `.keeper.idx` so `be` (and store.js's prebuilt-idx
-  //  read path) see the new objects (ingest.js recipe, the same fileId).
-  ingest.buildIndex(shard, logName, ingest.fileIdOf(logName));
-  idxmaint.compactAfterAdd(shard);   // JS-116: restore the 1/8 run ladder
-  return logName;
 }
 
 module.exports = {

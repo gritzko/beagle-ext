@@ -94,10 +94,13 @@ function inferType(bytes) {
   return T_BLOB;
 }
 
-function indexPackByWalk(pk, fhi, ix) {
+//  JS-117: `afterOff` (default -1) skips records at/below that offset — used to
+//  index ONLY a tail-appended pack that pk.scan (count-driven) couldn't see.
+function indexPackByWalk(pk, fhi, ix, afterOff) {
+  const after = (afterOff == null) ? -1 : afterOff;
   pk.rewind();
   const offsets = [];
-  while (pk.next()) offsets.push(pk.offset);
+  while (pk.next()) if (pk.offset > after) offsets.push(pk.offset);
   for (const off of offsets) {
     pk.seek(off);
     if (pk.type === "ref-delta") {
@@ -242,10 +245,17 @@ function open(storePath, project) {
       let ents;
       try { ents = pk.scan(buf); } catch (e) { ents = null; }
       if (ents) {
-        for (let i = 0; i < ents.length; i += 2)
+        let maxOff = -1;
+        for (let i = 0; i < ents.length; i += 2) {
           ix.put(ents[i], ents[i + 1] | fhi);
+          const o = Number(ents[i + 1] & 0xffffffffffn);
+          if (o > maxOff) maxOff = o;
+        }
+        //  JS-117: scan is count-driven (first pack only) — walk any records
+        //  past its coverage so a tail-appended pack (multi-pack log) indexes.
+        indexPackByWalk(pk, fhi, ix, maxOff);
       } else {
-        indexPackByWalk(pk, fhi, ix);   // thin-pack fallback (see above)
+        indexPackByWalk(pk, fhi, ix, -1);   // thin-pack fallback (see above)
       }
     }
     ix.flush();

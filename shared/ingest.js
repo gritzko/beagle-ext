@@ -21,6 +21,48 @@
 const join = require("./util/path.js").join;   // JSQUE-016: path.js -> shared/util/
 const ulog = require("./ulog.js");
 const idxmaint = require("./idxmaint.js");     // JS-116: run-lifecycle upkeep
+const shalib = require("./util/sha.js");       // JS-117: tail-walk git-sha
+
+//  JS-117: tail-append cap ([/wiki/PackLog] many packs per log) — a new log
+//  opens only past this; 64 MiB bounds the per-log mmap, batches ~10^4 posts.
+const KEEP_LOG_MAX = 64 * 1024 * 1024;
+
+const NAME_TYPE = { commit: 1, tree: 2, blob: 3, tag: 4 };
+const TYPE_NAME = { 1: "commit", 2: "tree", 3: "blob", 4: "tag" };
+//  Best-effort git type from resolved bytes (the store.js twin) — a delta
+//  record's own type is the base's, so classify by the object header shape.
+function inferType(bytes) {
+  const n = Math.min(64, bytes.length);
+  let head = "";
+  for (let i = 0; i < n; i++) head += String.fromCharCode(bytes[i]);
+  if (head.startsWith("tree ") && head.indexOf("\n") > 0) return 1;
+  if (head.startsWith("object ")) return 4;
+  if (/^[0-7]{5,6} /.test(head)) return 2;
+  return 3;
+}
+
+//  JS-117: walk a log's records PAST `afterOff` (pk.scan is header-count-
+//  driven, blind to appended packs) → wh128 { key, off } pairs per object.
+function walkTail(pk, afterOff) {
+  pk.rewind();
+  const offs = [];
+  while (pk.next()) if (pk.offset > afterOff) offs.push(pk.offset);
+  const out = [];
+  for (const off of offs) {
+    pk.seek(off);
+    if (pk.type === "ref-delta") continue;      // unresolvable in pure JS
+    let bytes, tname;
+    try {
+      const b = io.buf((pk.size || 0) * 4 + 256);
+      pk.seek(off); pk.resolve(b); bytes = b.data(); tname = pk.type;
+    } catch (e) { continue; }
+    const type = NAME_TYPE[tname] || inferType(bytes);
+    const h = shalib.hashlet60FromBytes(
+        hex.decode(shalib.frameSha(TYPE_NAME[type], bytes)));
+    out.push({ key: (h << 4n) | BigInt(type), off: off });
+  }
+  return out;
+}
 
 function writeBytes(path, u8) {
   const fd = io.open(path, "c");
@@ -55,14 +97,24 @@ function buildIndex(shard, logName, fileId) {
   const buf = io.buf(cnt * 16 + 256);
   const ents = pk.scan(buf);                  // key,val,... (val = bare offset)
   const n = ents.length / 2;
-  const mem = abc.ram("HEAPwh128", n + 8);
+  //  JS-117: a rebuilt multi-pack log must not lose its appended tail — walk
+  //  the records past scan's (header-count-driven) coverage and index them.
+  let maxOff = -1;
+  for (let i = 1; i < ents.length; i += 2) {
+    const o = Number(ents[i] & 0xffffffffffn);
+    if (o > maxOff) maxOff = o;
+  }
+  const tail = walkTail(pk, maxOff);
+  const mem = abc.ram("HEAPwh128", n + tail.length + 8);
   const fid = BigInt(fileId), FIRST = 12n, PACK = 0xfn;
   mem.push((((FIRST << 20n) | fid) << 4n) | PACK,
-           (BigInt(n) << 32n) | (BigInt(pk.byteLength) - 12n));
+           (BigInt(n + tail.length) << 32n) | (BigInt(pk.byteLength) - 12n));
   for (let i = 0; i < n; i++) {
     const off = ents[i * 2 + 1] & 0xffffffffffn;
     mem.push(ents[i * 2], (off << 24n) | (fid << 4n) | 1n);
   }
+  for (const t of tail)
+    mem.push(t.key, (BigInt(t.off) << 24n) | (fid << 4n) | 1n);
   mem.sort();
   //  JS-116: collision-safe ron60 name — a pinned clock repeats ron.now(),
   //  and overwriting an existing run silently drops its coverage.
@@ -70,6 +122,61 @@ function buildIndex(shard, logName, fileId) {
   const out = abc.book("HEAPwh128", path, mem.size);
   abc.merge([mem], out);
   abc.close(out);
+}
+
+//  JS-117: append pack RECORDS at the log tail — grow the file, copy the bytes
+//  into the mapped tail, msync.  Existing bytes are never touched; returns the
+//  pre-append byte length (the new pack's first_off).
+function appendRecords(path, records) {
+  const fd = io.open(path, "rw");
+  let base;
+  try { base = io.size(fd); io.resize(fd, base + records.length); }
+  finally { io.close(fd); }
+  const map = io._mmap(path, "rw");
+  map.set(records, base);
+  io._msync(map);
+  return base;
+}
+
+//  JS-117: index ONE tail-appended pack as a fresh ron60 run — the 0xF bookmark
+//  (first_off, count<<32|recLen) + object rows with ABSOLUTE offsets rebased
+//  from the standalone pack view `pk` (offsets from 12) to firstOff.  pk.scan
+//  can't see a multi-pack log, so we scan the standalone pack the writer holds.
+function indexAppended(shard, fileId, firstOff, pk, recLen) {
+  const cnt = pk.count || 0;
+  const buf = io.buf(cnt * 16 + 256);
+  const ents = pk.scan(buf);
+  const n = ents.length / 2;
+  const mem = abc.ram("HEAPwh128", n + 8);
+  const fid = BigInt(fileId), PACK = 0xfn, delta = BigInt(firstOff) - 12n;
+  mem.push((((BigInt(firstOff) << 20n) | fid) << 4n) | PACK,
+           (BigInt(n) << 32n) | BigInt(recLen));
+  for (let i = 0; i < n; i++) {
+    const off = (ents[i * 2 + 1] & 0xffffffffffn) + delta;
+    mem.push(ents[i * 2], (off << 24n) | (fid << 4n) | 1n);
+  }
+  mem.sort();
+  const path = join(shard, idxmaint.freshRunName(shard));   // JS-116: no clobber
+  const out = abc.book("HEAPwh128", path, mem.size);
+  abc.merge([mem], out);
+  abc.close(out);
+}
+
+//  JS-117: pick the log to write.  The highest-numbered .keeper under the
+//  threshold is appended to (append=true, its own file_id); else the next seq
+//  opens a fresh file (append=false) — also the empty-shard and over-cap cases.
+function appendTarget(shard) {
+  let maxN = 0, maxNm = null, maxSz = 0;
+  try {
+    for (const nm of io.readdir(shard)) {
+      const m = /^(\d{10})\.keeper$/.exec(nm);
+      if (m) { const v = parseInt(m[1], 10); if (v > maxN) { maxN = v; maxNm = nm; } }
+    }
+  } catch (e) {}
+  if (maxNm) { try { maxSz = io.stat(join(shard, maxNm)).size; } catch (e) {} }
+  if (maxNm && maxSz < KEEP_LOG_MAX)
+    return { logName: maxNm, fileId: fileIdOf(maxNm), append: true };
+  return { logName: logName(maxN + 1), fileId: maxN + 1, append: false };
 }
 
 //  file_id = the keeper-log's 10-digit sequence prefix (0000000001 → 1).
@@ -148,16 +255,20 @@ function logName(n) {
 //  PATCH-011: land a pack into an EXISTING shard as the next-numbered pack-log,
 //  OBJECTS ONLY — no refs append (patch's fetch leg must not move local tips).
 function land(packBytes, shard) {
-  let max = 0;
-  try {
-    for (const nm of io.readdir(shard)) {
-      const m = /^(\d{10})\.keeper$/.exec(nm);
-      if (m) { const v = parseInt(m[1], 10); if (v > max) max = v; }
-    }
-  } catch (e) {}
-  const nm = logName(max + 1);
-  writeBytes(join(shard, nm), packLogBytes(packBytes));
-  buildIndex(shard, nm, fileIdOf(nm));
+  const tgt = appendTarget(shard);
+  if (!tgt.append) {                       // JS-117: fresh file (empty/over-cap)
+    writeBytes(join(shard, tgt.logName), packLogBytes(packBytes));
+    buildIndex(shard, tgt.logName, tgt.fileId);
+  } else {
+    //  JS-117: append this pack's records (strip PACK header + trailer) to the
+    //  tail; crash order: records+sync THEN idx run — a torn tail is dead.
+    const recs = packLogBytes(packBytes);  // [PACK hdr | records]
+    const records = recs.subarray(12).slice();
+    const firstOff = appendRecords(join(shard, tgt.logName), records);
+    const view = git.pack.over(recs);
+    view.buffer.watermark = recs.length;
+    indexAppended(shard, tgt.fileId, firstOff, view, records.length);
+  }
   idxmaint.compactAfterAdd(shard);   // JS-116: restore the 1/8 run ladder
 }
 
@@ -191,4 +302,5 @@ function saveRemoteRef(shard, remoteUri, tip) {
 }
 
 module.exports = { clone, add, land, reindexShard, buildIndex, writeBytes,
-                   packLogBytes, logName, fileIdOf, saveRemoteRef };
+                   packLogBytes, logName, fileIdOf, saveRemoteRef,
+                   KEEP_LOG_MAX, appendRecords, indexAppended, appendTarget };

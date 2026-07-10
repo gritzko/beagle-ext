@@ -173,17 +173,26 @@ function coverage(views) {
   if (!views.length || views.length > RUN_CAP) return null;
   const slices = views.map(sliceOf);
   const lo = 12n << 24n;                                  // ((12<<20|0)<<4)|0x0
-  const hi = ((((12n << 20n) | 0xfffffn) << 4n) | 0xfn) + 1n;
-  const cov = {};
+  //  JS-117: tail-appended packs bookmark at first_off>12 (< KEEP_LOG_MAX, the
+  //  append cap); covered = the CONTIGUOUS bookmark chain from 12 (a hole =
+  //  unindexed pack = uncovered, even if a later tail bookmark exists).
+  const CAP = BigInt(require("./ingest.js").KEEP_LOG_MAX);
+  const hi = ((((CAP << 20n) | 0xfffffn) << 4n) | 0xfn) + 1n;
+  const end = {};                                         // fid -> covered end
   let any = false;
   abc._seekrange_wh128(slices, lo, 0n, hi, 0n, function (kv) {
     if ((kv[0] & 0xfn) !== 0xfn) return true;             // not a PACK row
     const fid = Number((kv[0] >> 4n) & 0xfffffn);
-    const bytes = Number(kv[1] & 0xffffffffn);
-    if (!(cov[fid] >= bytes)) cov[fid] = bytes;
+    const first = Number(kv[0] >> 24n);
+    const ext = Number(kv[1] & 0xffffffffn);
+    const e = end[fid] === undefined ? 12 : end[fid];     // keys ascend by first
+    if (first <= e && first + ext > e) end[fid] = first + ext;
+    else if (end[fid] === undefined) end[fid] = 12;       // hole: chain stops
     any = true;
     return true;
   });
+  const cov = {};
+  for (const k in end) cov[k] = end[k] - 12;              // covered log bytes-12
   return any ? cov : null;
 }
 
