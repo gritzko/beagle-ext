@@ -445,7 +445,7 @@ function wtpath(wt, rel) {
 }
 
 module.exports = { find: find, wtdir: wtdir, resolve: resolve, wtpath: wtpath,
-                   argRel: argRel,
+                   argRel: argRel, ctxSub: _ctxSub,
                    navCwd: navCwd, cwd: contextCwd,
                    srcRoot: srcRoot, todoRoot: todoRoot, topWt: topWt,
                    //  exported for wtlog.js / tests

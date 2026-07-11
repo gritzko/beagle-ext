@@ -443,7 +443,7 @@ function classifyMerge(be, wtlogReader, reader, opts) {
 function classify(be, wtlogReader, keeperReader, opts) {
   opts = opts || {};
   const m = classifyMerge(be, wtlogReader, keeperReader,
-                          { listing: opts.listing });
+                          { listing: opts.listing, underNarrow: opts.underNarrow });
   //  Map the output ulog rows onto status's render rows ({bucket,path,ts}).
   //  DIS-057: a staged rename surfaces as the Dirty.mkd move PAIR — `rmv` on
   //  the SOURCE (present-in-base, absent-in-wt) and `mov` on the DESTINATION

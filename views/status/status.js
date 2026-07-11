@@ -114,6 +114,13 @@ function status() {
     let p; try { p = uri._parse(a); } catch (e) { p = {}; }
     if (p.path && p.path !== ".") { scope = p.path.replace(/^\.\//, ""); break; }
   }
+  //  STATUS-006: no explicit path arg → scope to the run's CONTEXT DIR (be.ctxDir
+  //  via discover.ctxSub, ROOTED so argRel skips the ctx re-resolve); a subdir cwd/
+  //  nav scopes to that subtree, the wt root (ctxSub "") stays whole-wt.
+  if (!scope && _be && _be.repo) {
+    const c = discover.ctxSub(_be.repo);
+    if (c) scope = "/" + c;
+  }
   if (scope && topWt) {
     //  WHY-001/BE-032: a leading `/` is the wt ROOT (`/` alone → whole wt); a
     //  relative path resolves against the CONTEXT dir (cwd/nav sub-dir).
@@ -150,8 +157,8 @@ function statusOne(row, ctx) {
   //  The seed (top) row carries the "." cwd placeholder (loop.cli) — its wt is
   //  the pinned repo. A legacy row.uri may pin a sub wt root (re-discover it).
   const pinned = (_be && _be.repo) || (ctx && ctx.repo) || null;
-  const repo = (row && row.uri && row.uri !== ".")
-        ? be.find(row.uri)
+  const reqAbs = (row && row.uri && row.uri !== ".") ? row.uri : null;
+  const repo = reqAbs ? be.find(reqAbs)
         : (pinned || be.find((row && row.uri) || undefined));
 
   //  The display-path prefix for this hunk: "" at the top, else this sub's
@@ -160,8 +167,13 @@ function statusOne(row, ctx) {
   const topWt = (pinned && pinned.wt) || repo.wt;
   const prefix = relUnder(topWt, repo.wt);
 
+  //  STATUS-006: a plain (non-sub) dir arg CLIMBS to its anchor repo; the residue
+  //  below the found repo root is a subtree FILTER (a mounted sub redirected to its
+  //  OWN shard has residue "" → whole sub, unchanged).
+  const filter = reqAbs ? relUnder(repo.wt, reqAbs) : "";
+
   //  DEPTH-FIRST walk: emit this repo's hunk, then recurse each mounted sub.
-  emitRepo(repo, prefix, out, recurse);
+  emitRepo(repo, prefix, out, recurse, filter);
 
   //  Flush sinkOut's last buffered hunk (the columnar out flushes at the edge).
   if (useSink) out.done();
@@ -257,11 +269,17 @@ function concatBytes(chunks, total) {
 //  rows + header are joined under it via a URI-aware path join, while the sub's
 //  `?<branch>` summary token and the `?<sha>#<subject>` divergence rows are
 //  NOT prefixed (they are not real path columns).
-function emitRepo(repo, prefix, out, recurse) {
+function emitRepo(repo, prefix, out, recurse, filter) {
   const log = wtlog.open(repo);
   const k   = store.open(repo.storePath, repo.project);
 
-  const res = classify.classify(repo, log, k);
+  //  STATUS-006: a non-empty FILTER scopes the classifier (DIS-054 underNarrow) to
+  //  the subtree — rows, counts AND gitlinks below `<filter>/` only, so the summary
+  //  never leaks whole-wt tallies and an unmounted sub outside is not recursed.
+  const narrow = filter
+        ? function (p) { return p === filter || p.indexOf(filter + "/") === 0; }
+        : null;
+  const res = classify.classify(repo, log, k, narrow ? { underNarrow: narrow } : undefined);
 
   //  Cur tip (for the ahead/behind divergence: SNIFFAtCurTip, no patch).
   const cur = log.curTip();
@@ -306,7 +324,9 @@ function emitRepo(repo, prefix, out, recurse) {
   //  Resolve cur tip + the LOCAL ref tip of cur's branch, walk ancestry.
   //  ahead → `post` rows, behind → `miss` rows, both prepended above the
   //  file rows.  Counts feed the trailing `(behind N, ahead M)` note.
-  const diverge = computeDivergence(k, log, cur);
+  //  STATUS-006: commit divergence (ahead/behind) is repo-level, not a path row —
+  //  a subtree FILTER suppresses it so the scoped hunk stays path-only.
+  const diverge = filter ? { ahead: [], behind: [] } : computeDivergence(k, log, cur);
 
   //  JSQUE-008: push every line through the emit sink (out) in final render
   //  order — the loop does ONE flush at the edge.  The columnar rows

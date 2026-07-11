@@ -579,9 +579,16 @@ function diffOne(arg) {
 //  JAB-004: PURE plain-args verb (`.jab="args"`) — loops args reading `be` only;
 //  diff recurses in-process (direct calls, NOT {enqueue}) so run() once suffices.
 function diff() {
-  //  DIFF-012: no-positional `jab diff` defaults to the whole-wt `diff:` spec
-  //  (the legacy seed's "." row) — diffOne maps "" to the whole-wt path.
-  const argv = arguments.length ? arguments : [""];
+  //  DIFF-013: no-positional `jab diff` scopes to the run's CONTEXT DIR (be.ctxDir
+  //  via discover.ctxSub, ROOTED + dir-form so parseDiffArg's argRel skips the ctx
+  //  re-resolve); a subdir cwd/nav diffs that subtree, the wt root (ctxSub "") the
+  //  whole wt (the DIFF-012 "" spec).
+  let argv = arguments;
+  if (!arguments.length) {
+    const _be = (typeof be !== "undefined") ? be : null;
+    const c = _be && _be.repo ? discover.ctxSub(_be.repo) : "";
+    argv = [c ? "/" + c + "/" : ""];
+  }
   for (let i = 0; i < argv.length; i++) diffOne(argv[i]);
 }
 diff.jab = "args";
