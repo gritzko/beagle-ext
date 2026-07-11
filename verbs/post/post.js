@@ -445,6 +445,26 @@ function anyStaged(wtl) {
   return any;
 }
 
+//  SUBS-052: transitive selective-scope probe — is `info` (a sub) in scope
+//  because IT or any MOUNTED descendant has staged rows / is adv? (fixes the
+//  nesting-blind gate: a change staged >=2 mounts down was invisible).
+function subScopedDeep(info) {
+  if (anyStaged(wtlog.open(info))) return true;
+  const reader = store.open(info.storePath, info.project);
+  const baseTip = wtlog.open(info).curTip();
+  const baseTree = (baseTip && baseTip.sha && isFullSha(baseTip.sha))
+        ? reader.commitTree(baseTip.sha) : "";
+  if (!baseTree) return false;
+  for (const s of subs.enumerate(info, reader, baseTree)) {
+    if (!s.mounted) continue;
+    if (s.bucket === "adv") return true;      // a descendant adv pulls it in
+    let subInfo;
+    try { subInfo = be.find(wtpath(info.wt, s.path)); } catch (e) { continue; }
+    if (subScopedDeep(subInfo)) return true;
+  }
+  return false;
+}
+
 //  SUBS-042: does an in-scope parent put/delete target this sub (its dir or a
 //  file under it)? — a gitlink bump or staged sub-internal change keeps it in scope.
 function subInParentScope(wtl, subPath) {
@@ -481,10 +501,12 @@ function postSubs(info, ctx) {
 
     //  SUBS-042 selective gate: skip a sub not in scope (no parent bump / sub-internal
     //  stage, no own anyPd, not already adv); commit-all falls through.
+    //  SUBS-052: the own-wtlog probe is now the TRANSITIVE subScopedDeep, so a
+    //  change staged in any mounted descendant (or a descendant adv) keeps it in.
     if (parentSelective &&
         !subInParentScope(wtl, s.path) &&
         s.bucket !== "adv" &&
-        !anyStaged(wtlog.open(subInfo)))
+        !subScopedDeep(subInfo))
       continue;
 
     //  The sub's cur tip BEFORE the recursive post.
