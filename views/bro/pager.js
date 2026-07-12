@@ -189,6 +189,11 @@ function Pager(fd, opts) {
   //  BE-046: the LAUNCH nav context (cwd AND the CLI `//X` arg) — the composer's
   //  fallback for the initial view, which tracks no uri of its own.
   this.context = (opts && opts.context) || "";
+  //  BRO-024: the REDUCED nav context `//WT/dir` — worktree authority + DIR
+  //  path, NOTHING else (the nav framework's $PWD; ?rev/#hash never enter it).
+  //  Set ONLY by navigation (a follow/click, a slot-edit :spell, back); ""
+  //  until the first nav (the launch context / navCwd supplies the fallback).
+  this.ctx = "";
   this.view = null;                              // { hunks, rows, scroll, cols }
   this.stack = [];                               // JAB-030: the view BACK-stack
   this.mode = "scroll";                          // "scroll" | "command"
@@ -218,6 +223,11 @@ Pager.prototype.popView = function () {
   if (!this.stack.length) { this.message = "(no prev view)"; return false; }
   this.view = this.stack.pop();
   this.view.rows = null;                         // re-index for the live width
+  //  BRO-024: back IS navigation — the restored view's RECORDED context (else
+  //  its address) re-anchors; the initial view falls back to the launch context.
+  const rc = this.view.call && this.view.call.context;
+  this.ctx = rc ? this._ctxFrom(rc)
+           : this.view.uri !== undefined ? this._ctxFrom(this.view.uri) : "";
   return true;                                   // DIS-060: back caller refreshes
 };
 
@@ -439,14 +449,27 @@ Pager.prototype._banner = function (hunk, cols) {
 //  The bottom line: in scroll mode the live status (statusURI#L + TOP/%/BOT);
 //  in command mode the `:`-prefixed edit buffer (a vim address bar).
 Pager.prototype._statusLine = function (rows, scroll, viewRows, cols) {
+  //  BRO-024: the prompt-like INVITE `//WT/dir/: ` — the context left of `: `,
+  //  the verb invocation right of it; a MISSING context dir paints the bar
+  //  red (the user cd's out, nothing crashes).
+  const invite = this._invite();
+  const red = this.color && this._ctxMissing() ? ESC + "[31m" : "";
   if (this.mode === "command") {
-    let line = ":" + this.cmd;
-    return (this.color ? ESC + "[7m" : "") + this._fit(line, cols) +
+    let line = invite + this.cmd;
+    return (this.color ? ESC + "[7m" + red : "") + this._fit(line, cols) +
            (this.color ? ESC + "[0m" : "");
   }
-  //  DIS-060/[Nav]: the address bar INDICATES the current (verb, URI).
-  const vu = this._verbUri();
-  let left = (vu.verb ? vu.verb + " " : "") + vu.uri;
+  //  DIS-060/[Nav]/BRO-024: the address bar INDICATES the current invocation as
+  //  `<context>: <verb> <args>` — a verb call's RECORDED spell (args as entered),
+  //  else derived: the nav'd FILE shows relative (`//WT/dog/: cat DOG.h`).
+  const call = this.view && this.view.call;
+  let left;
+  if (call && call.disp !== undefined) left = invite + call.disp;
+  else {
+    const vu = this._verbUri();
+    const rel = this._relToCtx(vu.uri);
+    left = invite + (vu.verb || "") + (rel ? (vu.verb ? " " : "") + rel : "");
+  }
   if (this.message) left = this.message + "  " + left;
   //  BRO-007: `<pos>  h: help` (help pointer + scroll position) is RIGHT-aligned;
   //  the URI stays left, the gap between them padded to the terminal width.
@@ -458,7 +481,7 @@ Pager.prototype._statusLine = function (rows, scroll, viewRows, cols) {
     if (left.length > space - 1) left = left.slice(0, space - 1);
     line = left + " ".repeat(space - left.length) + right;
   }
-  return (this.color ? ESC + "[7m" : "") + this._fit(line, cols) +
+  return (this.color ? ESC + "[7m" + red : "") + this._fit(line, cols) +
          (this.color ? ESC + "[0m" : "");
 };
 
@@ -698,6 +721,10 @@ Pager.prototype._runSpell = function (spell) {
     //  context scopeable; else the next `:post`/`:put` fell back to the LAUNCH repo.
     this.view.uri  = this._fillAuth(sp.uri, prev);
     this.view.wrap = wrapFor(sp.verb);           // BRO-014: type default (W override)
+    //  BRO-024: the view RECORDS its invocation — back/refresh replay IT verbatim.
+    this.view.call = { verb: sp.verb, spell: s, context: "" };
+    //  BRO-024: a follow/click IS navigation — REDUCE the target to the context.
+    this.ctx = this._ctxFrom(this.view.uri);
   } catch (e) { this.message = "err: " + String(e); }
 };
 
@@ -752,6 +779,105 @@ Pager.prototype._verbUri = function () {
   return { verb: verb, uri: spell };
 };
 
+//  BRO-024: the CURRENT context URI — the tracked reduced context (this.ctx),
+//  else the reduction of the launch fallbacks (a not-yet-nav'd session).
+Pager.prototype._context = function () {
+  if (this.ctx) return this.ctx;
+  const v = this.view;
+  const base = (v && v.uri) || this.context ||
+               (typeof be !== "undefined" && be.navCwd ? be.navCwd() : "");
+  return base ? this._ctxFrom(base) : "";
+};
+
+//  BRO-024: REDUCE a navigated address to the `//WT/dir` context — worktree +
+//  DIR only (?rev/#hash stay in view URIs/links; a FILE contributes its dir).
+Pager.prototype._ctxFrom = function (uriStr) {
+  const cur = this.ctx || "";
+  const u = this._parse(uriStr || "");
+  if (u.scheme && TRANSPORT[u.scheme]) return cur;     // a wire address, not nav
+  if (u.authority === undefined && !u.path) return cur; // ?/#/verb-only: no move
+  const auth = u.authority !== undefined ? u.authority
+             : this._parse(cur).authority;
+  let p = u.path || "";
+  const marked = p.length > 1 && p[p.length - 1] === "/";   // explicit dir form
+  p = p.replace(/\/+$/, "");
+  if (auth !== undefined && p && p[0] !== "/") p = "/" + p;
+  if (p && !marked &&
+      this._ctxKind(URI.make(undefined, auth, p) || p) === "reg")
+    p = dirOf(p);                                     // a FILE → its dir
+  if (p === "/") p = "";
+  return URI.make(undefined, auth, p || undefined) ||
+         (auth !== undefined ? String(auth) : p || cur);
+};
+
+//  BRO-024: stat the fs object a `//WT/path` context URI addresses — "dir"/
+//  "reg", or undefined when it does not resolve/stat (repo-less, gone, remote).
+Pager.prototype._ctxKind = function (navStr) {
+  try {
+    const d = discover.wtdir(navStr);
+    return d ? io.stat(d).kind : undefined;
+  } catch (e) { return undefined; }
+};
+
+//  BRO-024: the prompt-like INVITE — the context, a trailing `/`, colon-space:
+//  `//WT/dir/: `.  Everything LEFT of `: ` is context, everything right the
+//  verb invocation (the shell-prompt reading of the address bar).
+Pager.prototype._invite = function () {
+  const c = this._context();
+  if (!c) return ": ";
+  return (c[c.length - 1] === "/" ? c : c + "/") + ": ";
+};
+
+//  BRO-024: the view's address RELATIVE to the context — the invite's spell
+//  part (`//WT/dog/: cat DOG.h`); the view's own ?rev/#hash ride the argument.
+Pager.prototype._relToCtx = function (uriStr) {
+  const u = this._parse(uriStr || "");
+  if (u.scheme !== undefined) return uriStr || "";
+  const c = this._parse(this._context());
+  if (u.authority !== undefined &&
+      String(u.authority) !== String(c.authority)) return uriStr || "";
+  let p = u.path || "";
+  const cp = (c.path || "").replace(/\/+$/, "");
+  if (p.replace(/\/+$/, "") === cp) p = "";
+  else if (cp && p.indexOf(cp + "/") === 0) p = p.slice(cp.length + 1);
+  else p = p.replace(/^\/+/, "");
+  return URI.make(undefined, undefined, p || undefined, u.query, u.fragment) || "";
+};
+
+//  BRO-024: is the context dir GONE from disk?  Paint the invite red then —
+//  never crash; the user cd's out.  An UNRESOLVABLE context (repo-less /
+//  outside the hive) is not "missing" — no red in scope-less sessions.
+Pager.prototype._ctxMissing = function () {
+  const c = this._context();
+  if (!c) return false;
+  let d; try { d = discover.wtdir(c); } catch (e) { d = null; }
+  if (!d) return false;
+  try { return io.stat(d).kind !== "dir"; } catch (e) { return true; }
+};
+
+//  BRO-024: the view's SOLE subject — the one distinct FILE address across the
+//  open hunks (a bare verb call's implied arg); "" when zero/many/a dir view.
+Pager.prototype._viewSubject = function () {
+  const v = this.view;
+  if (!v || !v.hunks) return "";
+  let auth, path, query;
+  for (const h of v.hunks) {
+    const u = this._parse(this._splitSpell(h.uri || "").uri);
+    if (!u.path) continue;
+    if (path === undefined) { auth = u.authority; path = u.path; query = u.query; }
+    else if (u.path !== path) return "";           // ≥2 file subjects: ambiguous
+  }
+  if (path === undefined) return "";
+  if (this._ctxKind(URI.make(undefined, auth, path) || path) === "dir")
+    return "";                                     // an ls-shaped view: a DIR, no subject
+  //  the VIEW's own ?rev/#hash (its tracked nav address) outrank the banners'
+  //  per-hunk `#L` anchors — those are line positions, not the subject's rev.
+  const t = this._parse(v.uri || "");
+  const frag = t.path === path ? t.fragment : undefined;
+  if (t.path === path && t.query !== undefined) query = t.query;
+  return URI.make(undefined, auth, path, query, frag) || "";
+};
+
 //  URI-011: the `word(context_uri, …rest)` spell composer.  Split the address-
 //  bar spell, peel a leading bareword VERB, then shape arg 0 from the FIRST
 //  URI-shaping token (`./x` path, `//WT` auth, `?x` ref, `#x` frag, `scheme:…`);
@@ -769,7 +895,9 @@ Pager.prototype._composeCall = function (s) {
   const v = this.view;
   //  BE-046: view.uri (a nav'd view) → the LAUNCH context (the initial view) →
   //  the cwd context; the worktree only ever switches by an explicit `//X`.
-  const ctxUri = (v && v.uri) || this.context ||
+  //  BRO-024: a NAV'D session composes against the REDUCED context (this.ctx,
+  //  `//WT/dir` only); the raw fallbacks serve the un-nav'd initial view.
+  const ctxUri = this.ctx || (v && v.uri) || this.context ||
                  (typeof be !== "undefined" && be.navCwd ? be.navCwd() : "");
   return SPELL.compose(ctxUri, this._verbUri().verb, s, this.isVerb);
 };
@@ -847,19 +975,35 @@ Pager.prototype._applySpell = function (cmd) {
   const g = this._globSpell(s);
   if (g === null) return;
   const c = this._composeCall(g);
+  //  BRO-024: a BARE verb call (no args typed) takes the view's SOLE subject as
+  //  its implied arg0 — the UI's "current selection", tracked so the invite
+  //  shows the implied call; the VERB still resolves it (the arg-blind law).  A
+  //  context already naming the subject (the legacy launch fallback) implies nothing.
+  let track = c.context || c.arg0;
+  //  BRO-024: the bar's spell text — a typed verb call shows AS ENTERED (`g`),
+  //  an implied call its implied invocation; a slot-edit keeps the derived form.
+  let disp = c.call ? g : undefined;
+  if (c.call && !c.arg0 && !c.rest.length) {
+    const subj = this._viewSubject();
+    if (subj && subj !== c.context) {
+      c.arg0 = subj; track = subj;
+      disp = c.verb + " " + this._relToCtx(subj);
+    }
+  }
   //  BE-047: an EDITOR verb (vim/nvim, fn.tty) takes the terminal — suspend raw
   //  mode, drive it (the verb waits on the editor), resume, re-drive the view.
   if (c.verb && this.isTty && this.isTty(c.verb)) { this._editSpell(c); return; }
   //  BE-039: hand the verb the context AS CONTEXT (c.context, via driveSpell) + args
   //  RAW; a verb-call does not navigate, so TRACK the nav context (not arg0's path) as
   //  the view URI.  A slot-edit has context "" → track the merged arg0 (unchanged).
-  this._driveApply(this._buildSpell(c), c.verb, c.context || c.arg0, c.context);
+  //  BRO-024: only a SLOT-EDIT (no verb word — c.call unset) moves the context.
+  this._driveApply(this._buildSpell(c), c.verb, track, c.context, !c.call, disp);
 };
 
 //  DIS-060: drive a resolved spell + track the view's (verb, uri).  Shared by the
 //  slot-edit path (a recomposed URI) and the message-call path (a raw spell).
 //  BE-039: `context` (the nav scope) rides through to the verb; "" for a slot-edit.
-Pager.prototype._driveApply = function (spell, verb, uri, context) {
+Pager.prototype._driveApply = function (spell, verb, uri, context, nav, disp) {
   try {
     const hunks = this.driveSpell ? this.driveSpell(spell, context) : null;
     if (!hunks || hunks.length === 0) { this.message = "no hunks: " + spell; return; }
@@ -867,6 +1011,12 @@ Pager.prototype._driveApply = function (spell, verb, uri, context) {
     this.view.verb = verb;
     this.view.uri  = uri;
     this.view.wrap = wrapFor(verb);              // BRO-014: type default (W override)
+    //  BRO-024: RECORD the full invocation {context, verb, args} on the view —
+    //  the bar shows `disp`, back/refresh replay `spell` in `context` verbatim.
+    this.view.call = { verb: verb, spell: spell, context: context || "", disp: disp };
+    //  BRO-024: a slot-edit IS navigation — REDUCE the merged address to the
+    //  `//WT/dir` context (a verb word-call never moves the context).
+    if (nav) this.ctx = this._ctxFrom(uri);
   } catch (e) { this.message = "err: " + String(e); }
 };
 
@@ -901,19 +1051,33 @@ Pager.prototype._resume = function () {
   ttyWrite(this.fd, HIDE_CUR + (this.mouse ? MOUSE_ON : "") + PASTE_ON);
 };
 
-//  DIS-060: REFRESH the current view — re-run its (verb, uri) spell and swap the
-//  hunks IN PLACE (no pushView, no back-stack entry), keeping the scroll pos so a
-//  changed store/wt re-renders where the user was.  render() clamps a now-shorter
-//  scroll.  Reconstructs the spell from _verbUri (tracked, else hunk-decoded).
+//  DIS-060: REFRESH the current view — re-run its spell and swap the hunks IN
+//  PLACE (no pushView, no back-stack entry), keeping the scroll pos so a changed
+//  store/wt re-renders where the user was.  render() clamps a now-shorter scroll.
+//  BRO-024: replays THE RECORDED invocation in THE RECORDED context (view.call)
+//  — never a re-derivation from view.uri (a verb call's uri is its CONTEXT, so
+//  deriving replayed a BARE verb: `:diff f` refreshed to the full-tree diff).
+//  A call-less view (the initial/launch view) keeps the _verbUri derivation.
 Pager.prototype._refresh = function () {
   const v = this.view;
   if (!v) return;
-  const vu = this._verbUri();
-  const spell = (vu.verb ? vu.verb + " " : "") + vu.uri;
-  if (!spell.trim()) { this.message = "(nothing to refresh)"; return; }
+  const call = v.call;
+  const verb = call ? call.verb : this._verbUri().verb;
+  //  BRO-015: a MUTATION verb (post/put/delete — the verbs/ tree) must NEVER
+  //  re-execute on back/R; the saved hunks stand.
+  if (verb && this.isMutation && this.isMutation(verb)) {
+    this.message = "(" + verb + ": not re-run)"; return;
+  }
+  let spell, ctx2;
+  if (call) { spell = call.spell; ctx2 = call.context || undefined; }
+  else {
+    const vu = this._verbUri();
+    spell = (vu.verb ? vu.verb + " " : "") + vu.uri;
+  }
+  if (!spell || !spell.trim()) { this.message = "(nothing to refresh)"; return; }
   const scroll = v.scroll;
   try {
-    const hunks = this.driveSpell ? this.driveSpell(spell) : null;
+    const hunks = this.driveSpell ? this.driveSpell(spell, ctx2) : null;
     if (!hunks || hunks.length === 0) { this.message = "no hunks: " + spell; return; }
     v.hunks = hunks; v.rows = null; v.scroll = scroll;   // re-index, keep the pos
     this.message = "refreshed";

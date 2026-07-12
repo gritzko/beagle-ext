@@ -103,7 +103,10 @@ function compose(ctxUri, verbFallback, spell, isVerb) {
   //  as CONTEXT (threaded via driveSpell); a slot-edit (no verb) keeps the merge (nav).
   if (verbCall) {
     const rest = items.map(function (it) { return it.tok; });
-    return { verb: verb, arg0: rest.length ? rest.shift() : "", rest: rest, context: ctxUri };
+    //  BRO-024: `call` marks a VERB word-call (vs a slot-edit) — the pager only
+    //  moves its context on a slot-edit (a verb call never navigates).
+    return { verb: verb, arg0: rest.length ? rest.shift() : "", rest: rest,
+             context: ctxUri, call: true };
   }
   const s = shapeArg0(ctxUri, items, true);   // pager: a bareword IS a URI part
   return { verb: verb, arg0: s.arg0, rest: s.rest, context: "" };
