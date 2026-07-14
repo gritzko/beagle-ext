@@ -1,8 +1,12 @@
 //  mark/render.js — StrictMark → HTML, a pure-JS port of beagle/mark (MARK.c)
 //  + the dog/tok MKDT block/inline grammars.  No dogenizer: StrictMark's inline
 //  layer IS regex markers and its block layer is a regular language, so the
-//  whole renderer is regexes + a container stack.  Output is byte-identical to
-//  the C `mark` renderer (the golden html/wiki/StrictMark.C.html).
+//  whole renderer is regexes + a container stack.  Output tracked the C `mark`
+//  renderer byte-for-byte (the golden html/wiki/StrictMark.C.html) until
+//  captioned figures: a paragraph-leading `![alt][l]` now renders as a
+//  <figure>/<figcaption> pair, where C still emits a bare inline <img>.  Every
+//  other construct stays byte-identical, so the golden holds for pages without
+//  a leading image; beagle/mark/MARK.c has yet to grow the same rule.
 //
 //  renderDoc(src, title, opts) -> full HTML document string.
 //    opts.head / opts.body : raw HTML injected before </head> / after <body>.
@@ -110,6 +114,22 @@ function emitUrl(url) {                        // trailing .mkd -> .html, escape
   return esc(url);
 }
 
+//  A figure's layout rides in the image URL fragment, the same styling channel
+//  the bare <img> uses (assets/css/style.css): `pic.jpg#rightw40` -> the
+//  classes `right w40`, which the stylesheet floats and widths.  The fragment
+//  stays in src (the browser drops it when fetching); the classes just move the
+//  layout onto the figure, so the caption travels with the image.
+function figureClass(url) {
+  var hash = url.indexOf("#");
+  var frag = hash < 0 ? "" : url.slice(hash + 1);
+  var cls = [];
+  var align = /left|right|center/.exec(frag);
+  if (align) cls.push(align[0]);
+  var width = /w[0-9]+/.exec(frag);
+  if (width) cls.push(width[0]);
+  return cls.join(" ");
+}
+
 //  ---- the renderer ----
 function Renderer(opts) {
   this.out = [];
@@ -173,6 +193,21 @@ Renderer.prototype.emitLink = function (g, image) {
   if (pathlink || implicit) this.escf(trimPageExt(baseName(g.text)));
   else this.escf(g.text);
   this.lit("</a>");
+};
+
+//  emit `![text][label]` as a captioned <figure>: the bracket text is both the
+//  alt and the visible caption.  Only paragraph-leading images come here (see
+//  paraFlush); a mid-sentence image stays a bare inline <img> via emitLink.
+Renderer.prototype.emitFigure = function (text, label) {
+  var url = this.refs[label];
+  var cls = url === undefined ? "" : figureClass(url);
+  this.lit("<figure");
+  if (cls) { this.lit(' class="'); this.escf(cls); this.lit('"'); }
+  this.lit(">\n<img src=\"");
+  if (url !== undefined) this.lit(emitUrl(url));
+  this.lit('" alt="'); this.escf(text); this.lit('">\n');
+  this.lit("<figcaption>"); this.escf(text); this.lit("</figcaption>\n");
+  this.lit("</figure>\n");
 };
 
 //  inline render (mark_inline + mark_inline_cb): tokenize `text`, emit HTML.
@@ -253,6 +288,9 @@ function classify(line) {
 function isBlank(line) { return /^[ \t\r]*$/.test(line); }
 
 //  ---- block state machine (MARK.c mark_blocks) ----
+//  `![alt][l]` opening a paragraph, plus the space that joined the next line in.
+var LEAD_IMAGE = /^!\[([^\]\n]+)\]\[([0-9A-Za-z])\]\s*/;
+
 function renderBlocks(rd, src) {
   var lines = [];
   { var s = src, nl;
@@ -272,7 +310,13 @@ function renderBlocks(rd, src) {
       rd.inline(st.para);
       if (st.paraDel) rd.lit("</del>");
     } else {
-      rd.lit("<p>\n"); rd.inline(st.para); rd.lit("\n</p>\n");
+      //  An image opening the paragraph becomes a captioned <figure>.  <figure>
+      //  is flow content, so it cannot nest in <p> — hoist it out ahead of the
+      //  paragraph; a floated figure escapes the <p> box anyway, and an image
+      //  alone in its paragraph then needs no <p> at all.
+      var body = st.para, lead = LEAD_IMAGE.exec(body);
+      if (lead) { rd.emitFigure(lead[1], lead[2]); body = body.slice(lead[0].length); }
+      if (/\S/.test(body)) { rd.lit("<p>\n"); rd.inline(body); rd.lit("\n</p>\n"); }
     }
     st.para = ""; st.inPara = false; st.paraOpener = false;
     st.paraLi = false; st.paraDel = false;

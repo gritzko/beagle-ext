@@ -474,7 +474,7 @@ function _launchContext(args, repo, ctxDir) {
     if (!u.path || (u.scheme && TRANSPORT[u.scheme])) continue;
     try {
       const fs = be.wtpath(repo.wt, be.argRel(repo, u.path));
-      io.stat(fs);                               // path-bearing = a REAL path
+      if (_statKind(fs) !== "reg") break;        // only a FILE arg folds (BE-048); a dir arg keeps the dir ctx
       return be.navCwd(fs) || dirCtx;
     } catch (e) { break; }                       // NAVESCAPE/miss → dir context
   }
