@@ -82,6 +82,48 @@ function packLogBytes(packBytes) {
   return packBytes.subarray(0, packBytes.length - 20);
 }
 
+//  GET-044: is this pack source a STREAMED tmp file ({packFile,packLen}) rather
+//  than an in-memory Uint8Array?  Callers pass either shape through clone/add/land.
+function isFileSrc(s) { return !!(s && s.packFile); }
+
+//  GET-044: jab's mmap bindings are 31-bit — io.mmap returns a WRONG length and
+//  git.pack.mmap ABORTS the process past 2^31-1 bytes (probed 2026-07-14).
+const MMAP_CAP = 2147483647;
+
+//  GET-044: mmap a streamed tmp pack file and verify its git 20-byte sha1
+//  trailer == sha1(body) — zero-copy (no heap alloc).  Only for sources the
+//  wire did NOT already stream-verify; refuses past MMAP_CAP (the map would
+//  silently truncate).  Returns the mmap Buf; throws on bad magic / trailer.
+function mapAndVerify(packFile, packLen) {
+  if (packLen < 32) throw "ingest: not a PACK stream (" + packLen + " bytes)";
+  if (packLen > MMAP_CAP)
+    throw "ingest: pack " + packLen + " bytes exceeds the jab mmap cap (" +
+          MMAP_CAP + ") — cannot map-verify (stream-verify it instead)";
+  const buf = io.mmap(packFile, "r");
+  const u = buf.data();
+  if (utf8.Decode(u.subarray(0, 4)) !== "PACK")
+    throw "ingest: not a PACK stream (bad magic)";
+  const got = hex.encode(sha1(u.subarray(0, packLen - 20)));
+  const want = hex.encode(u.subarray(packLen - 20, packLen));
+  if (got !== want)
+    throw "ingest: pack sha1 trailer mismatch (got " + got + " want " + want + ")";
+  return buf;
+}
+
+//  GET-044: verify a streamed tmp pack (skip when the wire stream-verified it
+//  already), then atomically RENAME it into the keeper-log path and drop the
+//  20-byte trailer (io.resize).  tmp + dest share the shard's FS, so the
+//  rename is atomic.  On any failure the tmp file is unlinked (store untouched).
+function verifyAndPlace(src, logPath) {
+  if (!src.verified) {
+    try { mapAndVerify(src.packFile, src.packLen); }
+    catch (e) { try { io.unlink(src.packFile); } catch (e2) {} throw e; }
+  }
+  io.rename(src.packFile, logPath);
+  const fd = io.open(logPath, "rw");
+  try { io.resize(fd, src.packLen - 20); } finally { io.close(fd); }
+}
+
 //  Build the native `<ron64>.keeper.idx` for one keeper-log: a sorted wh128
 //  run of a PACK-summary entry + one entry per object.  Native keeper reads
 //  this prebuilt index (it does NOT scan a bare `.keeper`), so a clone is
@@ -91,6 +133,13 @@ function packLogBytes(packBytes) {
 //    PACK:   key = ((first_off<<20 | file_id) << 4) | 0xF
 //            val = (count << 32) | (logBytes - 12)
 function buildIndex(shard, logName, fileId) {
+  //  GET-044: past MMAP_CAP git.pack.mmap ABORTS the process (31-bit binding);
+  //  refuse cleanly — the landed log is durable, indexing needs a jab-side fix.
+  const lsz = io.stat(join(shard, logName)).size;
+  if (lsz > MMAP_CAP)
+    throw "ingest: " + logName + " (" + lsz + " bytes) landed OK but exceeds " +
+          "the jab 2^31-1 mmap cap — index/checkout need a jab-side windowed " +
+          "mmap (GET-044 follow-up); the pack is preserved";
   const pk = git.pack.mmap(join(shard, logName), "r");
   pk.buffer.watermark = pk.byteLength;
   const cnt = pk.count || 0;
@@ -197,6 +246,9 @@ function reindexShard(shard) {
   const scans = [];
   let total = 0;
   for (const nm of logs) {
+    //  GET-044: skip a log past the 31-bit mmap cap (native abort otherwise).
+    let lsz = 0; try { lsz = io.stat(join(shard, nm)).size; } catch (e) {}
+    if (lsz > MMAP_CAP) continue;
     const pk = git.pack.mmap(join(shard, nm), "r");
     pk.buffer.watermark = pk.byteLength;
     const buf = io.buf((pk.count || 0) * 16 + 256);
@@ -224,11 +276,15 @@ function reindexShard(shard) {
   abc.close(out);
 }
 
-function clone(packBytes, beDir, proj, tip, remoteUri) {
+function clone(pack, beDir, proj, tip, remoteUri) {
   try { io.mkdir(beDir); } catch (e) {}
   const shard = join(beDir, proj);
   try { io.mkdir(shard); } catch (e) {}
-  writeBytes(join(shard, "0000000001.keeper"), packLogBytes(packBytes));
+  const logPath = join(shard, "0000000001.keeper");
+  //  GET-044: a streamed tmp file is verified + renamed into place (bounded
+  //  RSS); an in-memory pack keeps the legacy write.
+  if (isFileSrc(pack)) verifyAndPlace(pack, logPath);
+  else writeBytes(logPath, packLogBytes(pack));
   buildIndex(shard, "0000000001.keeper", 1);
   //  refs: the origin remote-tracking row + the local trunk tip (`post ?#`),
   //  the row keeper.resolveRef('') matches.  Remote URI query stripped to `?`.
@@ -254,20 +310,46 @@ function logName(n) {
 
 //  PATCH-011: land a pack into an EXISTING shard as the next-numbered pack-log,
 //  OBJECTS ONLY — no refs append (patch's fetch leg must not move local tips).
-function land(packBytes, shard) {
-  const tgt = appendTarget(shard);
+function land(pack, shard) {
+  let tgt = appendTarget(shard);
+  const fromFile = isFileSrc(pack);
+  //  GET-044: a streamed pack past MMAP_CAP cannot ride the append path (the
+  //  tmp mmap would truncate) — land it as its own fresh log via rename.
+  if (fromFile && tgt.append && pack.packLen > MMAP_CAP)
+    tgt = { logName: logName(fileIdOf(tgt.logName) + 1),
+            fileId: fileIdOf(tgt.logName) + 1, append: false };
   if (!tgt.append) {                       // JS-117: fresh file (empty/over-cap)
-    writeBytes(join(shard, tgt.logName), packLogBytes(packBytes));
+    const logPath = join(shard, tgt.logName);
+    //  GET-044: streamed file verified + renamed; in-memory pack written.
+    if (fromFile) verifyAndPlace(pack, logPath);
+    else writeBytes(logPath, packLogBytes(pack));
     buildIndex(shard, tgt.logName, tgt.fileId);
   } else {
     //  JS-117: append this pack's records (strip PACK header + trailer) to the
     //  tail; crash order: records+sync THEN idx run — a torn tail is dead.
-    const recs = packLogBytes(packBytes);  // [PACK hdr | records]
-    const records = recs.subarray(12).slice();
+    //  GET-044: a streamed source mmaps the tmp file (records are a zero-copy
+    //  subarray — no heap pack); an in-memory source keeps the .slice() copy.
+    let recs, records, tmpFile = null;
+    if (fromFile) {
+      //  GET-044: abort (bad trailer) must unlink the tmp — store untouched.
+      //  A wire-verified source skips the re-hash but still maps for the copy.
+      let map;
+      try {
+        map = pack.verified ? io.mmap(pack.packFile, "r")
+                            : mapAndVerify(pack.packFile, pack.packLen);
+      } catch (e) { try { io.unlink(pack.packFile); } catch (e2) {} throw e; }
+      recs = map.data().subarray(0, pack.packLen - 20);   // [PACK hdr | records]
+      records = recs.subarray(12);                        // zero-copy
+      tmpFile = pack.packFile;
+    } else {
+      recs = packLogBytes(pack);           // [PACK hdr | records]
+      records = recs.subarray(12).slice();
+    }
     const firstOff = appendRecords(join(shard, tgt.logName), records);
     const view = git.pack.over(recs);
     view.buffer.watermark = recs.length;
     indexAppended(shard, tgt.fileId, firstOff, view, records.length);
+    if (tmpFile) try { io.unlink(tmpFile); } catch (e) {}
   }
   idxmaint.compactAfterAdd(shard);   // JS-116: restore the 1/8 run ladder
 }
@@ -275,8 +357,8 @@ function land(packBytes, shard) {
 //  add(): land another full pack into an EXISTING shard as the next-numbered
 //  pack-log, and append the new tip to the shard's refs (remote-track + the
 //  local `post ?#` trunk row).  Used by the remote re-get (update) path.
-function add(packBytes, shard, remoteUri, tip) {
-  land(packBytes, shard);   // PATCH-011: the shared objects-only landing core
+function add(pack, shard, remoteUri, tip) {
+  land(pack, shard);   // PATCH-011: the shared objects-only landing core (GET-044: file|mem)
   //  JS-073: append the new tip rows via ulog.append (native in-place booked
   //  append) — survivors keep their ORIGINAL ts; only the new rows get a stamp.
   //  URI-013: `origin` row LEFT hand-composed ([URI-009] present-empty `?` +
@@ -303,4 +385,5 @@ function saveRemoteRef(shard, remoteUri, tip) {
 
 module.exports = { clone, add, land, reindexShard, buildIndex, writeBytes,
                    packLogBytes, logName, fileIdOf, saveRemoteRef,
-                   KEEP_LOG_MAX, appendRecords, indexAppended, appendTarget };
+                   KEEP_LOG_MAX, MMAP_CAP, appendRecords, indexAppended,
+                   appendTarget };

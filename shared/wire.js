@@ -23,6 +23,7 @@ const shq = require("../view/render.js").shQuote;       // JSQUE-016: render -> 
 const store = require("./store.js");   // GIT-018: JS store reader for the push-pack closure walk
 const uriarg = require("./uri.js");    // URI-015: scp-form remote → ssh://
 const branchlib = require("./branch.js");   // SUBS-050: the ONE branch codec
+const join = require("./util/path.js").join;   // GET-044: tmp-pack path in the shard
 
 //  --- transport classify -------------------------------------------------
 //  Decide the peer spawn from the remote URI, mirroring WIRECLI wcli_spawn:
@@ -155,6 +156,70 @@ function readToEof(fd, head) {
   let off = 0;
   for (const c of chunks) { out.set(c, off); off += c.length; }
   return out;
+}
+
+//  GET-044: STREAM the raw pack to a `tmp_pack_*` file in `destDir` (the
+//  destination shard's own FS → an atomic rename lands it), constant RSS — a
+//  multi-GB pack never buffers in the heap (the old readToEof concat OOMed /
+//  RangeError'd).  The git sha1 TRAILER is verified AS THE BYTES STREAM (a
+//  20-byte lag ahead of the incremental hasher — io.mmap truncates past 2^31-1
+//  so a post-hoc map-hash cannot cover a big pack); a mismatch unlinks the tmp
+//  and throws (store untouched).  Returns { packFile, packLen, verified:true }
+//  (packLen includes the 20-byte trailer); ingest renames + strips it.
+const sha1s = require("./util/sha1s.js");
+function drainToFile(fd, head, destDir) {
+  const tmp = join(destDir, "tmp_pack_" + io.getpid() + "_" +
+                    (Date.now() & 0xffffff));
+  const out = io.open(tmp, "c");
+  let total = 0;
+  const h = sha1s.open();
+  const lag = new Uint8Array(20); let lagLen = 0;   // last-20 not yet hashed
+  let head4 = "";                                    // first 4 bytes (magic)
+  function absorb(u8) {
+    const n = u8.length;
+    if (!n) return;
+    if (head4.length < 4)
+      head4 += utf8.Decode(u8.subarray(0, Math.min(4 - head4.length, n)));
+    if (lagLen + n <= 20) { lag.set(u8, lagLen); lagLen += n; return; }
+    const spill = lagLen + n - 20;                   // bytes leaving the lag
+    if (spill >= lagLen) {                           // whole lag + some of u8
+      if (lagLen) h.feed(lag.subarray(0, lagLen));
+      h.feed(u8.subarray(0, n - 20));
+      lag.set(u8.subarray(n - 20)); lagLen = 20;
+    } else {                                         // n < 20: rotate the lag
+      h.feed(lag.subarray(0, spill));
+      lag.copyWithin(0, spill, lagLen);
+      lag.set(u8, lagLen - spill); lagLen = 20;
+    }
+  }
+  try {
+    if (head && head.length) { io.writeAll(out, head); absorb(head); total += head.length; }
+    const scratch = new Uint8Array(1 << 16);
+    for (;;) {
+      const n = io._read(fd, scratch);
+      if (n <= 0) break;
+      const c = scratch.subarray(0, n);
+      io.writeAll(out, c); absorb(c); total += n;
+    }
+    io.close(out);
+  } catch (e) {
+    try { io.close(out); } catch (e2) {}
+    try { io.unlink(tmp); } catch (e2) {}
+    throw e;
+  }
+  //  EOF trailer check: sha1(body) must equal the final 20 bytes.
+  if (total < 32 || head4 !== "PACK") {
+    try { io.unlink(tmp); } catch (e2) {}
+    throw "wire.fetch: not a PACK stream (" + total + " bytes)";
+  }
+  const got = hex.encode(h.close());
+  const want = hex.encode(lag);
+  if (got !== want) {
+    try { io.unlink(tmp); } catch (e2) {}
+    throw "wire.fetch: pack sha1 trailer mismatch (got " + got +
+          " want " + want + ")";
+  }
+  return { packFile: tmp, packLen: total, verified: true };
 }
 
 //  --- GIT-012: smart-HTTP transport over a spawned curl ------------------
@@ -302,7 +367,12 @@ function fetchHttp(url, wantRef, haves) {
 }
 
 //  --- the fetch ----------------------------------------------------------
-function fetch(remoteUri, wantRef, haves) {
+//  GET-044: `opts.packDir` (the destination shard/`.be` dir, same FS as the
+//  final log) makes the spawn path STREAM the pack to a tmp file — result then
+//  carries { packFile, packLen } instead of { pack }.  No packDir → the legacy
+//  in-memory { pack } (small local/test callers).  http stays in-memory.
+function fetch(remoteUri, wantRef, haves, opts) {
+  const packDir = opts && opts.packDir;
   const sp = classify(remoteUri, "upload-pack");
   if (sp.http) return fetchHttp(sp.url, wantRef, haves);   // GIT-012
   const child = io.spawn(sp.bin, sp.argv);
@@ -341,9 +411,16 @@ function fetch(remoteUri, wantRef, haves) {
       }
       if (ev.kind === pkt.FLUSH) continue;
     }
-    const pack = readToEof(rfd, reader.rest());
-    result = { pack, refs, want: want.sha, refname: want.name,
-               branch: want.branch };
+    if (packDir) {                                // GET-044: stream to a tmp file
+      const pf = drainToFile(rfd, reader.rest(), packDir);
+      result = { packFile: pf.packFile, packLen: pf.packLen,
+                 verified: pf.verified, refs,
+                 want: want.sha, refname: want.name, branch: want.branch };
+    } else {
+      const pack = readToEof(rfd, reader.rest());
+      result = { pack, refs, want: want.sha, refname: want.name,
+                 branch: want.branch };
+    }
   } finally {
     try { io.close(rfd); } catch (e) {}
     try { io.reap(pid); } catch (e) {}
@@ -651,4 +728,5 @@ function push(remoteUri, updates, packBytes) {
 }
 
 module.exports = { fetch, push, pushSession, advertRefs, buildPushPack,
-                   serveReader, classify, parseAdvLine, pickWant, isFullSha };
+                   serveReader, classify, parseAdvLine, pickWant, isFullSha,
+                   drainToFile };

@@ -142,16 +142,25 @@ function sameSourceUris(source, title, subpath) {
 
 //  Fetch the child pack from `uri` (keeper/git wire).  Returns { pack, tip,
 //  branch } or null on any failure (so the caller can fall back).
-function tryFetch(uri, wantSha) {
+function tryFetch(uri, wantSha, packDir) {
   if (!uri) return null;
   try {
     //  A pinned want: fetch by the exact sha so the checkout target is in the
     //  pack regardless of the child's branch tip.  wire.fetch accepts a 40-hex
     //  want directly (pickWant short-circuits on isFullSha).
-    const f = wire.fetch(uri, wantSha || "");
-    if (!f || !f.pack || !f.pack.length) return null;
-    return { pack: f.pack, tip: f.want || wantSha || "", branch: f.branch || "" };
+    //  GET-044: packDir streams the child pack to a tmp file (bounded RSS).
+    const f = wire.fetch(uri, wantSha || "", null,
+                         packDir ? { packDir: packDir } : undefined);
+    if (!f || !(f.packFile || (f.pack && f.pack.length))) return null;
+    return { pack: f.pack, packFile: f.packFile, packLen: f.packLen,
+             tip: f.want || wantSha || "", branch: f.branch || "" };
   } catch (e) { return null; }
+}
+
+//  GET-044: normalize a tryFetch result to the ingest pack source — a streamed
+//  { packFile, packLen } descriptor, or the in-memory Uint8Array.
+function packSrc(f) {
+  return f.packFile ? { packFile: f.packFile, packLen: f.packLen } : f.pack;
 }
 
 //  SUBS-046: `uri` a LOCAL (`file:`/scheme-less) store source (get.js `localish`)?
@@ -288,9 +297,11 @@ function mount(opts) {
       //  child — project swap or worktree-nested path), then the `.gitmodules`
       //  URL fallback.  Fetch by the EXACT pin so the checkout target rides
       //  the pack.
+      //  GET-044: stream the child pack into `beDir` (same FS as the sibling
+      //  shard → atomic land), bounded RSS.
       let f = null, usedUri = "";
-      for (const s of sames) { f = tryFetch(s, pin); if (f) { usedUri = s; break; } }
-      if (!f && url) { f = tryFetch(url, pin); usedUri = url; }
+      for (const s of sames) { f = tryFetch(s, pin, beDir); if (f) { usedUri = s; break; } }
+      if (!f && url) { f = tryFetch(url, pin, beDir); usedUri = url; }
       if (!f)
         throw "be get: SUBFETCH cannot fetch sub " + subpath + " (" + title +
               ") from " + (sames.length ? sames.join(", ") : "(no same-source)") +
@@ -300,10 +311,11 @@ function mount(opts) {
       //  flat layout).  A FRESH shard clones (pack + refs + idx); an EXISTING
       //  shard that lacks the pin lands the new pack via ingest.add (a re-get
       //  pulling an advanced child).
+      const psrc = packSrc(f);
       if (!exists(join(shard, "0000000001.keeper")))
-        ingest.clone(f.pack, beDir, title, pin, usedUri || URI.make("be", undefined, shard));
+        ingest.clone(psrc, beDir, title, pin, usedUri || URI.make("be", undefined, shard));
       else
-        ingest.add(f.pack, shard, usedUri || URI.make("be", undefined, shard), pin);
+        ingest.add(psrc, shard, usedUri || URI.make("be", undefined, shard), pin);
     }
 
     //  GET-040: the sub's PRIOR pin (its current anchor tip) is the checkout

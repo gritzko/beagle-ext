@@ -205,17 +205,28 @@ function seedRemote(rem, wt) {
   //  wt) fresh-clones into `<wt>/.be` as before.
   let info; try { info = be.find(wt); } catch (e) { info = undefined; }
   if (info && info.wt !== wt) info = undefined;
-  const f = wire.fetch(rem.raw, rem.branch || "");
+  //  GET-044: resolve the DESTINATION shard dir BEFORE the fetch so wire.fetch
+  //  can STREAM the pack into a `tmp_pack_*` there (same FS → atomic land),
+  //  bounded RSS.  Green-field lands in `<wt>/.be` (proj is pack-independent);
+  //  an update streams into the existing shard.
+  let beDir = null, proj = null, shard = null, packDir;
+  if (!info) {
+    beDir = join(wt, ".be");
+    try { io.mkdir(beDir); } catch (e) {}
+    //  GET-042: [Title] = the OFFICIAL URL basename (`…/jab.git` → `jab`);
+    //  beagle→beagle URIs carry `?/title` (rem.proj).  "repo" only if both absent.
+    proj = rem.proj || submount.titleFromUrl(rem.raw) || "repo";
+    packDir = beDir;
+  } else {
+    shard = store.shardDir(info.storePath, info.project);
+    packDir = shard;
+  }
+  const f = wire.fetch(rem.raw, rem.branch || "", null, { packDir: packDir });
   const tip = f.want;
   if (!tip || !isFullSha(tip)) throw "be get: peer gave no tip";
   const branch = rem.branch || f.branch || "";
   if (!info) {                                   // green-field: fresh clone
-    const beDir = join(wt, ".be");
-    //  GET-042: the git→beagle border — the [Title] is the OFFICIAL URL's
-    //  basename (`…/jab.git` → `jab`); beagle→beagle URIs carry `?/title`
-    //  explicitly (rem.proj).  Improvise "repo" only when both are absent.
-    const proj = rem.proj || submount.titleFromUrl(rem.raw) || "repo";
-    ingest.clone(f.pack, beDir, proj, tip, rem.raw);
+    ingest.clone(f, beDir, proj, tip, rem.raw);
     const anchor = URI.make("file", undefined, beDir + "/" + proj + "/");
     writeWtlog(join(beDir, "wtlog"),
                [{ verb: "get", uri: anchor },
@@ -224,10 +235,10 @@ function seedRemote(rem, wt) {
              bePath: join(beDir, "wtlog") };   // STATUS-005: con-row target
   }
   //  UPDATE: the anchor's own store/shard (the project is the wt's identity,
-  //  never the `?/proj` guess); reader opened AFTER the pack lands.
-  const shard = store.shardDir(info.storePath, info.project);
+  //  never the `?/proj` guess); reader opened AFTER the pack lands.  GET-044:
+  //  `shard` was resolved above (the fetch streamed the pack into it).
   const oldTip = oldTipOf(info.bePath);
-  ingest.add(f.pack, shard, rem.raw, tip);
+  ingest.add(f, shard, rem.raw, tip);
   appendWtlog(info.bePath, [{ verb: "get", uri: URI.make(undefined, undefined, undefined, branch, tip) }]);
   const k = store.open(info.storePath, info.project);
   return { k, tip, oldTip, fresh: false, branch, bePath: info.bePath };   // STATUS-005
