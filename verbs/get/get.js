@@ -441,6 +441,9 @@ function inRepoSeed(uri, ctx) {
   let path = u.path || "";
   const query = u.query || "";
   const frag = u.fragment || "";
+  //  DIS-073: URI-009 presence, kept apart from `query`'s undefined→"" fold —
+  //  D3' alone needs it to tell `?` (trunk) from a bare `get`/`!` (tracked).
+  const queryPresent = u.query !== undefined;
   //  Bare `be get` seeds a "." placeholder (loop.cli) — a whole-tree FF of the
   //  current branch, NOT a path restore of ".".  Shed it.
   if (path === "." && !query && !frag) path = "";
@@ -485,15 +488,15 @@ function inRepoSeed(uri, ctx) {
 
   //  D3' branch/trunk switch (`?br`, `?`, `?./child`) OR a bare `!`/empty FF
   //  (reset the wt to the current/target branch tip).
-  //  A non-empty query is the target branch; an empty/absent query (`?`, bare
-  //  `be get`, `!`) folds to the current branch.  URI-009 makes the bare-`?` case
-  //  query==="", so no `href === "?"` string match is needed any more.
-  const branch = query;                          // "" = trunk / current branch
-  const wantBranch = branch || curBranch;
-  const tip = k.resolveRef(branch || "") ||
+  //  A non-empty query is the target branch; a PRESENT-empty query (`?`) is an
+  //  explicit trunk switch; an ABSENT query (bare `be get`, `!`) folds to the
+  //  TRACKED (current) branch, never the trunk (DIS-073).
+  const explicitTrunk = queryPresent && query === "";
+  const wantBranch = explicitTrunk ? "" : (query || curBranch);
+  const tip = k.resolveRef(wantBranch) ||
               (wantBranch === curBranch ? curSha : "");
   if (!isFullSha(tip))
-    throw "be get: cannot resolve " + (branch ? "?" + branch : "current branch");
+    throw "be get: cannot resolve " + (wantBranch ? "?" + wantBranch : "current branch");
   appendWtlog(info.bePath, [{ verb: "get", uri: URI.make(undefined, undefined, undefined, wantBranch, tip) }]);
   return fanoutWholeTree(ctx, { k, tip, oldTip: curSha, fresh: false,
                                 branch: wantBranch, bePath: info.bePath }, wt, force);
