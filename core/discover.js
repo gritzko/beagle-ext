@@ -151,7 +151,7 @@ function resolveAnchor(wt) {
 function _rh() { return require("./resolve_hash.js"); }
 
 //  URI-016: topWt(wt) DELETED — it climbed past submodules by re-probing every
-//  ancestor with find(), and drew the hive boundary with a SECOND spelling of the
+//  ancestor with find(), and drew the work/ boundary with a SECOND spelling of the
 //  `work` segment (`basename(dirname(wt)) === "work"`).  The outermost worktree is
 //  not something to search for: it is FIXED by the project layout, so it is now
 //  resolve_hash.topOf() — pure arithmetic on workRoot()/projectRoot(), no `.be`
@@ -264,7 +264,7 @@ function resolve(context, rel) {
 }
 
 //  URI-011: wtdir(uriStr) → the ABSOLUTE dir a nav URI addresses, or null.
-//    //name[/sub]  → <srcRoot>/name/sub  (a hive cell, confined below)
+//    //name[/sub]  → <srcRoot>/name/sub  (a worktree, confined below)
 //    // , //.       → the PROJECT ROOT    ([/wiki/URI] step 2)
 //    //host…, file:/ssh:/be:, no `//`     → null (a cached remote / transport → wire)
 //  A `//name` miss (treeAt has no anchor at/below <srcRoot>/name) is left to the
@@ -387,7 +387,7 @@ function argRel(repo, raw) {
 
 //  BE-030: per-process cache of a wt root → its validated nav context URI, so the
 //  per-fs-access wtpath() below never re-walks the tree (navCwd/treeAt) twice for the
-//  same wt.  "" marks a wt that is repo-less / OUTSIDE the hive (the fallback).
+//  same wt.  "" marks a wt that is repo-less / OUTSIDE work/ (the fallback).
 const _wtCtx = {};
 
 //  BE-030: wtpath(wt, rel) → the ABSOLUTE fs path of the wt-relative `rel` in the
@@ -399,7 +399,7 @@ const _wtCtx = {};
 //  at every fs site.  Confinement is preserved EXACTLY: resolve() throws NAVESCAPE
 //  on a `..` climb above the tree root, and the trailing guard refuses any path
 //  that climbs OUT of `wt` (matching wtJoin's wt-level boundary).  A wt outside
-//  the hive (a store edge / scratch dir) has no `//name` address → the
+//  outside work/ (a store edge / scratch dir) has no `//name` address → the
 //  plain wtJoin confine is used (byte-identical to the pre-BE-030 behavior).
 function wtpath(wt, rel) {
   let ctx = _wtCtx[wt];
@@ -411,7 +411,7 @@ function wtpath(wt, rel) {
     }
     _wtCtx[wt] = ctx;
   }
-  if (!ctx) return pathlib.wtJoin(wt, rel);           // outside the hive → plain confine
+  if (!ctx) return pathlib.wtJoin(wt, rel);           // outside work/ → plain confine
   const c = uri._parse(ctx);
   const abs = resolve(c, rel || "");                  // resolve-backed, context-honoured
   //  keep wtJoin's WT-level boundary: resolve() confines to the TREE (for a

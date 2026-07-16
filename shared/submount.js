@@ -149,6 +149,31 @@ function sameSourceUris(source, title, subpath) {
   return [];
 }
 
+//  GET-047 ruling: compose `<source>/<subpath>/` — a worktree source's sub IS
+//  a worktree at the composed path (entered form, so treeAt reads ITS anchor).
+function wtSubUri(srcUri, subpath) {
+  let u; try { u = uri._parse(srcUri); } catch (e) { return ""; }
+  const p = (u.path || "").replace(/\/+$/, "");
+  return String(URI.make(undefined, u.authority, p + "/" + subpath + "/"));
+}
+
+//  GET-047 ruling: resolve the composed sub-worktree URI to its OWN backing
+//  store (wtdir + treeAt, the //X operand pattern); null = unanchored/no pin.
+function wtSubStore(srcUri, subpath, pin) {
+  const cu = wtSubUri(srcUri, subpath);
+  let dir = null; try { dir = cu ? discover.wtdir(cu) : null; } catch (e) {}
+  if (!dir) return null;
+  let t; try { t = discover.treeAt(dir); } catch (e) { return null; }
+  for (const proj of (t.project ? [t.project, ""] : [""])) {
+    try {
+      if (store.open(t.storePath, proj).getObject(pin))
+        return { storeBe: String(t.store || "").replace(/\/+$/, ""),
+                 storeRoot: t.storePath, proj: proj };
+    } catch (e) {}
+  }
+  return null;
+}
+
 //  Fetch the child pack from `uri` (keeper/git wire).  Returns { pack, tip,
 //  branch } or null on any failure (so the caller can fall back).
 function tryFetch(uri, wantSha, packDir) {
@@ -275,15 +300,25 @@ function mount(opts) {
       if (!havePin) try { havePin = !!store.open(shard, "").getObject(pin); } catch (e) {}
     }
 
+    //  GET-047 ruling: a WORKTREE source's sub is the worktree at the composed
+    //  `<source>/<subpath>` — sameSourceUris and the `.gitmodules` url never apply.
+    const wtSrc = (opts.source && opts.source.wtUri) || "";
     //  SUBS-047: the same-source candidates, tried before the official url in
     //  BOTH the local-reuse and the wire branches below.
-    const sames = sameSourceUris(opts.source, title, subpath);
+    const sames = wtSrc ? [] : sameSourceUris(opts.source, title, subpath);
 
     //  SUBS-046: LOCAL-SOURCE reuse (get.js localish path, NO wire): a `file:`/
     //  scheme-less child whose pin already lives on-disk is mounted by REDIRECTING
     //  the sub `.be` at that store + checkout; else fall through to the wire fetch.
     if (!havePin) {
       let ls = null;
+      if (wtSrc) {
+        ls = wtSubStore(wtSrc, subpath, pin);
+        if (!ls)
+          throw "be get: SUBFETCH cannot fetch sub " + subpath + " (" + title +
+                ") from worktree " + (wtSubUri(wtSrc, subpath) || wtSrc) +
+                " — child unreachable";
+      }
       for (const s of sames) {
         const su = localSourceUri(s); if (su) ls = resolveLocalStore(su, pin);
         if (ls) break;

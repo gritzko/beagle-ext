@@ -354,21 +354,36 @@ function handleWtSeed(uri, ctx) {
     storeUri = t.store; shard = t.project;
     k = store.open(t.storePath, t.project);
   } else {
-    k = store.open(r.store, r.shard);
+    //  GET-047: the operand's OWN anchor is its true backing store — r.store is
+    //  step 1's PROJECT store, which diverges for a cross-source `//X`.
+    const dir = discover.wtdir(uri);
+    let t = null; try { t = dir ? discover.treeAt(dir) : null; } catch (e) {}
+    if (t) { storeUri = t.store; shard = t.project;
+             k = store.open(t.storePath, t.project); }
+    else k = store.open(r.store, r.shard);
   }
   const wt = io.cwd();
   const bePath = join(wt, ".be");
   const fresh = !exists(bePath);
+  const u = new URI(uri);
+  //  GET-047 ruling: a worktree source's subs ARE worktrees at `<operand>/<sub>`
+  //  — carry the operand so the mount resolves the COMPOSED worktree URI.
+  const wtsrc = { wtUri: String(URI.make(undefined, u.authority, u.path)) };
   //  DIS-072: an OCCUPIED cell tracking another store/shard is never a clone
   //  target — refuse loudly instead of checking a mismatched repo over it.
   if (!fresh) {
     let cell = null;                 // an EMPTY `.be` shield anchors nothing
     try { cell = discover.treeAt(wt); } catch (e) {}
     if (cell && cell.wt === wt &&
-        (cell.store !== storeUri || cell.project !== shard))
-      throw "be get: GETCELL " + wt + " already tracks shard `" +
-            (cell.project || cell.store) + "` — refusing `" + uri + "` (" +
-            (shard || storeUri) + ")";
+        (cell.store !== storeUri || cell.project !== shard)) {
+      //  GET-047: another PROJECT stays the refusal; the same project from
+      //  another source is a cross-source UPDATE (GET.mkd 1.3/2.1) — ancestry decides.
+      if (cell.project && shard && cell.project !== shard)
+        throw "be get: GETCELL " + wt + " already tracks shard `" +
+              (cell.project || cell.store) + "` — refusing `" + uri + "` (" +
+              (shard || storeUri) + ")";
+      return crossUpdate(ctx, uri, r.chash, cell, storeUri, shard, wtsrc);
+    }
   }
   const oldTip = fresh ? "" : oldTipOf(bePath);
   //  Row 0 (fresh only): the store REDIRECT, same shape seedLocal writes for a
@@ -376,12 +391,31 @@ function handleWtSeed(uri, ctx) {
   const redirect = URI.make("file", undefined, storeUri, "/" + shard);
   //  The TRACK row: the operand's OWN authority+path (untouched), pinned at
   //  the resolved rev — "the //X/sub URI, authority intact, at #chash".
-  const u = new URI(uri);
   const tipRow = { verb: "get", uri: URI.make(undefined, u.authority, u.path, undefined, r.chash) };
   if (fresh) writeWtlog(bePath, [{ verb: "get", uri: redirect }, tipRow]);
   else appendWtlog(bePath, [tipRow]);
-  return fanoutWholeTree(ctx, { k, tip: r.chash, oldTip, fresh, branch: "", bePath },
-                          wt, ambient.force());
+  return fanoutWholeTree(ctx, { k, tip: r.chash, oldTip, fresh, branch: "", bePath,
+                                source: wtsrc }, wt, ambient.force());
+}
+
+//  GET-047 / GET.mkd 1.3+2.1: cross-source update — fetch the target closure
+//  into the cell's OWN shard (landTip), gate on ancestry, re-tie, ONE updater.
+function crossUpdate(ctx, uri, tip, cell, srcStore, srcProj, wtsrc) {
+  //  In-body require: fetchleg requires get.js back (the discover.js _rh pattern).
+  require("../patch/fetchleg.js").landTip(cell, srcStore, srcProj, tip);
+  const k = store.open(cell.storePath, cell.project);
+  const oldTip = oldTipOf(cell.bePath);
+  //  GET-047: no common ancestor = ANOTHER project in the cell's clothes —
+  //  refuse before any wt/wtlog motion (the fetched objects are inert bytes).
+  if (relate.verdict(k, oldTip, tip).rel === "unrelated")
+    throw "be get: GETCELL " + cell.wt + " is at " + oldTip + " — `" + uri +
+          "` (" + tip + ") shares no ancestor, refusing the cross-source update";
+  const u = new URI(uri);
+  appendWtlog(cell.bePath, [{ verb: "get",
+    uri: URI.make(undefined, u.authority, u.path, undefined, tip) }]);
+  return fanoutWholeTree(ctx, { k, tip, oldTip, fresh: false, branch: "",
+                                bePath: cell.bePath, source: wtsrc || null },
+                         cell.wt, ambient.force());
 }
 
 //  GET-047 / GET.mkd 2.5: `get //WT/path/file.c` — cherry-pick ONE blob from

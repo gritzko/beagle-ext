@@ -110,4 +110,5 @@ function fetchSource(info, arg) {
 
 module.exports = { isFetchable: isFetchable, isSchemed: isSchemed,
                    isWtPath: isWtPath, fetchSource: fetchSource,
-                   fetchWtTip: fetchWtTip };
+                   fetchWtTip: fetchWtTip,
+                   landTip: landTip };   // GET-047: get's cross-source fetch leg
