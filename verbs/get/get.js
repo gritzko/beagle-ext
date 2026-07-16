@@ -46,6 +46,9 @@ const hunkrows = require("../../shared/hunkrows.js");
 const wtlog    = require("../../shared/wtlog.js");
 const conflict = require("../../shared/conflict.js");
 const submount = require("../../shared/submount.js");   // DIS-058 D2-D5 sub mount
+//  PATCH-012: the ONE weave buffer/source-size policy (DIFF-010) — get's 3-way
+//  merge routes through shared/weave.js, never a hand-rolled fixed cap.
+const weavelib = require("../../shared/weave.js");
 const ambient  = require("../../shared/ambient.js");   // JAB-004: ctx→be bridge
 const uriarg   = require("../../shared/uri.js");       // URI-015: scp remote → ssh://
 const join = pathlib.join, dirname = pathlib.dirname;
@@ -827,7 +830,17 @@ function leaf(row, ctx) {
     if (dirty && baseBytes == null)
       throw "be get: GETOVRL dirty wt overlays un-baselined target: " + rel;
     if (dirty) {                                 // real local edit → weave-merge
-      const merged = weave3(baseBytes, onDisk, bytes, extOf(rel));
+      //  PATCH-012: an unweavable leaf (over-cap BLOB, or a still-overflowing
+      //  `out full`) refuses like a real conflict — never silent-ours + exit 0.
+      let merged;
+      try { merged = weave3(baseBytes, onDisk, bytes, extOf(rel)); }
+      catch (e) { if (!("" + e).includes("full")) throw e; merged = null; }
+      if (merged == null) {
+        g.conf = (g.conf || 0) + 1;
+        out.row(rel, "con", g.ts);
+        try { appendWtlog(g.bePath, [{ verb: "con", uri: URI.make(undefined, undefined, rel) }]); } catch (e) {}
+        return;
+      }
       checkout.materialise(g.wt, rel, { kind: kind }, merged);
       if (conflict.hasConflictMarker(merged)) {
         g.conf = (g.conf || 0) + 1;
@@ -950,18 +963,21 @@ function weave3(base, ours, theirs, ext) {
   if (bytesEq(ours, theirs)) return ours;        // same edit both sides
   if (bytesEq(ours, base)) return theirs;        // only theirs changed
   if (bytesEq(theirs, base)) return ours;        // only ours changed
-  const wo0 = abc.ram("WEAVE", 1 << 18), wo1 = abc.ram("WEAVE", 1 << 18);
-  const wt0 = abc.ram("WEAVE", 1 << 18), wt1 = abc.ram("WEAVE", 1 << 18);
-  wo0.fold(null, base, ext, _W3_BASE);  wo1.fold(wo0, ours,   ext, _W3_OURS);
-  wt0.fold(null, base, ext, _W3_BASE);  wt1.fold(wt0, theirs, ext, _W3_THRS);
-  const wm = abc.ram("WEAVE", 1 << 19);
-  wm.merge(wo1, wt1, _W3_MRG);
+  //  PATCH-012: over the shared source cap is a BLOB (shared/weave.js policy) —
+  //  not weavable; return null so the leaf refuses LOUDLY, never silent-ours.
+  if (base.length > weavelib.MAX_SOURCE_SIZE ||
+      ours.length > weavelib.MAX_SOURCE_SIZE ||
+      theirs.length > weavelib.MAX_SOURCE_SIZE) return null;
+  const wo = weavelib.fold(weavelib.fold(null, base, ext, _W3_BASE), ours,   ext, _W3_OURS);
+  const wt = weavelib.fold(weavelib.fold(null, base, ext, _W3_BASE), theirs, ext, _W3_THRS);
+  const wm = weavelib.merge(wo, wt, _W3_MRG);
   const oScope = wm.scope([_W3_BASE, _W3_OURS]);
   const tScope = wm.scope([_W3_BASE, _W3_THRS]);
-  const out = io.buf(1 << 20);
+  //  PATCH-012: render into the shared fixed markup buffer (lazy mmap), the
+  //  same sink patch.js:198 uses — the 1<<20 io.buf was the same cap bug.
+  const out = io.ram(weavelib.MAX_SOURCE_MARKED_UP);
   wm.merged([oScope, tScope], out);
   return out.data().slice();
-
 }
 
 //  CODE-020: shared reg-file wt read (open/readAll/close-safe).
