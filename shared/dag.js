@@ -150,6 +150,21 @@ function onStack(stack, sha) {
   return false;
 }
 
+//  GET-047 / GET.mkd 3.4: mergeBase(keeper, a, b) → a MAXIMAL common ancestor
+//  sha ("" when none): intersect the two ancestor sets, topo-sort the
+//  intersection (parents-before-children), take the LAST — it has no in-set
+//  child, so it is maximal (one of possibly several on a criss-cross; any is
+//  a valid weave base).  LOCAL-only (no remote index): get's diverged leg runs
+//  AFTER the pack ingested, so keeper holds both histories.
+function mergeBase(keeper, a, b) {
+  const aa = ancestors(keeper, a), ab = ancestors(keeper, b);
+  const common = new Set();
+  for (const id of aa) if (ab.has(id)) common.add(id);
+  if (!common.size) return "";
+  const order = topoSort(keeper, common);
+  return order.length ? order[order.length - 1] : "";
+}
+
 //  Parse a git ident string `Name <email> <epoch> <tz>` → epoch seconds
 //  (the author/committer time).  Returns 0 when no trailing epoch.
 function identEpoch(ident) {
@@ -279,6 +294,8 @@ module.exports = {
   isAncestor: isAncestor,
   ancestors: ancestors,
   topoSort: topoSort,
+  mergeBase: mergeBase,   // GET-047: the diverged-get weave base
+
   identEpoch: identEpoch,
   subjectOf: subjectOf,
   commitTs: commitTs

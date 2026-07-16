@@ -58,6 +58,22 @@ function key(br) {
   return merge((br && br.branch) || []);
 }
 
+//  GET-047: resolveRel(str, curKey) — the ONE dot-path convention: `.`/`..`/
+//  `./child`/`../sib` resolve against the current branch KEY; else null.
+function resolveRel(str, curKey) {
+  let q = str == null ? "" : String(str);
+  if (q[0] === "?") q = q.slice(1);
+  const segs = split(q);
+  if (!segs.length || (segs[0] !== "." && segs[0] !== "..")) return null;
+  const cur = split(curKey == null ? "" : String(curKey));
+  let i = segs[0] === "." ? 1 : 0;
+  for (; i < segs.length && segs[i] === ".."; i++) {
+    if (!cur.length) throw "`?..` needs a child branch, cur is trunk";
+    cur.pop();
+  }
+  return merge(cur.concat(segs.slice(i)));
+}
+
 //  DIS-072: sub() (the synthetic child Branch) is DELETED — a mounted sub
 //  tracks the parent's pin URI `//WT/path/to/sub#<pin>`, never a dot-branch.
 
@@ -91,4 +107,5 @@ function display(br) {
 
 module.exports = { parse: parse, format: format, key: key,
                    wireRef: wireRef, fromWireRef: fromWireRef,
-                   isTrunk: isTrunk, display: display };
+                   isTrunk: isTrunk, display: display,
+                   resolveRel: resolveRel };

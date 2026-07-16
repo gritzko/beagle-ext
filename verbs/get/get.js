@@ -29,6 +29,7 @@ const store    = require("../../shared/store.js");
 const wire     = require("../../shared/wire.js");
 const checkout = require("../../shared/checkout.js");
 const relate   = require("../../shared/relate.js");
+const dag      = require("../../shared/dag.js");        // GET-047: merge-base (3.4)
 const ingest   = require("../../shared/ingest.js");
 const pathlib  = require("../../shared/util/path.js");
 const branchlib = require("../../shared/branch.js");   // SUBS-050: the ONE branch codec
@@ -45,6 +46,10 @@ const sha      = require("../../shared/util/sha.js");
 const hunkrows = require("../../shared/hunkrows.js");
 const wtlog    = require("../../shared/wtlog.js");
 const conflict = require("../../shared/conflict.js");
+//  GET-047 / GET.mkd 2.2: the untracked sweep reuses status's OWN unk set —
+//  classify.wtScan over the hierarchical .gitignore matcher (never a re-scan).
+const classify = require("../../shared/classify.js");
+const ignorelib = require("../../shared/util/ignore.js");
 const submount = require("../../shared/submount.js");   // DIS-058 D2-D5 sub mount
 //  PATCH-012: the ONE weave buffer/source-size policy (DIFF-010) — get's 3-way
 //  merge routes through shared/weave.js, never a hand-rolled fixed cap.
@@ -329,6 +334,11 @@ function handleWtSeed(uri, ctx) {
   const cu = discover.navCwd(discover.ctxDir());
   let r = resolveHash(cu, uri);
   let storeUri = r.store, shard = r.shard, k;
+  //  GET-047 / GET.mkd 2.5 (optional): an rpath resolving to a BLOB is a
+  //  CHERRY-PICK — fetch that ONE file from the source rev into the current
+  //  wt.  Path-scoped like the D4 restore: no re-track, no whole-tree motion,
+  //  no wtlog record (the pick lands as a local edit vs the unchanged base).
+  if (r.rpath && r.otype === "blob") return cherryPick(ctx, uri, r);
   if (r.rpath && r.otype === "commit") {
     //  DIS-072: non-empty rpath resolving to a COMMIT names a GITLINK — fork the
     //  SUB's own repo pinned at ohash, never the parent's chash/shard.
@@ -373,6 +383,37 @@ function handleWtSeed(uri, ctx) {
                           wt, ambient.force());
 }
 
+//  GET-047 / GET.mkd 2.5: `get //WT/path/file.c` — cherry-pick ONE blob from
+//  the source rev into the CURRENT wt at the same rel path.  Mirrors the D4
+//  narrowed restore (restorePath): the user named the path, they want the
+//  source bytes — force clean-overwrite, scoped to that leaf.  NO wtlog record
+//  (the D4 restore writes none either): tracking/base stay put, the picked
+//  file reads as a local edit for status/put/post.
+function cherryPick(ctx, uri, r) {
+  const wt = io.cwd();
+  let cell = null; try { cell = discover.treeAt(wt); } catch (e) {}
+  if (!cell || cell.wt !== wt)
+    throw "be get: GETPICK `" + uri + "` needs an established worktree to pick into";
+  const k = store.open(r.store, r.shard);
+  //  Re-descend for the MODE (resolve_hash's objectAt returns otype/ohash only);
+  //  step 6 already proved the path exists at chash, so this cannot miss.
+  const ent = k.descendPath(k.commitTree(r.chash), split(r.rpath));
+  if (!ent || ent.kind === "tree" || ent.kind === "s")
+    throw "be get: GETPICK no file at " + r.rpath + " in " + r.chash;
+  ctx._get = { k: k, wt: wt, tip: r.chash, oldTip: "", fresh: false, branch: "",
+               ts: ctx.T0, kinds: {}, dels: 0, rows: [], head: null,
+               force: true, noPrune: true, bePath: cell.bePath };
+  ctx.outSort = function (rows) { return sortGetRows(rows); };
+  ctx._finalize = finalizeGet;   // JAB-003 + SUBS-047: sweep dirs, flush the get hunk
+  const u = new URI(uri);
+  getOut(ctx).banner("get",
+      URI.make(undefined, u.authority, u.path, undefined, r.chash.slice(0, 8)), ctx.T0);
+  ctx._get.kinds[r.rpath] = kindOf(ent.mode);
+  return { enqueue: [
+      { verb: "get", _leaf: true, rel: r.rpath, newSha: ent.sha, oldSha: "" },
+      { verb: "get", uri: DELSWEEP }] };
+}
+
 //  SEED: resolve the remote once (resolution-at-entry), anchor the wtlog, emit
 //  the `get ?<branch>#<hashlet>` banner + any pulled-commit rows, then run the
 //  dirty-overlap PRE-PASS and ENQUEUE the root dir-reconcile.  Pins
@@ -390,6 +431,16 @@ function handleSeed(uri, ctx) {
   //  its child shard from the SAME source (project swapped to the sub title).
   r.source = rem;
   return fanoutWholeTree(ctx, r, wt, ambient.force());   // JAB-004: force off be
+}
+
+//  GET-047: the bare-get wire leg — re-resolve a recorded remote track (or the
+//  clone origin + tracked branch) through the ONE parseRemote/seed path.
+function fetchTrack(ctx, remoteUri, branch, wt, force) {
+  const rem = parseRemote(remoteUri);
+  if (branch && !rem.branch) rem.branch = branch;
+  const r = rem.local ? seedLocal(rem, wt) : seedRemote(rem, wt);
+  r.source = rem;
+  return fanoutWholeTree(ctx, r, wt, force);
 }
 
 //  Pin ctx._get, run the dirty-overlap pre-pass, emit the banner + pulled-commit
@@ -415,6 +466,9 @@ function fanoutWholeTree(ctx, r, wt, force) {
   ctx._get = { k: r.k, wt: wt, tip: r.tip, oldTip: r.oldTip, fresh: r.fresh,
                branch: r.branch, ts: ctx.T0, kinds: {}, dels: 0, rows: [], head: null,
                force: !!force, noPrune: noPrune,
+               //  GET-047 §4.0: --nosub disables sub recursion entirely — the
+               //  flag rides be.flags (loop.js split it); the gitlink leaves gate on it.
+               nosub: ((globalThis.be && be.flags) || []).indexOf("--nosub") >= 0,
                //  STATUS-005: the wtlog to append durable `con <path>` rows to when
                //  a weave leaf writes conflict markers (append-only, verb-agnostic).
                bePath: r.bePath || join(wt, ".be"),
@@ -452,6 +506,12 @@ function fanoutWholeTree(ctx, r, wt, force) {
 
   out.banner("get", URI.make(undefined, undefined, undefined, r.branch || "", r.tip.slice(0, 8)), ctx.T0);
 
+  //  GET-047 / GET.mkd 2.2: `get!` discards UNTRACKED files too — the tree-
+  //  driven reconcile never sees them, so sweep status's unk set (wtScan:
+  //  .gitignore'd, .be/.git meta and nested repos excluded) against the NEW
+  //  tree's paths, synchronously at the seed.
+  if (force) sweepUntracked(ctx._get, newTree, out);
+
   //  Pulled-commit rows (UPDATE only), newest-first; rendered above file rows.
   //  GIT-016: via the shared spine — from cur=oldTip the fetched tip is AHEAD, so
   //  the pulled commits are verdict.behind (pack persisted first → NO remote index).
@@ -461,6 +521,19 @@ function fanoutWholeTree(ctx, r, wt, force) {
     for (const c of pulled)
       out.row(URI.make(undefined, undefined, undefined, c.hashlet || "", c.subject ? c.subject : undefined),
               "post", c.ts, { _post: true });
+    //  GET-047 / GET.mkd 3.4: a commit-DAG-DIVERGED target resolves by WEAVE
+    //  MERGE off the MERGE-BASE — flatten the base commit's tree so each leaf
+    //  3-ways (base=merge-base blob, ours=on-disk, theirs=target); an
+    //  unweavable leaf refuses loudly (con + GETCONF), never a silent reset.
+    if (!force && v.rel === "diverged") {
+      const mb = dag.mergeBase(r.k, r.oldTip, r.tip);
+      const bt = isFullSha(mb) ? r.k.commitTree(mb) : "";
+      if (bt) {
+        const bp = {};
+        r.k.readTreeRecursive(bt, function (l) { if (l.kind !== "s") bp[l.path] = l.sha; });
+        ctx._get.basePaths = bp;
+      }
+    }
   }
 
   //  ENQUEUE the root reconcile then the del-sweep fold row LAST (post-order:
@@ -536,9 +609,13 @@ function inRepoSeed(uri, ctx) {
   //  above, so a non-empty fragment-less query here is unambiguously this form.
   //  DIS-075: the RECORD is `#<sha>` — query slot ABSENT (nothing tracked, laws
   //  #1+#3), base in the fragment; never the argument's `?<sha>` verbatim.
-  if (query && !frag && (isFullSha(query) || isShortHex(query))) {
-    const tip = resolvePin(k, query);
-    if (!isFullSha(tip)) throw "be get: cannot resolve ?" + query;
+  //  GET-047 / GET.mkd 1.4: the pure-fragment `get '#<sha>'` (query slot
+  //  ABSENT) detaches exactly the same — never the attached trunk-pin `?#<sha>`.
+  if ((query && !frag && (isFullSha(query) || isShortHex(query))) ||
+      (!queryPresent && frag && isShortOrFullHex(frag))) {
+    const tip = resolvePin(k, query || frag);
+    if (!isFullSha(tip))
+      throw "be get: cannot resolve " + (query ? "?" + query : "#" + frag);
     appendWtlog(info.bePath, [{ verb: "get", uri: URI.make(undefined, undefined, undefined, undefined, tip) }]);
     return fanoutWholeTree(ctx, { k, tip, oldTip: curSha, fresh: false,
                                   branch: "", bePath: info.bePath }, wt, force);
@@ -554,15 +631,49 @@ function inRepoSeed(uri, ctx) {
                                   branch: query, bePath: info.bePath }, wt, force);
   }
 
+  //  GET-047: a BARE `get`/`!` follows the TRACKED ref off the ONE attach
+  //  reader (wtlog.attachedBranch) — the recentmost get record's track.
+  if (!queryPresent) {
+    const att = wtl.attachedBranch();
+    //  GET-047 ruling 2026-07-16: DETACHED bare get = FULL-TREE RECOVERY AT
+    //  BASE — target=base, stays detached (record keeps the `#<sha>` shape).
+    if (att.detached) {
+      const base = isFullSha(att.base) ? att.base : curSha;
+      if (!isFullSha(base)) throw "be get: detached with no base to recover";
+      appendWtlog(info.bePath, [{ verb: "get",
+        uri: URI.make(undefined, undefined, undefined, undefined, base) }]);
+      return fanoutWholeTree(ctx, { k, tip: base, oldTip: curSha, fresh: false,
+                                    branch: "", bePath: info.bePath }, wt, force);
+    }
+    //  GET-047: a URI-shaped track re-resolves to the track's CURRENT rev —
+    //  a schemed remote implies the fetch leg, `//X` re-reads via resolve_hash.
+    if (att.uriTrack && att.track && !curBranch) {
+      if (new URI(att.track).scheme !== undefined)
+        return fetchTrack(ctx, att.track, "", wt, force);
+      return handleWtSeed(att.track, ctx);
+    }
+  }
+
   //  D3' branch/trunk switch (`?br`, `?`, `?./child`) OR a bare `!`/empty FF
   //  (reset the wt to the current/target branch tip).
   //  A non-empty query is the target branch; a PRESENT-empty query (`?`) is an
   //  explicit trunk switch; an ABSENT query (bare `be get`, `!`) folds to the
   //  TRACKED (current) branch, never the trunk (DIS-073).
   const explicitTrunk = queryPresent && query === "";
-  const wantBranch = explicitTrunk ? "" : (query || curBranch);
-  const tip = k.resolveRef(wantBranch) ||
-              (wantBranch === curBranch ? curSha : "");
+  //  GET-047 / GET.mkd 1.2: `?./child` / `?../sib` resolve against the current
+  //  branch via the ONE dot-path convention (branch.js, post's resolveTarget).
+  const relKey = query ? branchlib.resolveRel(query, curBranch) : null;
+  const wantBranch = explicitTrunk ? ""
+        : (relKey !== null ? relKey : (query || curBranch));
+  let tip = k.resolveRef(wantBranch) || "";
+  //  GET-047: a bare track with no local ref resolves back to the store's
+  //  recorded clone origin — the implied re-fetch leg (GET.mkd 1.1 × 1.6).
+  if (!queryPresent && !isFullSha(tip)) {
+    let org = null;
+    k.eachRemote(function (rt) { if (!org) org = rt; });
+    if (org && org.remote) return fetchTrack(ctx, org.remote, wantBranch, wt, force);
+  }
+  if (!isFullSha(tip)) tip = (wantBranch === curBranch ? curSha : "");
   if (!isFullSha(tip))
     throw "be get: cannot resolve " + (wantBranch ? "?" + wantBranch : "current branch");
   appendWtlog(info.bePath, [{ verb: "get", uri: URI.make(undefined, undefined, undefined, wantBranch, tip) }]);
@@ -606,7 +717,9 @@ function restorePath(ctx, k, wt, path, query, curSha, curBranch) {
   //  deleted file under it is reset), and force makes the leaf clean-overwrite.
   ctx._get = { k: k, wt: wt, tip: srcSha, oldTip: curSha, fresh: false,
                branch: curBranch, ts: ctx.T0, kinds: {}, dels: 0, rows: [], head: null,
-               force: force, noPrune: true };
+               force: force, noPrune: true,
+               //  GET-047 §4.0: --nosub disables sub recursion entirely.
+               nosub: ((globalThis.be && be.flags) || []).indexOf("--nosub") >= 0 };
   ctx.outSort = function (rows) { return sortGetRows(rows); };
   ctx._finalize = finalizeGet;   // JAB-003 + SUBS-047: sweep dirs, flush the get hunk
   getOut(ctx).banner("get", URI.make(undefined, undefined, undefined, curBranch || "", srcSha.slice(0, 8)), ctx.T0);
@@ -790,10 +903,16 @@ function leaf(row, ctx) {
     //  ONLY a real mount (its `.be` anchor exists) is removed — a stale
     //  unmounted gitlink dir may hold user files, so it is left in place.
     if (kind === "s") {
+      if (g.nosub) return;                        // GET-047 §4.0: no recursion
+      if (subAttachedElsewhere(g, rel, oldSha)) return;   // §4.1: not ours to unmount
       if (exists(join(full, ".be")))
         try { io.rmdir(full, true); out.row(rel, "del", g.ts); g.dels++; } catch (e) {}
       return;
     }
+    //  GET-047 3.4: the DIVERGED delete leaf stays TREE-DRIVEN (unlink) — a
+    //  branch switch to a diverged sibling drops ours-only files from the wt
+    //  (they live on in ours' branch; test/get/branch-relative pins this).
+    //  Only the both-sides write leaf weaves off the merge base.
     try { io.unlink(full); out.row(rel, "del", g.ts); g.dels++;
           markDelDir(g, rel); } catch (e) {}
     return;
@@ -805,6 +924,7 @@ function leaf(row, ctx) {
   //  SUBS-047: a dir→gitlink type change first sweeps the old dir's tracked
   //  files (synchronously — see reconcileDir), THEN mounts over what remains.
   if (kind === "s") {
+    if (g.nosub) return;                          // GET-047 §4.0: no recursion
     if (row.oldDirTree) sweepOldTree(g, rel, row.oldDirTree, out);
     return mountGitlink(g, rel, newSha, out);
   }
@@ -825,7 +945,11 @@ function leaf(row, ctx) {
   //  no base to merge refuses loudly (the whole-tree pre-pass also catches it).
   if (existed && !g.force && kind === "f") {
     const onDisk = readWt(full);
-    const baseBytes = oldSha ? blobOf(g.k, oldSha) : null;
+    //  GET-047 3.4: in DIVERGED mode the 3-way base is the MERGE-BASE's blob
+    //  at this path (not oldTip's) — ours' committed edits since the base then
+    //  read as dirty-vs-base and weave in, instead of clean-resetting away.
+    const baseSha = g.basePaths ? (g.basePaths[rel] || "") : oldSha;
+    const baseBytes = baseSha ? blobOf(g.k, baseSha) : null;
     const dirty = onDisk != null && (baseBytes == null || !bytesEq(onDisk, baseBytes));
     if (dirty && baseBytes == null)
       throw "be get: GETOVRL dirty wt overlays un-baselined target: " + rel;
@@ -878,11 +1002,53 @@ function sweepOldTree(g, rel, treeSha, out) {
     try { io.rmdir(wtpath(g.wt, d)); } catch (e) {}     // BE-011; non-empty → keep
 }
 
+//  GET-047 / GET.mkd 2.2: on a FORCEFUL whole-tree get, discard UNTRACKED
+//  files — everything the wt scan lists that the NEW tree does not carry.
+//  "Untracked" is status's own unk set (classify.wtScan): .gitignore-matched
+//  paths, `.be`/`.git` meta and nested repos (mounted subs) are all excluded —
+//  so `get!` keeps ignored files, like git clean without -x.  Emptied dirs
+//  collapse via the shared del-sweep (markDelDir + finalizeGet).
+function sweepUntracked(g, newTree, out) {
+  const tracked = {};
+  g.k.readTreeRecursive(newTree, function (l) { tracked[l.path] = 1; });
+  const scan = classify.wtScan(g.wt, ignorelib.load(g.wt));
+  for (const rel in scan) {
+    if (tracked[rel]) continue;
+    try { io.unlink(wtpath(g.wt, rel)); out.row(rel, "del", g.ts); g.dels++;
+          markDelDir(g, rel); } catch (e) {}
+  }
+}
+
 //  SUBS-047: remember a deleted path's parent dir so the del-sweep terminal can
 //  collapse dirs the deletes emptied (top-level files have no dir to mark).
 function markDelDir(g, rel) {
   const cut = rel.lastIndexOf("/");
   if (cut > 0) (g.delDirs || (g.delDirs = {}))[rel.slice(0, cut)] = 1;
+}
+
+//  GET-047 §4.1: is the mounted sub at `rel` attached to something OTHER than
+//  the parent's pin track?  Decided by the ONE attach reader (wtlog.attachedBranch)
+//  against the ONE track writer (submount.trackUri, fragment stripped):
+//    no own anchor (unmounted/fresh clone)      → false  (mount it)
+//    virgin anchor (no ref row at all)          → false  (re-establish)
+//    detached (`#<sha>` record, DIS-075)        → true   (skip)
+//    query-shaped attach (own trunk `?#sha` / branch `?br…`) → true (skip)
+//    URI track == the parent-owned `//…/rel`    → false  (update to the pin)
+//    any other URI track (own remote/other wt)  → true   (skip)
+//  `get!` (g.force) overrides everything (§4.2, force-sub-attach stays green).
+function subAttachedElsewhere(g, rel, pin) {
+  if (g.force) return false;
+  const subWt = wtpath(g.wt, rel);
+  let info = null;
+  try { info = be.treeAt(subWt); } catch (e) { return false; }
+  if (!info || info.wt !== subWt) return false;   // no OWN anchor → not a mount
+  let att;
+  try { att = wtlog.open(info).attachedBranch(); } catch (e) { return false; }
+  if (att.detached) return true;
+  if (!att.uriTrack) return !!(att.sha || att.branch);  // trunk/branch-attached
+  const w = new URI(String(submount.trackUri(g.wt, rel, pin)));
+  const wantTrack = String(URI.make(w.scheme, w.authority, w.path, w.query, undefined));
+  return att.track !== wantTrack;
 }
 
 //  DIS-058 D2-D5 (pre-order sub mount): mount the gitlink at `rel` pinned at
@@ -898,6 +1064,10 @@ function mountGitlink(g, rel, pin, out) {
   if (!isDeclaredSub(g.wt, rel)) {
     return;                                       // undeclared gitlink → skip
   }
+  //  GET-047 §4.1: a NORMAL get updates only a sub attached to the parent's
+  //  pin track; a differently-attached sub (own branch/detached) is IGNORED.
+  //  `get!` overrides (§4.2 — subAttachedElsewhere short-circuits on g.force).
+  if (subAttachedElsewhere(g, rel, pin)) return;
   const m = submount.mount({
     wt: g.wt, beDir: g.beDir, subpath: rel, pin: pin, source: g.source,
   });
@@ -942,6 +1112,9 @@ function recurseSubMounts(g, rel, m, out, depth) {
     if (!isDeclaredSub(subWt, l.path)) {
       continue;
     }
+    //  GET-047 §4.1: a differently-attached grandchild is IGNORED too (its
+    //  track row is flat under the ROOT tree top, so the same predicate fits).
+    if (subAttachedElsewhere(g, sp, l.pin)) continue;
     const cm = submount.mount({
       wt: g.wt, beDir: g.beDir, subpath: sp, pin: l.pin, source: g.source,
     });

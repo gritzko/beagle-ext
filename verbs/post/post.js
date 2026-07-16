@@ -281,12 +281,10 @@ function advanceRef(reader, shard, branchKey, expectedOld, newSha) {
 //  child to climb from).
 function resolveTarget(query, curBranch, title) {
   if (query === "" || query === "/") return "";        // trunk
-  if (query === ".") return curBranch;                 // cur's own branch
-  if (query === "..") {
-    if (!curBranch) throw "`?..` needs a child branch, cur is trunk";
-    const i = curBranch.lastIndexOf("/");
-    return i < 0 ? "" : curBranch.slice(0, i);         // parent (trunk if top)
-  }
+  //  GET-047: `.`/`..`/`./child`/`../sib` via the ONE dot-path convention
+  //  (shared/branch.js resolveRel) — get's `?./child` speaks the same family.
+  const rel = branchlib.resolveRel(query, curBranch);
+  if (rel !== null) return rel;
   //  DIS-061: normalize a named/absolute query (`?/jab/.beagle`) to the stored
   //  refs KEY via the ONE branch codec — no bogus literal-keyed ref row.
   return branchlib.key(branchlib.parse(query, title || ""));

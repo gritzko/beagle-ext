@@ -478,6 +478,8 @@ function open(storePath, project) {
         const sha = shaOf(u);
         if (!sha || !isFullSha(sha) || isZeroSha(sha)) continue;
         cb({ key: key, host: u.host || u.authority, query: u.query || "",
+             //  GET-047: the re-fetchable origin URI (scheme+authority+path).
+             remote: String(URI.make(u.scheme, u.authority, u.path, undefined, undefined)),
              sha: sha, ts: rows[i].ts });
       }
     },
