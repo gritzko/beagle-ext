@@ -32,6 +32,14 @@ const join = require("./util/path.js").join;   // GET-044: tmp-pack path in the 
 //    //host/P, //host/P.git, git://, ssh://         → ssh host git-upload-pack
 //    http(s)://host/owner/repo.git                  → curl smart-HTTP (GIT-012)
 //  Returns { bin, argv } (spawn), or { http, url } for the curl adapter.
+//  POST-028: THIS running jab binary — the local serve spawn target (native
+//  keeper is RETIRED); /proc/self/exe when readable, else argv[0] (PATH-spawn).
+function selfBin() {
+  try { const p = io.readlink("/proc/self/exe"); if (p) return p; } catch (e) {}
+  return (typeof process !== "undefined" && process.argv && process.argv[0]) ||
+         "jab";
+}
+
 function classify(remoteUri, verb) {
   //  URI-015: a git scp-form remote (`git@host:path`) recomposes to ssh:// here.
   const u = new URI(uriarg.fromGit(remoteUri));
@@ -39,7 +47,9 @@ function classify(remoteUri, verb) {
   const host = u.host || u.authority || "";
   let path = u.path || "";
   const query = u.query || "";
-  const keeperBin = io.getenv("KEEPER_BIN") || "keeper";
+  //  POST-028: local serve is jab-to-jab (GIT-020, shared/serve.js) — spawn
+  //  this running binary's own serve verbs; KEEPER_BIN still overrides (tests).
+  const keeperBin = io.getenv("KEEPER_BIN") || selfBin();
 
   //  Serve-path arg the peer sees: path + `?<sel>` when the query is an
   //  absolute `/<project>` selector (WIREServePath).  A bare `?ref` is the
@@ -60,8 +70,10 @@ function classify(remoteUri, verb) {
                                             host === "localhost")) ||
                    (scheme === "be" && noAuth);
   if (localish) {
-    return { bin: keeperBin, argv: [keeperBin, verb, servePath(path)],
-             ssh: false };
+    //  POST-028: receive-pack takes the BARE path — the `?/<sel>` servePath
+    //  form is RETIRED for push (the PATH selects the wt-or-shard project).
+    const sp = (verb === "receive-pack") ? path : servePath(path);
+    return { bin: keeperBin, argv: [keeperBin, verb, sp], ssh: false };
   }
 
   //  GIT-012: http(s) rides a spawned curl (jab has no TLS), smart-protocol.

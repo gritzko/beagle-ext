@@ -42,6 +42,7 @@ const subs     = require("../../shared/subs.js");     // DIS-058 D6: sub enum
 const submount = require("../../shared/submount.js"); // DIS-072: pin track URI
 const getverb  = require("../get/get.js");            // POST-026: reuse get merge
 const wire     = require("../../shared/wire.js");      // GIT-013: wire push
+const servelib = require("../../shared/serve.js");     // POST-028: self-push gate
 const relate   = require("../../shared/relate.js");    // GIT-016: verdict spine
 const ingest   = require("../../shared/ingest.js");    // GIT-016: remote-track saver
 //  JAB-003: TRUE-hunk output via the shared columnar->hunk adapter (ctx.sink),
@@ -128,6 +129,17 @@ function parseSlots(args) {
     //  text, not a slot; post's message picks it up.
     const u = uri.parse(a);
     if (typeof u === "string") continue;
+    //  POST-028 (RULED 2026-07-16): a `file:` — or authority-less `be:` —
+    //  target is a LOCAL store PUSH (Host slot, `jab receive-pack` serve);
+    //  the query is the BRANCH want, the path a wt or a store shard.
+    if (u.scheme === "file" || (u.scheme === "be" && !u.host)) {
+      if (u.fragment !== undefined)
+        throw "post `#msg` to a store target is not supported (commit first)";
+      slots.host = true;
+      slots.hostUri = a;
+      if (a.indexOf("?") >= 0) { slots.hasQuery = true; slots.query = u.query || ""; }
+      continue;
+    }
     if (u.host) {
       //  DIS-062: a SCHEME-LESS authority is a LOCAL WORKTREE target (an
       //  explicit `//X[/sub]` operand, once loop.js's authorityRepo lets it
@@ -458,7 +470,16 @@ function pushRemote(info, reader, ctx, remoteUri, branch, tip, hasQuery) {
   //  GIT-019: ssh/local push runs on ONE receive-pack session — advertise once,
   //  verdict off that advert, send on the SAME fds.  http is stateless (no
   //  session): fall back to the classic advertRefs-inside-relate + wire.push.
-  const isHttp = !!wire.classify(remoteUri, "receive-pack").http;
+  const cls = wire.classify(remoteUri, "receive-pack");
+  const isHttp = !!cls.http;
+  //  POST-028: a LOCAL target that resolves (wt-or-shard, GET-038 redirect) to
+  //  this wt's own anchor shard is a SELF-push — refuse before any spawn.
+  if (!isHttp && !cls.ssh) {
+    let tgt; try { tgt = servelib.serveStore(remoteUri).shard; } catch (e) { tgt = ""; }
+    if (tgt && tgt === store.shardDir(info.storePath, info.project))
+      throw refuse("`" + remoteUri + "` is this worktree's own store",
+                   "the target is this worktree's own store");
+  }
   let session = null;
   if (!isHttp) {
     try { session = wire.pushSession(remoteUri); }

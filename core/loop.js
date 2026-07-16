@@ -297,6 +297,12 @@ function cli(argv, opts2) {
     require(_here + "/shared/serve.js").uploadPack(argv[3] || "", 0, 1);
     return;
   }
+  //  POST-028: `jab receive-pack <path>` — the PUSH serve twin (spawned by a
+  //  local file:/be: post); same pre-verb raw-wire intercept as upload-pack.
+  if (argv[2] === "receive-pack") {
+    require(_here + "/shared/serve.js").receivePack(argv[3] || "", 0, 1);
+    return;
+  }
   //  JAB-004: a driveSpell re-entry overlays its ambient onto the shared `be`;
   //  snapshot the outer run's fields so the finally restores them (verbs read be.*).
   const beSaved = opts2.reentry ? _snapBe() : null;
