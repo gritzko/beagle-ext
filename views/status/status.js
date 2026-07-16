@@ -37,6 +37,9 @@ const join     = require("../../shared/util/path.js").join;   // DIS-060: scope 
 //  BE-030: worktree fs paths go THROUGH resolve() (context-confined wtpath).
 const discover = require("../../core/discover.js");
 const wtpath = discover.wtpath;
+//  STATUS-009: the ONE URI→hash resolver (RULE ZERO) — the track ref resolves
+//  through resolve_hash() only, never a hand-rolled second resolver.
+const resolveHash = require("../../core/resolve_hash.js").resolve_hash;
 //  JAB-004: render.js's dateCol/verbCol/writeStdout/shQuote are no longer
 //  used here — the emit sink (core/emit.js) owns all column formatting at the
 //  flush edge, and the fork machinery (shQuote) is gone.
@@ -330,7 +333,7 @@ function emitRepo(repo, prefix, out, recurse, filter) {
   //  file rows.  Counts feed the trailing `(behind N, ahead M)` note.
   //  STATUS-006: commit divergence (ahead/behind) is repo-level, not a path row —
   //  a subtree FILTER suppresses it so the scoped hunk stays path-only.
-  const diverge = filter ? { ahead: [], behind: [] } : computeDivergence(k, log, cur);
+  const diverge = filter ? { ahead: [], behind: [] } : computeDivergence(k, log, cur, repo);
 
   //  JSQUE-008: push every line through the emit sink (out) in final render
   //  order — the loop does ONE flush at the edge.  The columnar rows
@@ -390,7 +393,12 @@ function emitRepo(repo, prefix, out, recurse, filter) {
   //  hunk header already carries the path, so the summary `rel` is empty and
   //  the `?<branch>` token is the sub's RAW anchor query, NOT path-prefixed.
   const rel = prefix ? "" : cwdRel(repo.wt);
-  let summary = (rel ? rel : "") + "?" + branch + "\t";
+  //  STATUS-009: a URI-shaped track (parent pin / worktree / remote / store)
+  //  shows AS RECORDED + `#<base8>` (the 8-hex base hashlet, when recorded).
+  const label = att.uriTrack
+        ? att.track + (att.base ? "#" + att.base.slice(0, 8) : "")
+        : "?" + branch;
+  let summary = (rel ? rel : "") + label + "\t";
   const segs = [];
   for (const b of SUMMARY_ORDER) {
     const n = res.counts[b] || 0;
@@ -459,21 +467,24 @@ function joinPrefix(prefix, col) {
   return prefix + "/" + col;
 }
 
-//  Resolve cur tip + the local ref tip of cur's branch, compute the
-//  ahead/behind commit divergence via dag.js.  Mirrors
-//  SNIFF.exe.c::status_emit_commit_diff: silent no-op (empty lists) when
-//  cur has no 40-hex tip, the branch ref is absent, or cur == tip.
-function computeDivergence(k, log, cur) {
+//  Resolve cur tip + the TRACK's tip, compute the ahead/behind commit
+//  divergence via dag.js.  Mirrors SNIFF.exe.c::status_emit_commit_diff:
+//  silent no-op (empty lists) when cur has no 40-hex tip, the track is
+//  absent/unresolvable, or cur == tip.
+//  STATUS-009: the track comes from the ONE attach reader (a detached/track-
+//  less wt has nothing to diverge from) and resolves through resolve_hash()
+//  ONLY (RULE ZERO): a `?branch` track lands on its local ref tip, a
+//  `//WT[/sub]` track on the wt base / parent gitlink pin (otype "commit").
+function computeDivergence(k, log, cur, repo) {
   const empty = { ahead: [], behind: [] };
   if (!cur || !cur.sha || !subs.isFullSha(cur.sha)) return empty;
-  //  Branch = cur tip's RAW query (native uses `cu.query`): empty = trunk;
-  //  a detached cur carries the full sha as its query, which resolveRef
-  //  won't match → no divergence (a detached cur has no branch ref to
-  //  diverge from — exactly native's behaviour).
-  //  DIS-075: the canonical `#<sha>` record has an ABSENT query — guard via the
-  //  ONE attach reader, or a detached cur.query="" would falsely diverge vs trunk.
-  if (log.attachedBranch().detached) return empty;
-  const tip = k.resolveRef(cur.query || "");
+  const att = log.attachedBranch();
+  if (att.detached || !att.track) return empty;
+  let tip;
+  try {
+    const rh = resolveHash(discover.navCwd(repo.wt), att.track);
+    tip = rh.otype === "commit" ? rh.ohash : rh.chash;
+  } catch (e) { return empty; }   // an unresolvable track (remote/store) → no-op
   if (!tip || !subs.isFullSha(tip)) return empty;
   if (tip === cur.sha) return empty;
   return dag.aheadBehind(k, cur.sha, tip);

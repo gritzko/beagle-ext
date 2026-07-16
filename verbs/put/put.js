@@ -348,7 +348,8 @@ function resolveHex(k, hexish) {
 
 //  --- bare `be put` (no path args) — PUT-004 ------------------------------
 //  PUT-004: stage the whole wt vs baseline from the classifier's buckets —
-//  mod→put, mis↔unk→silent move, ok→restamp (no row), unk→skip; returns { ops }.
+//  mod→put, mis↔unk→silent move, ok→restamp (no row), unk→skip (PUT-009
+//  RULING: unks stage MANUALLY only, deletions are delete's); returns { ops }.
 function bareStage(repo, wtl, k, scope) {
   const eng = stage.prep(repo, wtl, k);
   const wtRoot = repo.wt;

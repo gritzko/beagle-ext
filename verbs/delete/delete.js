@@ -100,6 +100,39 @@ function bareSweepSubs(repo, prefix, items) {
   });
 }
 
+//  SUBS-039/DELETE (the PUT twin): the shallowest MOUNTED-sub prefix of `rel`,
+//  INTERIOR paths only — naming the sub itself is NOT a delete-the-submodule.
+function subMountPrefix(repo, rel) {
+  const segs = rel.split("/");
+  let pfx = "";
+  for (let i = 0; i < segs.length - 1; i++) {
+    pfx = pfx ? pfx + "/" + segs[i] : segs[i];
+    if (recurse.isMount(repo.wt, pfx)) return pfx;
+  }
+  return "";
+}
+
+//  SUBS-039/DELETE: a named path crossing a mounted sub deletes INSIDE the sub
+//  (rows to the SUB's own wtlog; mount-by-mount descent as in put's stageInSub).
+//  Returns { res, disp } — the sub's delStage result + the accumulated prefix.
+function delInSub(repo, pfx, raw, force) {
+  let subRepo = repo, rest = raw, disp = "", seg = pfx;
+  for (;;) {
+    subRepo = be.treeAt(wtpath(subRepo.wt, seg));
+    rest = rest.slice(seg.length + 1);
+    disp = disp ? disp + "/" + seg : seg;
+    const deeper = rest ? subMountPrefix(subRepo, rest) : "";
+    if (!deeper) break;
+    seg = deeper;
+  }
+  const subK = store.open(subRepo.storePath, subRepo.project);
+  const res = delStage(subRepo, subK, [rest], force);
+  if (res.rows.length > 0)
+    ulog.append(subRepo.bePath,
+      res.rows.map(function (r) { return { verb: "delete", uri: r.uri }; }));
+  return { res: res, disp: disp };
+}
+
 //  --- DELStage (path / bare forms): build the row list, then write -------
 //  Mirrors sniff/DEL.c::del_stage_named (named) + del_sweep_missing (bare).
 //  Returns { banner, dirty } where `banner` is the ordered stdout line list
@@ -361,12 +394,17 @@ function delRun(ctx, argv) {
   const k = store.open(repo.storePath, repo.project);
 
   //  JAB-004: PLAIN owns the fan-out INLINE (no seedCtx) — split each arg into a
-  //  `?br` tombstone vs a path/dir row.
-  const refs = [], pathRaws = [];
+  //  `?br` tombstone vs a path/dir row; SUBS-039: a sub-crossing path delegates.
+  const refs = [], pathRaws = [], subDels = [];
   for (const arg of argv) {
     const c = classifyArgLocal(arg, repo);
     if (c.branch != null) refs.push({ branch: c.branch });
-    else if (c.path) pathRaws.push(c.path);
+    else if (c.path) {
+      const rel = normRel(c.path);
+      const pfx = rel ? subMountPrefix(repo, rel) : "";
+      if (pfx) subDels.push({ pfx: pfx, raw: rel });
+      else pathRaws.push(c.path);
+    }
   }
 
   //  Branch tombstones FIRST (the pre-loop barrier): each `?br` op drops the
@@ -378,11 +416,28 @@ function delRun(ctx, argv) {
 
   //  A pure branch-form invocation (only `?br` args, no path) prints nothing
   //  extra — DELStage does NOT run.  Only a bare `be delete` (no args at all,
-  //  hence no refs) runs the sweep; refs present + no paths is a ref-only run.
-  if (pathRaws.length === 0 && refs.length > 0) return;
+  //  hence no refs/sub paths) runs the sweep; refs/subs + no paths skip it.
+  if (pathRaws.length === 0 && refs.length > 0 && subDels.length === 0) return;
 
-  const res = delStage(repo, k, pathRaws, recursive);
-  if (res.rows.length > 0) {
+  //  SUBS-039/DELETE: delegate each sub-crossing path INTO its sub — rows land
+  //  in the SUB's wtlog; banner rows re-prefix under the sub path (as put does).
+  let dirtySub = null;
+  const subItems = [];
+  for (const sd of subDels) {
+    const d = delInSub(repo, sd.pfx, sd.raw, recursive);
+    for (const it of d.res.banner.items) {
+      if (it.type === "row")
+        subItems.push({ type: "row", path: d.disp + "/" + it.path });
+      else if (it.type === "summary")
+        subItems.push({ type: "summary", text: d.disp + ": " + it.text });
+    }
+    if (d.res.dirty && !dirtySub) dirtySub = d.disp + "/" + d.res.dirtyPath;
+  }
+
+  //  Parent stage: skipped on a sub-only run (delStage([]) would bare-sweep).
+  const res = (pathRaws.length > 0 || subDels.length === 0)
+        ? delStage(repo, k, pathRaws, recursive) : null;
+  if (res && res.rows.length > 0) {
     const uris = res.rows.map(function (r) { return { verb: "delete", uri: r.uri }; });
     ulog.append(repo.bePath, uris);
   }
@@ -391,13 +446,19 @@ function delRun(ctx, argv) {
   const sink = ctx.sink || (typeof be !== "undefined" && be.sink);
   if (sink) {
     const out = hunkrows(sink, "?");
-    emitBanner(out, res.banner);        // always (the open `delete:` table)
+    if (res) emitBanner(out, res.banner);   // the open `delete:` table
+    else if (subItems.length > 0) out.row("?", "delete", ron.now());
+    for (const it of subItems) {
+      if (it.type === "row") out.row(it.path, "delete", 0n);
+      else out.raw(it.text);
+    }
     out.done();
   }
-  if (res.dirty) {
+  if ((res && res.dirty) || dirtySub) {
     //  JSQUE-014: the loop edge flushes the partial banner before the throw
     //  propagates (no per-handler flush); just emit the diag + throw ONCE.
-    io.log("be delete: " + res.dirtyPath + " has unstamped changes — "
+    io.log("be delete: " + ((res && res.dirty) ? res.dirtyPath : dirtySub)
+           + " has unstamped changes — "
            + "stage with `be put` or revert before deleting\n");
     throw DELDIRTY;                      // non-zero exit (native DELDIRTY)
   }

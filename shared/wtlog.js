@@ -131,6 +131,17 @@ function open(be) {
              rawQuery: rawQuery, br: parseBranch(rawQuery, branch) };
   }
 
+  //  STATUS-009: the BASE sha — the fragment of the LAST get/post record that
+  //  carries one (the POST-026 `<track>#<base>` split); "" when none.
+  function baseSha() {
+    for (let i = rows.length - 1; i >= 0; i--) {
+      const r = rows[i];
+      if (r.verb !== GET && r.verb !== POST) continue;
+      if (isFullSha(r.uri.fragment)) return r.uri.fragment;
+    }
+    return "";
+  }
+
   //  attachedBranch — the SINGLE source of truth for "what branch is this wt
   //  on" (DIS-057).  A wt is attached per the RECENTMOST `get` record (NOT
   //  get/post/patch): `?master`, `?` (trunk), `?branch#sha`, `?#sha` are all
@@ -138,27 +149,44 @@ function open(be) {
   //  DETACHED.  A legacy detached POST wrote trunk-shaped `?#<sha>` — from the
   //  record alone that is UNRESOLVABLE, so attachment stays anchored on the
   //  recentmost GET record (DIS-059), never a post row.
-  //  Returns { branch, detached, rawQuery, sha }.  status's label,
-  //  post's detach guard + curBranch, and divergence all route through THIS so
-  //  they cannot disagree (status said trunk while post said detached).
+  //  STATUS-009: in the record, `#fragment` = the base commit and EVERYTHING
+  //  ELSE = the TRACK ref (branch, parent pin, worktree, remote or store).
+  //  Returns { branch, detached, rawQuery, sha, br, track, uriTrack, base }.
+  //  status's label, post's detach guard + curBranch, and divergence all route
+  //  through THIS so they cannot disagree (status said trunk, post detached).
   function attachedBranch() {
     for (let i = rows.length - 1; i >= 0; i--) {
       const r = rows[i];
       if (r.verb !== GET) continue;
-      const ref = refOf(r.uri, r.local);
+      const u = r.uri;
+      const ref = refOf(u, r.local);
       if (!ref.sha && !ref.branch) continue;     // store/project anchor pins nothing
-      const q = stripProject(r.uri.query) || "";
-      //  DIS-075: the canonical detach record is `#<sha>` — LOCAL row, query slot
-      //  ABSENT, sha in the fragment; legacy `?<sha>` (sha in the query) reads on.
-      const detached = !ref.branch &&
+      //  STATUS-009: a URI-shaped track (scheme/authority/path present) is a
+      //  ref too — only a query-shaped record reads through the branch codec.
+      const uriTrack = u.scheme !== undefined || u.authority !== undefined ||
+                       (u.path !== undefined && u.path !== "");
+      const q = stripProject(u.query) || "";
+      //  DIS-075: the canonical detach record is `#<sha>` — REF-LESS row, query
+      //  slot ABSENT, sha in the fragment; legacy `?<sha>` (sha-only query) reads on.
+      const detached = !ref.branch && !uriTrack &&
             (q.split("&").some(function (c) { return isFullSha(c); }) ||
-             (r.local && r.uri.query === undefined && isFullSha(r.uri.fragment)));
+             (r.local && u.query === undefined && isFullSha(u.fragment)));
+      //  STATUS-009: the recorded TRACK = the record minus its `#fragment` (the
+      //  ulog URI is normalized already); a query track keeps its sha-stripped KEY.
+      const track = detached ? ""
+            : uriTrack
+            ? String(URI.make(u.scheme, u.authority, u.path, u.query, undefined))
+            : String(URI.make(undefined, undefined, undefined,
+                              u.query === undefined ? undefined : ref.branch,
+                              undefined));
       return { branch: ref.branch || "", detached: detached,
-               rawQuery: r.uri.query || "", sha: ref.sha || "",
-               br: parseBranch(r.uri.query, ref.branch) };
+               rawQuery: u.query || "", sha: ref.sha || "",
+               br: parseBranch(u.query, ref.branch),
+               track: track, uriTrack: uriTrack, base: baseSha() };
     }
     return { branch: "", detached: false, rawQuery: "", sha: "",
-             br: branchlib.parse("", title) };
+             br: branchlib.parse("", title),
+             track: "", uriTrack: false, base: baseSha() };
   }
 
   //  A `post` at index idx is commit-all iff no put/delete lies between
