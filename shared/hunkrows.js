@@ -110,7 +110,10 @@ module.exports = function hunkrows(sink, uri, scheme) {
       }
       const path = (row.src && row.src !== row.path)
             ? row.src + "#" + row.path : row.path;
-      feedText(utf8.Encode(" " + path + "\n")); spans.push(["S", off]);
+      //  BRO-030: a declared-submodule (gitlink) path takes the bold-only 'C'
+      //  tag; the trailing '\n' stays 'S' (no bold bleed).
+      feedText(utf8.Encode(" " + path)); spans.push([row.gitlink ? "C" : "S", off]);
+      feedText(utf8.Encode("\n")); spans.push(["S", off]);
     },
     //  A commit row's `o` is "present in this line" → the ✔ glyph map.
     quadCommit: function (c) {

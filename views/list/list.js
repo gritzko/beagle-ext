@@ -13,6 +13,7 @@
 const store      = require("../../shared/store.js");
 const wtlog      = require("../../shared/wtlog.js");
 const classify   = require("../../shared/classify.js");
+const gitmodules = require("../../shared/gitmodules.js");   // BRO-030: sub paths
 const lastcommit = require("../../shared/lastcommit.js");
 const shalib     = require("../../shared/util/sha.js");
 const render     = require("../../view/render.js");
@@ -42,7 +43,7 @@ function padName(name) { return name.length >= NAME_W ? name + " " : name + " ".
 //  pager left-click on the name opens `list:<sub>/` for a dir, `cat:<file>` for a
 //  file).  marker = the wt bucket verb; summary/age are the last-commit fuse
 //  (blank when unattributed within the walk ceiling).
-function appendRow(textParts, spans, off, marker, name, navUri, summary, age) {
+function appendRow(textParts, spans, off, marker, name, navUri, summary, age, gitlink) {
   const vcol = render.verbCol(marker);
   const namePad = padName(name);
   const pre = utf8.Encode(vcol + " ");                      // marker + sep
@@ -62,8 +63,11 @@ function appendRow(textParts, spans, off, marker, name, navUri, summary, age) {
   const eAge  = eMid + ageB.length;                         // age
   const eNL   = eAge + nlB.length;                          // '\n'
   const vtag  = theme.VERB_SLOT[marker] || "S";
+  //  BRO-030: a MOUNTED submodule dir renders its name BOLD (bold-only 'C'); a
+  //  plain entry keeps 'F' (violet).
+  const ntag  = gitlink ? "C" : "F";
   spans.push([tagCode(vtag), off + ePre]);                 // wt marker (palette slot)
-  spans.push([tagCode("F"), off + eName]);                 // name (violet)
+  spans.push([tagCode(ntag), off + eName]);                // name (violet / bold gitlink)
   spans.push([tagCode("U"), off + eUri]);                  // hidden nav URI
   spans.push([TAG_D, off + eSumm]);                        // pale-grey summary
   spans.push([TAG_S, off + eMid]);                         // sep
@@ -109,7 +113,7 @@ function emitHunk(sink, banner, navPfx, entries, commits, now) {
     const nav = e.dir ? navlib.navLink("list", navPfx + e.name + "/")
                       : navlib.navLink("cat", navPfx + e.name);
     const label = e.dir ? e.name + "/" : e.name;
-    off += appendRow(textParts, spans, off, e.marker, label, nav, summary, age);
+    off += appendRow(textParts, spans, off, e.marker, label, nav, summary, age, e.gitlink);
   }
   const body = new Uint8Array(off);
   let p = 0;
@@ -163,10 +167,15 @@ function listOne(arg) {
     const rel = r.path.slice(scopePfx.length), slash = rel.indexOf("/");
     if (slash > 0) dirtyDirs[rel.slice(0, slash)] = 1;   // dirty path under a dir
   }
+  //  BRO-030: declared submodules (`.gitmodules`) render their dir row BOLD;
+  //  keyed by the path relative to the owning wt (scopePfx + name).
+  const subSet = {};
+  for (const sp of gitmodules.paths(repo.wt)) subSet[sp] = true;
   const entries = [];
   for (const f of res.files) entries.push({ name: f.name, dir: false, marker: f.bucket });
   for (const name of res.dirs)
-    entries.push({ name: name, dir: true, marker: dirtyDirs[name] ? "mod" : "dir" });
+    entries.push({ name: name, dir: true, marker: dirtyDirs[name] ? "mod" : "dir",
+                   gitlink: !!subSet[scopePfx + name] });
   entries.sort(function (a, b) {
     const ka = a.name + (a.dir ? "/" : ""), kb = b.name + (b.dir ? "/" : "");
     return ka < kb ? -1 : ka > kb ? 1 : 0;

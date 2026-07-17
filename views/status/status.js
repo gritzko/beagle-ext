@@ -207,7 +207,9 @@ function sinkOut(sink) {
       }
       const path = (row.src && row.src !== row.path)
             ? row.src + "#" + row.path : row.path;
-      feedText(utf8.Encode(" " + path)); spans.push(["S", off]); // sep + path
+      //  BRO-030: a declared-submodule (gitlink) path takes the bold-only 'C'
+      //  tag instead of 'S' — bold is tty decoration only, plain stays identical.
+      feedText(utf8.Encode(" " + path)); spans.push([row.gitlink ? "C" : "S", off]); // sep + path
       if (nav) { feedText(utf8.Encode(nav)); spans.push(["U", off]); }  // hidden nav
       if (act) {
         feedText(utf8.Encode(" "));         spans.push(["S", off]);       // sep
@@ -256,7 +258,7 @@ const QUAD_SUMMARY = ["track", "base", "patch", "wt", "staged", "con"];
 //  model, rendered as ASCII canon via quadrender for the columnar (plain) `out`
 //  or as a real HUNK with per-column tok spans + nav/buttons when `out` is a
 //  sinkOut (`out.quadRow`).  `quad.colored` only decorates the columnar render.
-function emitRepo(repo, prefix, out, recurse, filter, quad) {
+function emitRepo(repo, prefix, out, recurse, filter, quad, pins) {
   const log = wtlog.open(repo);
   const k   = store.open(repo.storePath, repo.project);
   //  STATUS-006: the subtree filter narrows the quad gather (DIS-054 underNarrow)
@@ -264,8 +266,12 @@ function emitRepo(repo, prefix, out, recurse, filter, quad) {
   const narrow = filter
         ? function (p) { return p === filter || p.indexOf(filter + "/") === 0; }
         : null;
-  const model = quadlib.quadOf(repo, log, k,
-                               narrow ? { underNarrow: narrow } : {});
+  //  STATUS-014: a RECURSED sub takes its track column from the parent's
+  //  track-tree gitlink pin (pins.track); base stays the sub's own cur.
+  const opts = {};
+  if (narrow) opts.underNarrow = narrow;
+  if (pins && pins.track) opts.trackPin = pins.track;
+  const model = quadlib.quadOf(repo, log, k, opts);
 
   //  BRO-030: an advanced MOUNTED gitlink (subs.classifyMount `adv`) is a
   //  file row whose wt column reads '↑' — a gitlink advance like any file.
@@ -299,12 +305,18 @@ function emitRepo(repo, prefix, out, recurse, filter, quad) {
     if (out.quadCommit) out.quadCommit(c);
     else out.raw(quadrender.commitRow(c, quad.colored));
   }
+  //  BRO-030: declared submodules (gitlink paths, `.gitmodules` — the same
+  //  source classify uses) render their path column BOLD; keyed by the sub-
+  //  relative path (r.path, before the prefix join).
+  const subSet = {};
+  for (const sp of gitmodulesOrder(repo.wt)) subSet[sp] = true;
   for (const r of model.rows) {
     //  BRO-030: a sub's rows join under `prefix` at emit time (JAB-004).
     const navPath = joinPrefix(prefix, r.path);
     const row = { path: navPath,
                   src: r.src ? joinPrefix(prefix, r.src) : undefined,
-                  quad: r.quad, staged: r.staged, con: r.con, ts: r.ts };
+                  quad: r.quad, staged: r.staged, con: r.con, ts: r.ts,
+                  gitlink: !!subSet[r.path] };
     //  BRO-030 (BE-006/041): the wt char routes the hidden `U` nav + button —
     //  a baseline exists to diff for v/x/! (diff:), else cat: (created 'o');
     //  an unstaged wt v/o → [put], x → [del] (con carries neither).  The button
@@ -331,7 +343,11 @@ function emitRepo(repo, prefix, out, recurse, filter, quad) {
   const branch = (cur && cur.sha && att.detached)
         ? cur.sha : branchlib.format(att.br);
   const rel = prefix ? "" : cwdRel(repo.wt);
-  const label = att.uriTrack
+  //  STATUS-014: a recursed sub spells the parent-mount PIN form (`//WT/sub` +
+  //  the base-pin hashlet), not its self-ref track row; a top-level sub status
+  //  (no pins) keeps today's attachedBranch label.
+  const label = (pins && pins.label) ? pins.label
+        : att.uriTrack
         ? att.track + (att.base ? "#" + att.base.slice(0, 8) : "")
         : "?" + branch;
   let summary = (rel ? rel : "") + label + "\t";
@@ -356,16 +372,43 @@ function emitRepo(repo, prefix, out, recurse, filter, quad) {
 
   //  JAB-004 recursion: relay each MOUNTED sub's status as a SEPARATE
   //  `status:<subpath>` hunk, DEPTH-FIRST in `.gitmodules` declaration order.
+  //  STATUS-014: harvest the sub gitlink pins from THIS repo's base + track
+  //  trees ONCE (model.base/model.track — already resolved) and thread each
+  //  sub's base pin (label) + track pin (its track column) down the recursion.
   if (recurse) {
+    const basePins  = gitlinkPins(k, model.base);
+    const trackPins = gitlinkPins(k, model.track);
     for (const subPath of gitmodulesOrder(repo.wt)) {
       if (narrow && !narrow(subPath)) continue;
       if (!isMount(repo.wt, subPath)) continue;
       const subWt = subs.mountWtDir(repo, subPath);
       let subRepo;
       try { subRepo = be.treeAt(subWt); } catch (e) { continue; }
-      emitRepo(subRepo, joinPrefix(prefix, subPath), out, recurse, undefined, quad);
+      const bp = basePins[subPath];
+      const subPins = { track: trackPins[subPath], base: bp,
+                        label: bp ? mountLabel(repo.wt, subPath, bp) : null };
+      emitRepo(subRepo, joinPrefix(prefix, subPath), out, recurse, undefined, quad, subPins);
     }
   }
+}
+
+//  STATUS-014: gitlink pins (path → sha of every 160000 entry) in a commit's
+//  tree — the parent-mount pins threaded into a sub's quad columns/label.
+function gitlinkPins(k, commitSha) {
+  const pins = {};
+  if (!commitSha) return pins;
+  let tree; try { tree = k.commitTree(commitSha); } catch (e) { return pins; }
+  if (!tree) return pins;
+  k.readTreeRecursive(tree, function (l) { if (l.kind === "s") pins[l.path] = l.sha; });
+  return pins;
+}
+
+//  STATUS-014: the parent-mount PIN label `//WT/sub#<basePin8>` (submount pin
+//  form) — the recursed sub's summary spells this, not its self-ref track row.
+function mountLabel(parentWt, subPath, basePin) {
+  const submount = require("../../shared/submount.js");
+  const u = String(submount.trackUri(parentWt, subPath, basePin));
+  return u.replace(/#[0-9a-f]+$/i, "") + "#" + basePin.slice(0, 8);
 }
 
 //  Parse `<wt>/.gitmodules` and return the declared submodule `path` values in

@@ -242,14 +242,19 @@ function quadModel(inp) {
 //  detached ⇒ track = the pin = cur, per wiki/Status.mkd), the wt axis via
 //  classifyMerge (opts.underNarrow forwarded).  `resolveTrack` is injectable
 //  for tests; the default requires core/resolve_hash lazily (quadModel stays
-//  usable with zero ambient globals).
+//  usable with zero ambient globals).  STATUS-014: opts.trackPin (a full sha)
+//  OVERRIDES track resolution — a recursed sub's track column is the parent's
+//  track-tree gitlink pin, not the sub's self-ref row (base stays the sub's cur).
 function quadOf(be, log, k, opts) {
   opts = opts || {};
   const cur = log.curTip();
   const base = (cur && isFullSha(cur.sha)) ? cur.sha : "";
   const att = log.attachedBranch();
   let track = "";
-  if (att.detached) track = base;        // detached: track = the pin (ruling)
+  //  STATUS-014: a RECURSED sub takes its track column from the PARENT's
+  //  track-tree gitlink pin (opts.trackPin), NOT the sub's DIS-072 self-ref row.
+  if (isFullSha(opts.trackPin)) track = opts.trackPin;
+  else if (att.detached) track = base;   // detached: track = the pin (ruling)
   else if (att.track && opts.resolveTrack) track = opts.resolveTrack(att.track) || "";
   else if (att.track) {
     try {

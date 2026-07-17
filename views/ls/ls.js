@@ -20,6 +20,7 @@
 const wtlog    = require("../../shared/wtlog.js");
 const store    = require("../../shared/store.js");
 const classify = require("../../shared/classify.js");
+const gitmodules = require("../../shared/gitmodules.js");   // BRO-030: sub paths
 const pathlib  = require("../../shared/util/path.js");
 //  BE-030: worktree fs paths go THROUGH resolve() (context-confined wtpath).
 const discover = require("../../core/discover.js");
@@ -45,7 +46,7 @@ function tagCode(letter) { return letter.charCodeAt(0) - 65; }
 //  the bucket name (eq/mod/dir…); `nav` is the hidden click-target URI.  Plain
 //  bytes (date/verb/path columns) are byte-identical to the columnar emit; the
 //  nav URI bytes ride hidden under a 'U' tok (skipped by plain/color renderers).
-function appendRow(textParts, spans, off, verb, path, navUri, ts) {
+function appendRow(textParts, spans, off, verb, path, navUri, ts, gitlink) {
   const date = render.dateCol(ts);                 // 7-col date; ts 0n → 7 spaces
   const vcol = render.verbCol(verb);               // 3-col verb
   const cols = date + " " + vcol + " " + path;     // visible columns (no '\n' yet)
@@ -61,11 +62,14 @@ function appendRow(textParts, spans, off, verb, path, navUri, ts) {
   const eUri  = ePath + uriB.length;               // hidden nav URI
   const eNL   = eUri + nlB.length;                 // visible '\n'
   const vtag  = theme.VERB_SLOT[verb] || "S";
+  //  BRO-030: a MOUNTED submodule dir renders its name BOLD (bold-only 'C');
+  //  a plain subdir keeps 'F' (violet).
+  const ptag  = gitlink ? "C" : "F";
   spans.push([tagCode("L"), off + eDate]);          // date
   spans.push([tagCode("S"), off + eSep1]);          // sep
   spans.push([tagCode(vtag), off + eVerb]);         // verb (palette slot)
   spans.push([tagCode("S"), off + eSep2]);          // sep
-  spans.push([tagCode("F"), off + ePath]);          // visible path
+  spans.push([tagCode(ptag), off + ePath]);         // visible path
   spans.push([tagCode("U"), off + eUri]);           // hidden nav URI (click target)
   spans.push([tagCode("S"), off + eNL]);            // the visible '\n'
   return colsB.length + uriB.length + nlB.length;
@@ -83,7 +87,7 @@ function emitHunk(sink, banner, navPfx, entries) {
     if (e.dir) {
       //  URI-014: nav click-target is the `word URI` spell `ls [//name/]<sub>/`.
       const nav = navlib.navLink("ls", navPfx + e.name + "/");
-      off += appendRow(textParts, spans, off, "dir", e.name + "/", nav, 0n);
+      off += appendRow(textParts, spans, off, "dir", e.name + "/", nav, 0n, e.gitlink);
     } else {
       //  DIS-057 RULING 2026-06-29: a move is the `rmv`(src)+`mov`(dst) pair (no
       //  `-> dst` arrow), so the entry text is the bare name.  URI-014: the click
@@ -158,12 +162,17 @@ function lsOne(uri, verb, ctx, queue, rdCache) {
   //  Merge files + dirs into ONE lex-ordered entry list (a file `deep.txt` sorts
   //  before a dir `deep/`, as native ls: orders full paths).  A dir row's date
   //  is BLANK (ts 0n): native ls: dates no directory.
+  //  BRO-030: declared submodules (`.gitmodules`) render their dir row BOLD;
+  //  keyed by the path relative to the OWNING wt (scopePfx + name).
+  const subSet = {};
+  for (const sp of gitmodules.paths(repo.wt)) subSet[sp] = true;
   const entries = [];
   for (const f of res.files)
     //  DIS-057: a rename lists as the `rmv`(src)+`mov`(dst) pair, no `-> dst`.
     entries.push({ key: f.name, dir: false, text: f.name, verb: f.bucket, ts: f.ts });
   for (const name of res.dirs)
-    entries.push({ key: name + "/", dir: true, name: name });
+    entries.push({ key: name + "/", dir: true, name: name,
+                   gitlink: !!subSet[scopePfx + name] });
   entries.sort(function (a, b) { return a.key < b.key ? -1 : a.key > b.key ? 1 : 0; });
 
   //  BRO-006: color/tlv → ONE U-target content HUNK; PLAIN → the columnar `out`.

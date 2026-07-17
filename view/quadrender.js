@@ -54,8 +54,11 @@ function paintQuad(quad, row, colored, glyphs) {
 function fileRow(row, colored) {
   const path = (row.src && row.src !== row.path)
         ? row.src + "#" + row.path : row.path;
+  //  BRO-030: a declared-submodule (gitlink) path renders BOLD on a tty
+  //  (ESC[1m…ESC[22m); plain (colored=false) output is byte-identical.
+  const shown = (colored && row.gitlink) ? ESC + "1m" + path + ESC + "22m" : path;
   return render.dateCol(row.ts) + " " + paintQuad(row.quad, row, colored)
-       + " " + path;
+       + " " + shown;
 }
 
 //  One commit row: `<date7> <quad4> ?<hashlet>#<subject>` — the same quad
