@@ -415,17 +415,19 @@ function classifyMerge(be, wtlogReader, reader, opts) {
       //  its stamp-offset bucket (pat/mrg/cnf).  The "modified?" test is against
       //  OURS (b.sha) now — so a clean take-theirs (wt == theirs != ours) is
       //  modified-vs-ours and surfaces `pat`, no longer collapsing to `ok`.
+      //  PATCH-013: a band stamp IS the outcome (patch wrote both) — route
+      //  pat/mrg/con with NO content read, the same trust as the stamp-set.
       const pb = pStampCon;
-      //  STATUS-011: mtime ∈ wtlog stamp-set → clean, NO content read (read-only
-      //  membership, never a re-stamp); a patch-band stamp (pb) content-checks.
-      const stamped = !pb && !!w.ts && typeof wtlogReader.has === "function"
-            && wtlogReader.has(w.ts);
-      const eqBase = stamped || wtEqBase(wtRoot, path, b.sha);
-      if (pb && !eqBase) {
+      if (pb) {
         push({ bucket: pb, path: path, ts: w.ts, kind: w.kind,
                oldSha: b.sha, onDisk: true, inBase: true });
         continue;
       }
+      //  STATUS-011: mtime ∈ wtlog stamp-set → clean, NO content read (read-only
+      //  membership, never a re-stamp); pb routed above, never swallowed to ok.
+      const stamped = !!w.ts && typeof wtlogReader.has === "function"
+            && wtlogReader.has(w.ts);
+      const eqBase = stamped || wtEqBase(wtRoot, path, b.sha);
       if (eqBase) {
         push({ bucket: "ok", path: path, ts: w.ts, oldSha: b.sha,
                mode: b.mode, eq: true, clean: true });
