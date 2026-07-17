@@ -594,6 +594,10 @@ function post() {
   const ctx = {
     repo: repo, sink: _be && _be.sink,
     args: argv, flags: (_be && _be.flags) || [],
+    //  POST-029: the run-start stamp (be.now, minted afresh per verb invocation)
+    //  — ONE ts reused for the parent's and every folded sub's post row + the
+    //  BE-011 mtime restamps; never re-sampled per repo.
+    now: (_be && _be.now != null) ? BigInt(_be.now) : ron.now(),
   };
   return postTree(repo, ctx, { uri: argv.length ? argv[0] : "" });
 }
@@ -891,7 +895,10 @@ function postOne(info, ctx, row) {
   //  JSQUE-020: the commit is a JOIN over the WHOLE decision set held in
   //  memory (dres.decisions); the former durable back-scan barrier only
   //  re-derived a leaf count, so assert it in-memory instead.
-  const stamp = ulog.nowAfter(wtlogTail(wtl));
+  //  POST-029: the run-start ts (ctx.now = be.now) is the single source of
+  //  truth for the post row ts AND the BE-011 mtime restamps below.
+  const stamp = (ctx && ctx.now != null) ? BigInt(ctx.now)
+        : ulog.nowAfter(wtlogTail(wtl));
   const author = authorIdent(info.storePath);
 
   const leaves = dres.decisions.map(function (d) {
@@ -934,17 +941,20 @@ function postOne(info, ctx, row) {
   //  DIS-075: a DETACHED commit records the bare-hash shape `#<sha>` (query slot
   //  ABSENT) — never trunk-shaped `?#<sha>`; an explicit `?target` still records.
   const recQuery = (att.detached && !slots.hasQuery) ? undefined : (branchKey || "");
-  ulog.append(info.bePath,
+  //  POST-029: a same-ms collision (ts<=tail) bumps the row — restamp with the
+  //  ASSIGNED ts append returns, so the mtime always equals the row's real ts.
+  const assigned = ulog.append(info.bePath,
               [{ verb: "post", uri: URI.make(undefined, undefined, undefined, recQuery, commit.sha),
                  ts: stamp }]);
+  const rowTs = (assigned && assigned.length) ? assigned[0] : stamp;
   for (const d of dres.decisions) {
     if (d.verb !== "add") continue;
-    try { io.setMtime(wtpath(info.wt, d.path), stamp); } catch (e) {}   // BE-011
+    try { io.setMtime(wtpath(info.wt, d.path), rowTs); } catch (e) {}   // BE-011
   }
 
   //  The `post:` banner (POST-018): a commit confirmation row, then the
   //  per-file change rows (add/mod/del), matching native's table.
-  emitBanner(ctx, branchKey, commit.sha, m.msg, dres.decisions, stamp);
+  emitBanner(ctx, branchKey, commit.sha, m.msg, dres.decisions, rowTs);
   //  Commit leaf: no further fan-out.
 }
 

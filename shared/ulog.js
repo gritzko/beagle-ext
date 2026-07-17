@@ -196,22 +196,31 @@ function write(path, rows) {
 
 //  Append `rows` to the ULOG at `path` IN PLACE (native booked append): open,
 //  stamp each new row strictly past the live tail (nowAfter(tail) then +1 per
-//  row; an explicit row ts is honoured when it stays ahead), append, close.
-//  Old rows are NOT re-fed — they keep their original ts and bytes.  Creates
-//  the file if absent.
+//  row).  POST-029: an explicit row ts is honoured whenever it stays STRICTLY
+//  past the running floor (all the native ULOGAppendAt refuses is ts<=last) —
+//  the old `use < nowAfter` guard silently re-stamped every ms-stale explicit
+//  ts, so a verb's row-ts mtime restamp matched no row.  Only a COLLIDING row
+//  bumps.  Returns the ASSIGNED ts (BigInt) per row, in order — the stamp each
+//  row REALLY got; a restamping caller must use it.  Old rows are NOT re-fed —
+//  they keep their original ts and bytes.  Creates the file if absent.
 function append(path, rows) {
   const h = abc._ulog_open(path);
+  const assigned = [];
   try {
     const n = abc._ulog_count(h);
     const tail = n > 0 ? abc._ulog_rowTime(h, n - 1) : 0n;
+    let last = tail;
     let ts = nowAfter(tail);
     for (const r of rows) {
       let use = (r.ts != null) ? BigInt(r.ts) : ts;
-      if (use < ts) use = ts;                 // native refuses ts<=last
+      if (use <= last) use = ts;              // collision only (native refuses ts<=last)
       abc._ulog_append(h, use, r.verb, _uri(r.uri));
+      assigned.push(use);
+      last = use;
       ts = use + 1n;
     }
   } finally { abc._ulog_close(h); }
+  return assigned;
 }
 
 //  --- STREAMING TAIL-APPEND (JSQUE-003) ----------------------------------

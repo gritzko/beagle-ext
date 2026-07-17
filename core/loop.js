@@ -318,7 +318,7 @@ function _snapBe() {
   //  URI-016: `context` is the ONE context field to save — ctxDir/authority derive
   //  off it, so restoring it restores them too.
   return { repo: b.repo, sink: b.sink, format: b.format, force: b.force, flags: b.flags,
-           context: b.context };
+           context: b.context, now: b.now };
 }
 function _restoreBe(s) { Object.assign(globalThis.be || (globalThis.be = {}), s); }
 
@@ -451,8 +451,11 @@ function _cli(argv, opts2) {
   //  resolves the context's own PATH (the open file), not just its dir.  URI-016:
   //  it is the ONLY context field minted; `authority`/`ctxDir` are derived (the
   //  latter is discover's fn, folded on by mintBe) and MUST NOT be overlaid here.
+  //  POST-029: be.now = this RUN's start ts, refreshed per verb invocation
+  //  (a pager-spelled verb in the resident process gets a fresh one) — the ONE
+  //  stamp a mutation verb uses for its rows + mtime restamps.
   mintBe({ repo: repo, sink: sink, out: out, format: mode, force: force, flags: flags,
-           verb: verb, context: context });
+           verb: verb, context: context, now: ron.now() });
   const pargs = args.map(function (t) { return argline.scalar(t); });
   res = run({
     repo: repo, require: require, out: out, sink: sink, flags: flags,
