@@ -14,6 +14,7 @@ const discover = require("../../core/discover.js");
 const wtpath = discover.wtpath;
 const pathlib = require("../../shared/util/path.js");   // BE-011: wtJoin confinement
 const ambient = require("../../shared/ambient.js");   // JAB-004: ctx→be bridge
+const resolve_hash = require("../../core/resolve_hash.js").resolve_hash;   // URI-016: THE resolver
 const bro   = require("../../view/bro.js");
 const navlib = require("../../shared/nav.js");   // URI-011: full-URI hunk helper
 const ticket = require("../../shared/ticket.js");   // BRO-012: F key → ticket URI
@@ -119,22 +120,22 @@ function readFileBytes(full) {
   finally { try { io.close(fd); } catch (e) {} }
 }
 
-//  ?ref: resolve ref/branch/sha → commit → tree → the path's blob bytes
-//  (mirrors the search view's walkRef; KEEPGetByURI's descend).
-function readRefBytes(k, ref, path) {
-  let sha = k.resolveRef(ref);
-  if (!sha) { try { sha = require("../../core/resolve.js").resolveHex(k, ref); } catch (e) {} }
-  if (!sha) return null;
-  const treeSha = k.commitTree(sha) || sha;
-  let found = null;
-  k.readTreeRecursive(treeSha, function (leaf) {
-    if (found) return;
-    if ((leaf.kind === "f" || leaf.kind === "x") && leaf.path === path) {
-      const o = k.getObject(leaf.sha);
-      if (o && o.type === "blob") found = o.bytes;
-    }
-  });
-  return found;
+//  BRO-029: `?ref` resolves through THE URI->hash resolver (resolve_hash, URI-016)
+//  — the SAME path blob:/why honour, NOT a local twin.  The old tip-only
+//  core/resolve.js::resolveHex missed a HISTORIC commit (→ silent-empty); its
+//  hand-walk also swallowed an absent path.  resolveHexAny finds any commit and
+//  descendPath errs LOUD (PATHNONE) on a path absent AT THAT REV → CATNOFILE.
+//  `rawPath`+`query` are the URI's own slots (context-resolved inside frame()).
+function readRefBytes(k, rawPath, query) {
+  const ctx = discover.navCwd(discover.ctxDir());
+  const bare = URI.make(undefined, undefined, rawPath, query, undefined) || rawPath;
+  let r;
+  try { r = resolve_hash(ctx, bare); }
+  catch (e) { io.log("cat: " + e + "\n"); throw "CATNOFILE"; }
+  if (r.otype !== "blob") { io.log("cat: '" + rawPath + "?" + query + "' is a " + r.otype + "\n"); throw "CATNOFILE"; }
+  const o = k.getObject(r.ohash);
+  if (!o || o.type !== "blob") { io.log("cat: blob " + r.ohash + " unreadable\n"); throw "CATNOFILE"; }
+  return o.bytes;
 }
 
 //  JAB-004: cat ONE arg — self-parse cat:<path>[?ref], read be.repo/be.sink +
@@ -159,14 +160,19 @@ function catOne(arg) {
   //  Bytes: a `?ref` blob (historic) else the live wt file.  Absent/empty → no
   //  output (no banner), matching the empty-file case.
   const k = store.open(repo.storePath, repo.project);
-  //  BE-011: compose the wt path via wtJoin — an untrusted `..` climb above the
-  //  wt root throws NAVESCAPE; refuse cleanly (never a silent outside read).
-  let full = null;
-  if (!ref) {
+  //  BRO-029: `?ref` reads the blob AT THAT REV via resolve_hash (loud CATNOFILE
+  //  on an absent path, never silent-empty); no `?ref` reads the live wt file.
+  let bytes;
+  if (ref) {
+    bytes = readRefBytes(k, u.path || "", ref);   // raw URI path — frame() confines it
+  } else {
+    //  BE-011: compose the wt path via wtJoin — an untrusted `..` climb above the
+    //  wt root throws NAVESCAPE; refuse cleanly (never a silent outside read).
+    let full;
     try { full = wtpath(repo.wt, path); }
     catch (e) { io.log("cat: " + e + "\n"); return; }
+    bytes = readFileBytes(full);
   }
-  let bytes = ref ? readRefBytes(k, ref, path) : readFileBytes(full);
   if (bytes == null || bytes.length === 0) return;
 
   const ext = bro.pathExt(path);            // "js" / "" — drives tok.parse
