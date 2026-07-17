@@ -31,8 +31,10 @@
 //    unk   on disk, not in baseline, no put row         (untracked)
 //
 //  CLEAN is CONTENT-confirmed (re-hash wt bytes vs the baseline blob
-//  sha), never mtime alone — a restored-stamp mtime over edited bytes
-//  still reads `mod` (DIS-023).  Submodule (gitlink) rows are recorded
+//  sha) — EXCEPT a wt mtime ∈ the wtlog stamp-set, which is verb-recorded
+//  ground truth and reads `ok` with no content read (STATUS-011, the same
+//  trust as stage.js:150; membership only, never a re-stamp — DIS-023
+//  banned the re-stamping drift gate).  Submodule (gitlink) rows are recorded
 //  as prefixes and their internals dropped; the mount itself is left to
 //  JS-033 (no sub row emitted here) but a gitlink that is base-only with
 //  no intent counts `ok` (the SUBS dirty axis comes later).
@@ -414,7 +416,11 @@ function classifyMerge(be, wtlogReader, reader, opts) {
       //  OURS (b.sha) now — so a clean take-theirs (wt == theirs != ours) is
       //  modified-vs-ours and surfaces `pat`, no longer collapsing to `ok`.
       const pb = pStampCon;
-      const eqBase = wtEqBase(wtRoot, path, b.sha);
+      //  STATUS-011: mtime ∈ wtlog stamp-set → clean, NO content read (read-only
+      //  membership, never a re-stamp); a patch-band stamp (pb) content-checks.
+      const stamped = !pb && !!w.ts && typeof wtlogReader.has === "function"
+            && wtlogReader.has(w.ts);
+      const eqBase = stamped || wtEqBase(wtRoot, path, b.sha);
       if (pb && !eqBase) {
         push({ bucket: pb, path: path, ts: w.ts, kind: w.kind,
                oldSha: b.sha, onDisk: true, inBase: true });
