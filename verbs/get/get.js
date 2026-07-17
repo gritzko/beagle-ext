@@ -556,10 +556,8 @@ function fanoutWholeTree(ctx, r, wt, force) {
     for (const c of pulled)
       out.row(URI.make(undefined, undefined, undefined, c.hashlet || "", c.subject ? c.subject : undefined),
               "post", c.ts, { _post: true });
-    //  GET-047 / GET.mkd 3.4: a commit-DAG-DIVERGED target resolves by WEAVE
-    //  MERGE off the MERGE-BASE — flatten the base commit's tree so each leaf
-    //  3-ways (base=merge-base blob, ours=on-disk, theirs=target); an
-    //  unweavable leaf refuses loudly (con + GETCONF), never a silent reset.
+    //  GET-048: a DIVERGED target is a PLAIN RESET (spec intro+§4) — the merge-
+    //  base tree only CLASSIFIES del rows (a local-only add is never a `del`).
     if (!force && v.rel === "diverged") {
       const mb = dag.mergeBase(r.k, r.oldTip, r.tip);
       const bt = isFullSha(mb) ? r.k.commitTree(mb) : "";
@@ -947,8 +945,11 @@ function leaf(row, ctx) {
     //  GET-047 3.4: the DIVERGED delete leaf stays TREE-DRIVEN (unlink) — a
     //  branch switch to a diverged sibling drops ours-only files from the wt
     //  (they live on in ours' branch; test/get/branch-relative pins this).
-    //  Only the both-sides write leaf weaves off the merge base.
-    try { io.unlink(full); out.row(rel, "del", g.ts); g.dels++;
+    //  GET-048: diverged + absent from the MERGE BASE = a locally-COMMITTED add
+    //  the target never had — the reset unlinks it, but a `del` row would lie (ABC-016).
+    const localAdd = !!(g.basePaths && g.basePaths[rel] === undefined);
+    try { io.unlink(full);
+          if (!localAdd) { out.row(rel, "del", g.ts); g.dels++; }
           markDelDir(g, rel); } catch (e) {}
     return;
   }
@@ -980,10 +981,9 @@ function leaf(row, ctx) {
   //  no base to merge refuses loudly (the whole-tree pre-pass also catches it).
   if (existed && !g.force && kind === "f") {
     const onDisk = readWt(full);
-    //  GET-047 3.4: in DIVERGED mode the 3-way base is the MERGE-BASE's blob
-    //  at this path (not oldTip's) — ours' committed edits since the base then
-    //  read as dirty-vs-base and weave in, instead of clean-resetting away.
-    const baseSha = g.basePaths ? (g.basePaths[rel] || "") : oldSha;
+    //  GET-048: dirtiness = checkout vs the LOCAL HEAD (cur), NEVER the merge
+    //  base — a committed delta is not dirt; only UNCOMMITTED edits weave (§4).
+    const baseSha = oldSha;
     const baseBytes = baseSha ? blobOf(g.k, baseSha) : null;
     const dirty = onDisk != null && (baseBytes == null || !bytesEq(onDisk, baseBytes));
     if (dirty && baseBytes == null)
