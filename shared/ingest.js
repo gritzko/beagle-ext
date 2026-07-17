@@ -41,27 +41,68 @@ function inferType(bytes) {
   return 3;
 }
 
-//  JS-117: walk a log's records PAST `afterOff` (pk.scan is header-count-
-//  driven, blind to appended packs) → wh128 { key, off } pairs per object.
-function walkTail(pk, afterOff) {
-  pk.rewind();
+//  PACK-003: census EVERY parseable record offset from the log's start.
+//  pk.next() extent-walks records but STALLS at anything that is not a
+//  record: a verbatim embedded PACK header (GET-046 keeper-served logs land
+//  whole store logs) is skipped and the walk resumes behind it; anything
+//  else — a torn append's zero tail (the JAB-008 crash window), a mid-log
+//  corrupt region — ends the census.  Offsets, not entries: resolving is
+//  resolveEntries()'s job.
+function walkOffsets(pk) {
   const offs = [];
-  while (pk.next()) if (pk.offset > afterOff) offs.push(pk.offset);
+  pk.rewind();
+  for (;;) {
+    while (pk.next()) offs.push(pk.offset);
+    const at = pk._read;              // stall: the last record's end offset
+    if (at + 12 > pk.byteLength) break;
+    if (pk[at] !== 0x50 || pk[at + 1] !== 0x41 ||       // "PACK" v2 magic —
+        pk[at + 2] !== 0x43 || pk[at + 3] !== 0x4b ||   // anything else is
+        pk[at + 4] !== 0 || pk[at + 5] !== 0 ||         // torn/corrupt: stop
+        pk[at + 6] !== 0 || pk[at + 7] !== 2) break;
+    if (!pk.seek(at + 12)) break;     // a header with no record behind: stop
+    offs.push(at + 12);
+  }
+  return offs;
+}
+
+//  Resolve each record at `offs` → wh128 { key, off } pairs per object
+//  (unresolvable/ref-delta records are skipped — pure-JS OFS-only limits).
+//  PACK-003: an ofs-delta record's pk.size is the DELTA's own size, not the
+//  resolved object's — a fixed out buf made resolve NOROOM and silently DROP
+//  the record (11269 of beagle's 28986 salvageable records); grow and retry
+//  instead (the loop.js/_grow idiom), give up only on a non-NOROOM error.
+const RESOLVE_CAP = 1 << 28;
+function resolveEntries(pk, offs) {
   const out = [];
   for (const off of offs) {
     pk.seek(off);
     if (pk.type === "ref-delta") continue;      // unresolvable in pure JS
-    let bytes, tname;
-    try {
-      const b = io.buf((pk.size || 0) * 4 + 256);
-      pk.seek(off); pk.resolve(b); bytes = b.data(); tname = pk.type;
-    } catch (e) { continue; }
+    let bytes = null, tname;
+    for (let cap = (pk.size || 0) * 4 + 256; cap <= RESOLVE_CAP; cap *= 4) {
+      try {
+        const b = io.buf(cap);
+        pk.seek(off); pk.resolve(b); bytes = b.data(); tname = pk.type;
+      } catch (e) { if (("" + e).includes("NOROOM")) continue; }
+      break;
+    }
+    if (bytes === null) continue;
     const type = NAME_TYPE[tname] || inferType(bytes);
     const h = shalib.hashlet60FromBytes(
         hex.decode(shalib.frameSha(TYPE_NAME[type], bytes)));
     out.push({ key: (h << 4n) | BigInt(type), off: off });
   }
   return out;
+}
+
+//  JS-117: walk a log's records PAST `afterOff` (pk.scan is header-count-
+//  driven, blind to appended packs) → wh128 { key, off } pairs per object.
+//  PACK-003: rides the walkOffsets census, so a verbatim embedded pack's
+//  records (behind its mid-log PACK header) are indexed too, not silently
+//  dropped at the header stall.
+function walkTail(pk, afterOff) {
+  const offs = [];
+  for (const off of walkOffsets(pk)) if (off > afterOff) offs.push(off);
+  return resolveEntries(pk, offs);
 }
 
 function writeBytes(path, u8) {
@@ -143,17 +184,34 @@ function buildIndex(shard, logName, fileId) {
   const pk = git.pack.mmap(join(shard, logName), "r");
   pk.buffer.watermark = pk.byteLength;
   const cnt = pk.count || 0;
-  const buf = io.buf(cnt * 16 + 256);
-  const ents = pk.scan(buf);                  // key,val,... (val = bare offset)
-  const n = ents.length / 2;
-  //  JS-117: a rebuilt multi-pack log must not lose its appended tail — walk
-  //  the records past scan's (header-count-driven) coverage and index them.
-  let maxOff = -1;
-  for (let i = 1; i < ents.length; i += 2) {
-    const o = Number(ents[i] & 0xffffffffffn);
-    if (o > maxOff) maxOff = o;
+  //  PACK-003: the native scan is single-pack and header-count-driven; a log
+  //  whose header count exceeds its parseable records — a torn append's zero
+  //  tail (JAB-008 class: resize survived, record bytes lost), a mid-log
+  //  corrupt region, an embedded PACK header in the count's way — makes it
+  //  throw its generic "scan (out full? corrupt?)".  The log is durable
+  //  data: fall back to the extent-walk census and index every record that
+  //  still resolves.  The run bookmarks the FULL byte extent either way, so
+  //  idxmaint stops re-attempting (and re-warning) on every open; the lost
+  //  records stay miss until a re-fetch lands them again.
+  let ents = null, tail;
+  try { ents = pk.scan(io.buf(cnt * 16 + 256)); }   // key,val,... (val = offset)
+  catch (e) {
+    tail = resolveEntries(pk, walkOffsets(pk));
+    io.log("ingest: " + logName + ": native scan failed (" + e + "); salvaged " +
+           tail.length + " of " + cnt + " header-counted records\n");
   }
-  const tail = walkTail(pk, maxOff);
+  const n = ents ? ents.length / 2 : 0;
+  if (ents) {
+    //  JS-117: a rebuilt multi-pack log must not lose its appended tail —
+    //  walk the records past scan's (header-count-driven) coverage and
+    //  index them.
+    let maxOff = -1;
+    for (let i = 1; i < ents.length; i += 2) {
+      const o = Number(ents[i] & 0xffffffffffn);
+      if (o > maxOff) maxOff = o;
+    }
+    tail = walkTail(pk, maxOff);
+  }
   const mem = abc.ram("HEAPwh128", n + tail.length + 8);
   const fid = BigInt(fileId), FIRST = 12n, PACK = 0xfn;
   mem.push((((FIRST << 20n) | fid) << 4n) | PACK,
