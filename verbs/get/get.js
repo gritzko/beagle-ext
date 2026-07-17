@@ -67,6 +67,9 @@ const writeWtlog = ulog.write;
 
 const appendWtlog = ulog.append;
 
+//  GET-049: best-effort restamp of a just-written file (put.js trySetMtime twin).
+function trySetMtime(full, ts) { try { io.setMtime(full, BigInt(ts)); } catch (e) {} }
+
 //  SUBS-041: cap the checkout sub-mount RECURSION depth.  A deep/cyclic gitlink
 //  chain (a sub of a sub of a sub…) fans out unbounded; past this many descents,
 //  stop mounting deeper (log a skip, leave the mount as-is, no crash).
@@ -180,7 +183,7 @@ function resolveLocalSource(rem) {
 //  --- the GET SEED: resolve the remote ONCE, anchor, return pinned coords --
 //  D1: a Fragment pin (`?branch#<sha>`) resolves the EXACT commit, not the
 //  branch tip — `rem.pin` (full or short hex) wins over resolveRef.
-function seedLocal(rem, wt) {
+function seedLocal(rem, wt, t0) {
   //  GET-038: resolve a worktree source down to its REAL store (the redirect
   //  target) before anchoring — anything else records a non-store path that
   //  status/get can't read the baseline from.
@@ -195,10 +198,14 @@ function seedLocal(rem, wt) {
   const fresh = !exists(bePath);
   const oldTip = fresh ? "" : oldTipOf(bePath);
   const redirect = URI.make("file", undefined, src.storeBe + "/", "/" + src.proj);
-  const tipRow = { verb: "get", uri: URI.make(undefined, undefined, undefined, rem.branch || "", tip) };
-  if (fresh) writeWtlog(bePath, [{ verb: "get", uri: redirect }, tipRow]);
-  else appendWtlog(bePath, [tipRow]);
-  return { k, tip, oldTip, fresh, branch: rem.branch || "", bePath };   // STATUS-005: con-row target
+  const tipRow = { verb: "get", uri: URI.make(undefined, undefined, undefined, rem.branch || "", tip), ts: t0 };
+  //  GET-049: the tip row's ts = the run's start ts (be.now/T0); the checkout
+  //  stamps carry the ASSIGNED ts (append bumps a same-ms collision honestly).
+  const stampTs = fresh
+        ? (writeWtlog(bePath, [{ verb: "get", uri: redirect, ts: ulog.ronStepMs(t0, -1) }, tipRow]), t0)
+        : appendWtlog(bePath, [tipRow])[0];
+  return { k, tip, oldTip, fresh, branch: rem.branch || "", bePath,
+           stampTs: stampTs };   // STATUS-005 con-row target; GET-049 stamp
 }
 
 //  D1/D2 short- or full-hex commit pin → 40-hex sha, or "" when none/unfound.
@@ -209,7 +216,7 @@ function resolvePin(k, hex) {
   return k.resolveHexAny(hex) || "";
 }
 
-function seedRemote(rem, wt) {
+function seedRemote(rem, wt, t0) {
   //  GET-041: an ESTABLISHED worktree is NEVER a clone destination — its `.be`
   //  anchor references the real shard (a secondary wt's `.be` is a redirect
   //  FILE; minting `<wt>/.be/<proj>` under it ENOTDIR-crashed the ingest).
@@ -241,20 +248,24 @@ function seedRemote(rem, wt) {
   if (!info) {                                   // green-field: fresh clone
     ingest.clone(f, beDir, proj, tip, rem.raw);
     const anchor = URI.make("file", undefined, beDir + "/" + proj + "/");
+    //  GET-049: tip row ts = the run's start ts (be.now/T0) = the stamp value.
     writeWtlog(join(beDir, "wtlog"),
-               [{ verb: "get", uri: anchor },
-                { verb: "get", uri: URI.make(undefined, undefined, undefined, branch, tip) }]);
+               [{ verb: "get", uri: anchor, ts: ulog.ronStepMs(t0, -1) },
+                { verb: "get", uri: URI.make(undefined, undefined, undefined, branch, tip), ts: t0 }]);
     return { k: store.open(wt, proj), tip, oldTip: "", fresh: true, branch,
-             bePath: join(beDir, "wtlog") };   // STATUS-005: con-row target
+             bePath: join(beDir, "wtlog"),     // STATUS-005: con-row target
+             stampTs: t0 };                    // GET-049 stamp
   }
   //  UPDATE: the anchor's own store/shard (the project is the wt's identity,
   //  never the `?/proj` guess); reader opened AFTER the pack lands.  GET-044:
   //  `shard` was resolved above (the fetch streamed the pack into it).
   const oldTip = oldTipOf(info.bePath);
   ingest.add(f, shard, rem.raw, tip);
-  appendWtlog(info.bePath, [{ verb: "get", uri: URI.make(undefined, undefined, undefined, branch, tip) }]);
+  const a = appendWtlog(info.bePath,
+    [{ verb: "get", uri: URI.make(undefined, undefined, undefined, branch, tip), ts: t0 }]);
   const k = store.open(info.storePath, info.project);
-  return { k, tip, oldTip, fresh: false, branch, bePath: info.bePath };   // STATUS-005
+  return { k, tip, oldTip, fresh: false, branch, bePath: info.bePath,
+           stampTs: a[0] };   // STATUS-005; GET-049 stamp = the ASSIGNED row ts
 }
 
 //  --- per-level tree map: name → { sha, mode, isDir } --------------------
@@ -391,11 +402,14 @@ function handleWtSeed(uri, ctx) {
   const redirect = URI.make("file", undefined, storeUri, "/" + shard);
   //  The TRACK row: the operand's OWN authority+path (untouched), pinned at
   //  the resolved rev — "the //X/sub URI, authority intact, at #chash".
-  const tipRow = { verb: "get", uri: URI.make(undefined, u.authority, u.path, undefined, r.chash) };
-  if (fresh) writeWtlog(bePath, [{ verb: "get", uri: redirect }, tipRow]);
-  else appendWtlog(bePath, [tipRow]);
+  //  GET-049: row ts = the run's start ts (be.now/T0); stamp = the ASSIGNED ts.
+  const tipRow = { verb: "get", uri: URI.make(undefined, u.authority, u.path, undefined, r.chash), ts: ctx.T0 };
+  const stampTs = fresh
+        ? (writeWtlog(bePath, [{ verb: "get", uri: redirect, ts: ulog.ronStepMs(ctx.T0, -1) }, tipRow]), ctx.T0)
+        : appendWtlog(bePath, [tipRow])[0];
   return fanoutWholeTree(ctx, { k, tip: r.chash, oldTip, fresh, branch: "", bePath,
-                                source: wtsrc }, wt, ambient.force());
+                                source: wtsrc, stampTs: stampTs },   // GET-049
+                         wt, ambient.force());
 }
 
 //  GET-047 / GET.mkd 1.3+2.1: cross-source update — fetch the target closure
@@ -411,10 +425,11 @@ function crossUpdate(ctx, uri, tip, cell, srcStore, srcProj, wtsrc) {
     throw "be get: GETCELL " + cell.wt + " is at " + oldTip + " — `" + uri +
           "` (" + tip + ") shares no ancestor, refusing the cross-source update";
   const u = new URI(uri);
-  appendWtlog(cell.bePath, [{ verb: "get",
-    uri: URI.make(undefined, u.authority, u.path, undefined, tip) }]);
+  const a = appendWtlog(cell.bePath, [{ verb: "get",
+    uri: URI.make(undefined, u.authority, u.path, undefined, tip), ts: ctx.T0 }]);
   return fanoutWholeTree(ctx, { k, tip, oldTip, fresh: false, branch: "",
-                                bePath: cell.bePath, source: wtsrc || null },
+                                bePath: cell.bePath, source: wtsrc || null,
+                                stampTs: a[0] },   // GET-049: the ASSIGNED row ts
                          cell.wt, ambient.force());
 }
 
@@ -461,7 +476,7 @@ function handleSeed(uri, ctx) {
   //  auto-placement nobody asked for, which silently cloned BESIDE the worktree
   //  you were standing in instead of updating it.  Deleted, not fixed.
   const wt = io.cwd();
-  const r = rem.local ? seedLocal(rem, wt) : seedRemote(rem, wt);
+  const r = rem.local ? seedLocal(rem, wt, ctx.T0) : seedRemote(rem, wt, ctx.T0);
   //  DIS-058 D4: the parent's SOURCE (this remote) so a gitlink leaf can fetch
   //  its child shard from the SAME source (project swapped to the sub title).
   r.source = rem;
@@ -473,7 +488,7 @@ function handleSeed(uri, ctx) {
 function fetchTrack(ctx, remoteUri, branch, wt, force) {
   const rem = parseRemote(remoteUri);
   if (branch && !rem.branch) rem.branch = branch;
-  const r = rem.local ? seedLocal(rem, wt) : seedRemote(rem, wt);
+  const r = rem.local ? seedLocal(rem, wt, ctx.T0) : seedRemote(rem, wt, ctx.T0);
   r.source = rem;
   return fanoutWholeTree(ctx, r, wt, force);
 }
@@ -501,6 +516,10 @@ function fanoutWholeTree(ctx, r, wt, force) {
   ctx._get = { k: r.k, wt: wt, tip: r.tip, oldTip: r.oldTip, fresh: r.fresh,
                branch: r.branch, ts: ctx.T0, kinds: {}, dels: 0, rows: [], head: null,
                force: !!force, noPrune: noPrune,
+               //  GET-049: the appended get row's ts — every CLEAN-OVERWRITE leaf
+               //  stamps its mtime to this so status's stamp-set fast path hits.
+               //  null (no row appended: restore/pick/mergeWorktreeTo) = no stamp.
+               stampTs: (r.stampTs != null) ? r.stampTs : null,
                //  GET-047 §4.0: --nosub disables sub recursion entirely — the
                //  flag rides be.flags (loop.js split it); the gitlink leaves gate on it.
                nosub: ((globalThis.be && be.flags) || []).indexOf("--nosub") >= 0,
@@ -631,10 +650,11 @@ function inRepoSeed(uri, ctx) {
     const anc = firstParentBack(k, curSha, n);
     if (!isFullSha(anc))
       throw "be get: cannot rewind " + n + " from " + (curSha || "(none)");
-    appendWtlog(info.bePath, [{ verb: "get",
+    const a = appendWtlog(info.bePath, [{ verb: "get", ts: ctx.T0,
                                uri: URI.make(undefined, undefined, undefined, curBranch, anc) }]);
     return fanoutWholeTree(ctx, { k, tip: anc, oldTip: curSha, fresh: false,
-                                  branch: curBranch, bePath: info.bePath }, wt, force);
+                                  branch: curBranch, bePath: info.bePath,
+                                  stampTs: a[0] }, wt, force);   // GET-049
   }
 
   //  D2 detach: `?<sha>` (bare hex query, no fragment) is the ARGUMENT.  A seed
@@ -649,9 +669,11 @@ function inRepoSeed(uri, ctx) {
     const tip = resolvePin(k, query || frag);
     if (!isFullSha(tip))
       throw "be get: cannot resolve " + (query ? "?" + query : "#" + frag);
-    appendWtlog(info.bePath, [{ verb: "get", uri: URI.make(undefined, undefined, undefined, undefined, tip) }]);
+    const a = appendWtlog(info.bePath, [{ verb: "get", ts: ctx.T0,
+      uri: URI.make(undefined, undefined, undefined, undefined, tip) }]);
     return fanoutWholeTree(ctx, { k, tip, oldTip: curSha, fresh: false,
-                                  branch: "", bePath: info.bePath }, wt, force);
+                                  branch: "", bePath: info.bePath,
+                                  stampTs: a[0] }, wt, force);   // GET-049
   }
 
   //  D1 pin: `?#<sha>` / `?br#<sha>` — checkout the EXACT commit, attached to
@@ -659,9 +681,11 @@ function inRepoSeed(uri, ctx) {
   if (frag && isShortOrFullHex(frag)) {
     const tip = resolvePin(k, frag);
     if (!isFullSha(tip)) throw "be get: cannot resolve ?" + query + "#" + frag;
-    appendWtlog(info.bePath, [{ verb: "get", uri: URI.make(undefined, undefined, undefined, query, tip) }]);
+    const a = appendWtlog(info.bePath, [{ verb: "get", ts: ctx.T0,
+      uri: URI.make(undefined, undefined, undefined, query, tip) }]);
     return fanoutWholeTree(ctx, { k, tip, oldTip: curSha, fresh: false,
-                                  branch: query, bePath: info.bePath }, wt, force);
+                                  branch: query, bePath: info.bePath,
+                                  stampTs: a[0] }, wt, force);   // GET-049
   }
 
   //  GET-047: a BARE `get`/`!` follows the TRACKED ref off the ONE attach
@@ -673,10 +697,11 @@ function inRepoSeed(uri, ctx) {
     if (att.detached) {
       const base = isFullSha(att.base) ? att.base : curSha;
       if (!isFullSha(base)) throw "be get: detached with no base to recover";
-      appendWtlog(info.bePath, [{ verb: "get",
+      const a = appendWtlog(info.bePath, [{ verb: "get", ts: ctx.T0,
         uri: URI.make(undefined, undefined, undefined, undefined, base) }]);
       return fanoutWholeTree(ctx, { k, tip: base, oldTip: curSha, fresh: false,
-                                    branch: "", bePath: info.bePath }, wt, force);
+                                    branch: "", bePath: info.bePath,
+                                    stampTs: a[0] }, wt, force);   // GET-049
     }
     //  GET-047: a URI-shaped track re-resolves to the track's CURRENT rev —
     //  a schemed remote implies the fetch leg, `//X` re-reads via resolve_hash.
@@ -709,9 +734,11 @@ function inRepoSeed(uri, ctx) {
   if (!isFullSha(tip)) tip = (wantBranch === curBranch ? curSha : "");
   if (!isFullSha(tip))
     throw "be get: cannot resolve " + (wantBranch ? "?" + wantBranch : "current branch");
-  appendWtlog(info.bePath, [{ verb: "get", uri: URI.make(undefined, undefined, undefined, wantBranch, tip) }]);
+  const a = appendWtlog(info.bePath, [{ verb: "get", ts: ctx.T0,
+    uri: URI.make(undefined, undefined, undefined, wantBranch, tip) }]);
   return fanoutWholeTree(ctx, { k, tip, oldTip: curSha, fresh: false,
-                                branch: wantBranch, bePath: info.bePath }, wt, force);
+                                branch: wantBranch, bePath: info.bePath,
+                                stampTs: a[0] }, wt, force);   // GET-049
 }
 
 //  D4 single-file / subtree restore (GET.mkd pt 1, CLI `file.c` / `file.c?feat`).
@@ -1015,6 +1042,10 @@ function leaf(row, ctx) {
   }
   //  Clean (un-edited), forced, or non-mergeable kind → clean-overwrite.
   checkout.materialise(g.wt, rel, { kind: kind }, bytes);
+  //  GET-049: the written bytes ARE the new baseline blob — stamp to the get
+  //  row ts (row already appended).  Merge outputs (mrg/con above) and symlinks
+  //  (setMtime follows the link) stay unstamped.
+  if (g.stampTs != null && kind !== "l") trySetMtime(full, g.stampTs);
   out.row(rel, existed ? "upd" : "new", g.ts);
 }
 
@@ -1330,7 +1361,9 @@ function get() {
   //  back).  T0 is this cohort's ts (the plain branch never sets ctx.T0).
   const ctx = {
     repo: _be && _be.repo, sink: _be && _be.sink, out: _be && _be.out,
-    T0: ron.now(),
+    //  GET-049: T0 = be.now (the invocation's start ts, minted per verb run by
+    //  the loop) — the ONE source for the run's row ts + mtime stamps.
+    T0: ambient.now(),
   };
   const argv = [];
   for (let i = 0; i < arguments.length; i++) argv.push(String(arguments[i]));
@@ -1364,7 +1397,7 @@ function get() {
 //  store reader), tip, oldTip (current base = the merge OLD side / 3-way base),
 //  force?, bePath?, sink? }.  Reused by post's `//WT` target advance.
 function mergeWorktreeTo(opts) {
-  const ctx = { repo: opts.info, sink: opts.sink || null, T0: ron.now() };
+  const ctx = { repo: opts.info, sink: opts.sink || null, T0: ambient.now() };   // GET-049
   const r = { k: opts.k, tip: opts.tip, oldTip: opts.oldTip || "",
               fresh: false, branch: opts.branch || "",
               bePath: opts.bePath || join(opts.info.wt, ".be") };
