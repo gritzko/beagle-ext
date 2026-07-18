@@ -1010,6 +1010,13 @@ function leaf(row, ctx) {
     if (dirty && baseBytes == null)
       throw "be get: GETOVRL dirty wt overlays un-baselined target: " + rel;
     if (dirty) {                                 // real local edit → weave-merge
+      //  POST-032: a still-UNRESOLVED prior conflict (live fences + a durable
+      //  `con` row) stays as-is — no re-weave (nested fences), no dup row.
+      if (conflict.hasConflictMarker(onDisk) && conRecorded(g, rel)) {
+        g.conf = (g.conf || 0) + 1;
+        out.row(rel, "con", g.ts);
+        return;
+      }
       //  PATCH-012: an unweavable leaf (over-cap BLOB, or a still-overflowing
       //  `out full`) refuses like a real conflict — never silent-ours + exit 0.
       let merged;
@@ -1243,6 +1250,16 @@ function bytesEq(a, b) {
   return true;
 }
 
+//  POST-032: does the wtlog already carry a durable `con` row for rel?
+//  Lazy one-shot conPaths read per run, cached on g (conflicts are rare).
+function conRecorded(g, rel) {
+  if (!g._conSet) {
+    try { g._conSet = wtlog.open({ bePath: g.bePath }).conPaths(); }
+    catch (e) { g._conSet = new Set(); }
+  }
+  return g._conSet.has(rel);
+}
+
 //  File extension (the weave tokenizer's language key); no dot → "" (generic).
 function extOf(path) {
   const slash = path.lastIndexOf("/");
@@ -1284,12 +1301,13 @@ function sweepDelDirs(ctx) {
 function finalizeGet(ctx) {
   sweepDelDirs(ctx);
   flushGet(ctx);
-  //  GET-043: the loud conflict exit fires AFTER the drain — a queue-row
-  //  sentinel threw before later reconciles' leaves, dropping them (data loss).
+  //  POST-032: a weave conflict is a NORMAL merge outcome (fences + `con` row
+  //  already durable) — report the state in plain words, never hard-err.
   const g = ctx && ctx._get;
   if (g && g.conf)
-    throw "be get: GETCONF " + g.conf +
-          " file(s) merged with conflicts — resolve the markers";
+    warn("be get: " + g.conf +
+         " file(s) merged with conflicts — resolve the markers");
+  return g ? (g.conf || 0) : 0;
 }
 
 //  Edge flush comparator (native get layout): pulled-commit `post` rows first
@@ -1397,8 +1415,8 @@ function get() {
 //  POST-026: materialise a LOCAL worktree from its current base to `tip` by
 //  REPLAYING the get merge fan-out — the SAME reconcile + 3-way weave `be get
 //  ?#<tip>` runs (fanoutWholeTree + the in-fn FIFO drain + finalize), so a DIRTY
-//  target is merged (never clobbered) and an un-mergeable overlay / a conflict
-//  REFUSES (GETOVRL from the pre-pass, GETCONF from finalize).  Files ONLY: the
+//  target is merged (never clobbered); an un-mergeable overlay REFUSES (GETOVRL
+//  pre-pass), a conflict marks+records (POST-032 state).  Files ONLY: the
 //  caller owns any wtlog base-advance row.  `opts`: { info (target repo), k (its
 //  store reader), tip, oldTip (current base = the merge OLD side / 3-way base),
 //  force?, bePath?, sink? }.  Reused by post's `//WT` target advance.

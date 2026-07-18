@@ -387,8 +387,8 @@ function advanceWorktree(info, reader, ctx, targetUri, curTip, haveBaseline) {
   const targetK = store.open(target.storePath, target.project);
   //  POST-026: a `//WT` post FIRST materialises the dirties into the target wt —
   //  the SAME get merge fan-out `be get ?#<curTip>` runs, so a DIRTY target is
-  //  3-way weave-merged (not clobbered) and an un-mergeable overlay / a conflict
-  //  REFUSES (GETOVRL / GETCONF) BEFORE the base advances.  Reuse the get merge
+  //  3-way weave-merged (not clobbered); an overlay REFUSES (GETOVRL), a weave
+  //  conflict marks+records and the base STILL advances (POST-032 ruling).
   //  path (RULE ZERO — no hand-rolled checkout/dag): rh.chash is the target's
   //  current base = the merge OLD side / 3-way base, curTip the tree to reach.
   getverb.mergeWorktreeTo({ info: target, k: targetK, tip: curTip,
