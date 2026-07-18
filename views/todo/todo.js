@@ -408,3 +408,6 @@ module.exports = todo;
 module.exports.shape = shape;
 module.exports.listTopics = listTopics;
 module.exports.pageFile = pageFile;
+//  BE-043: the work board reuses the board root + the page-title read.
+module.exports.boardDir = boardDir;
+module.exports.pageTitle = pageTitle;

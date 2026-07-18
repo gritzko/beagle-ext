@@ -157,8 +157,9 @@ function _viewDefault(token, here) {
 function mintBe(ambient) {
   const g = globalThis.be || (globalThis.be = {});
   if (!g.wrap) g.wrap = { 
-	  log: false, 
+	  log: false,
 	  todo: false,
+	  work: false,
 	  cat: true, 
 	  diff: true, 
 	  status: true, 

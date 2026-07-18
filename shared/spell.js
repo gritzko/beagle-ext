@@ -142,6 +142,34 @@ function bindRest(argv, isDir) {
   return baseIsDir ? under : [base].concat(under);
 }
 
+//  BRO-025: the THREE-PART O click-spell codec.  An O-link's wire form IS the
+//  [BRO-024] address-bar invite `//WT/dir/: verb args` — three parts: the
+//  CONTEXT (left of the FIRST `: `, colon-space), the VERB, and the ARGS.  The
+//  pager drives the spell IN that context (chdir/serialize/restore, the recorded-
+//  call path), never pre-merging the context into an arg.  A CONTEXT-LESS token
+//  (`verb args`) means "here" (the pager cwd) — context "".
+//  parseOspell(token) → { context, spell }.  Only a leading `//` arms the split
+//  (a spell verb never opens with `//`), so a `: ` inside a quoted arg (`post
+//  'a: b'`) is safe.  The invite's trailing `/` is shed off the context.
+function parseOspell(token) {
+  const s = String(token == null ? "" : token);
+  if (s.slice(0, 2) === "//") {
+    const i = s.indexOf(": ");
+    if (i >= 0)
+      return { context: s.slice(0, i).replace(/\/+$/, ""), spell: s.slice(i + 2) };
+  }
+  return { context: "", spell: s };
+}
+
+//  BRO-025: mint the three-part wire form from a context + a `verb args` spell.
+//  An empty context yields the bare spell ("here"); else the invite `//ctx/: spell`.
+function mintOspell(context, spell) {
+  const c = String(context || "");
+  const sp = String(spell || "");
+  if (!c) return sp;
+  return (c[c.length - 1] === "/" ? c : c + "/") + ": " + sp;
+}
+
 //  A call { verb, arg0, rest } → a drivable spell string.  No rest: a scheme'd
 //  arg 0 with no verb drives ITSELF (the scheme is the view), else `verb arg0`.
 //  With rest: the shape-3 eval form `verb(arg0,"r1",…)` so a spaced message stays
@@ -161,4 +189,5 @@ function buildSpell(c) {
 
 module.exports = { uriShaping: uriShaping, bareCtx: bareCtx, mergeUri: mergeUri,
                    compose: compose, composeArgv: composeArgv, buildSpell: buildSpell,
-                   bindRest: bindRest, joinPath: joinPath };
+                   bindRest: bindRest, joinPath: joinPath,
+                   parseOspell: parseOspell, mintOspell: mintOspell };

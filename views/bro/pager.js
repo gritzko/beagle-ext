@@ -704,7 +704,7 @@ Pager.prototype._fsCompletions = function (stem) {
 //  Drive a typed spell in-process: hand it to driveSpell (the bro handler wires
 //  the --tlv capture + reparse); on success PUSH the view (back-stack), else
 //  show the error.  The typed spell is first resolved relative to the view.
-Pager.prototype._runSpell = function (spell) {
+Pager.prototype._runSpell = function (spell, ctxOverride) {
   //  JAB-003: ANY failure (resolve, drive, dispatch) shows in the addr bar —
   //  never let it escape the key loop and exit the pager.
   try {
@@ -713,7 +713,9 @@ Pager.prototype._runSpell = function (spell) {
     //  BE-032: the PREVIOUS context (the authority donor), captured pre-push.
     const prev = this._verbUri().uri ||
                  (typeof be !== "undefined" && be.navCwd ? be.navCwd() : "");
-    const hunks = this.driveSpell ? this.driveSpell(s) : null;
+    //  BRO-025: an O click drives the spell IN its recorded context (ctxOverride);
+    //  a plain follow (a U nav row) threads none — the target is a full address.
+    const hunks = this.driveSpell ? this.driveSpell(s, ctxOverride || undefined) : null;
     if (!hunks || hunks.length === 0) { this.message = "no hunks: " + s; return; }
     this.pushView(hunks);
     //  DIS-060/URI-014: track the view as (verb, ADDRESS) split off the resolved
@@ -1093,7 +1095,7 @@ Pager.prototype._refresh = function () {
 //  click-target on a status row): drive it, DROP its result hunks (no push, no
 //  back-stack entry), then _refresh re-renders the current view in place so
 //  the clicked row re-buckets where the user is looking.
-Pager.prototype._actSpell = function (spell) {
+Pager.prototype._actSpell = function (spell, ctxOverride) {
   try {
     const s = this._resolveSpell(spell);
     if (!s) return;
@@ -1102,7 +1104,8 @@ Pager.prototype._actSpell = function (spell) {
     //  its mount path (`//cli/vendor/sub`; `"//" + host` staged in the PARENT →
     //  PUTNONE) and a plain sub-dir still reduces to `//cli`.  BRO-024: read the
     //  TRACKED context, never _verbUri()'s scavenged hunk banner.
-    const ctx = discover.navTree(this._context());
+    //  BRO-025: a three-part O invite recorded its OWN context — that one wins.
+    const ctx = ctxOverride || discover.navTree(this._context());
     if (this.driveSpell) this.driveSpell(s, ctx || undefined);
     this._refresh();
     //  show WHAT ran instead of _refresh's "refreshed"; keep its error if any
@@ -1200,9 +1203,14 @@ Pager.prototype._mouse = function (seq, press) {
     //  shows no result screen — run it, then re-render the current view in
     //  place; a view spell (diff:/cat:/commit …) keeps the push-nav.
     if (target) {
-      if (this.isMutation && this.isMutation(this._splitSpell(target).verb))
-        this._actSpell(target);
-      else this._runSpell(target);
+      //  BRO-025: an O click-spell is the THREE-PART invite `//ctx/: verb args`
+      //  (SPELL.parseOspell) — drive the spell IN its OWN context (never the
+      //  pager's; a board row targets its own worktree), mutation-gated on the
+      //  SPELL's verb.  A context-less O ("here") threads no context.
+      const o = SPELL.parseOspell(target);
+      if (this.isMutation && this.isMutation(this._splitSpell(o.spell).verb))
+        this._actSpell(o.spell, o.context || undefined);
+      else this._runSpell(o.spell, o.context || undefined);
       return;
     }
   }

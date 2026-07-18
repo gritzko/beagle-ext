@@ -1,5 +1,10 @@
 //  verbs/done/done.js — BE-040: `done KEY…` closes a ticket: flip the page
 //  header [DONE] (the 3 mark-done.sh forms) + delist its READMEs bullets.
+//  WORK-001 (the BE-044 reshape): `done .` / `done //KEY` is the WORKTREE form —
+//  mv the work/ wt into `work/done/` (the r2 discard root: same device, no
+//  EXDEV, and the work view ignores it; a name collision bumps `.2`, `.3`, … —
+//  never clobbers), and a TICKET-named wt also flips its page header.
+//  verbs/dont/dont.js is the [DONT] twin riding _run() here.
 "use strict";
 
 const pathlib = require("../../shared/util/path.js");
@@ -12,7 +17,9 @@ const todoView = require("../../views/todo/todo.js");
 const EXTS = ["mkd", "md", "txt"];
 
 //  BE-040: ONE uniform miss line + throw (BE-003 spirit, todo.js's miss twin).
-function miss(arg, code) { io.log("done: " + arg + ": " + code + "\n"); throw code; }
+//  WORK-001: the verb name rides in (dont shares this file's machinery).
+function missV(vname, arg, code) { io.log(vname + ": " + arg + ": " + code + "\n"); throw code; }
+function miss(arg, code) { missV("done", arg, code); }
 
 //  BE-040/URI-016: the board dir — be.todoRoot() itself (`projectRoot()+"/todo"`),
 //  the same ONE dir views/todo/todo.js boards from.  No probe order, and no
@@ -52,7 +59,9 @@ function ucOnly(s) {
 
 //  BE-040: the THREE mark-done.sh header forms — `KEY [MARK]:` / `KEY: [MARK] `
 //  replace the mark, `KEY: title` inserts it; null = odd header (report, skip).
-function flipHeader(key, h) {
+//  WORK-001: the closing MARK is a parameter — done → DONE, dont → DONT.
+function flipHeader(key, h, mark) {
+  const m = mark || "DONE";
   const p = "#   " + key;
   if (h.indexOf(p) !== 0) return null;
   const rest = h.slice(p.length);
@@ -64,13 +73,13 @@ function flipHeader(key, h) {
     if (rb < 0 || !ucOnly(rest.slice(i + 2, rb))) break;
     i = rb + 1; marks++;
   }
-  if (marks > 0 && rest[i] === ":") return p + " [DONE]:" + rest.slice(i + 1);
+  if (marks > 0 && rest[i] === ":") return p + " [" + m + "]:" + rest.slice(i + 1);
   if (rest.slice(0, 2) === ": " && rest[2] === "[") {
     const rb = rest.indexOf("] ");
-    if (rb >= 3 && ucOnly(rest.slice(3, rb))) return p + ": [DONE] " + rest.slice(rb + 2);
+    if (rb >= 3 && ucOnly(rest.slice(3, rb))) return p + ": [" + m + "] " + rest.slice(rb + 2);
   }
   if (rest.slice(0, 2) === ": " && rest.length > 2 && rest[2] !== "[")
-    return p + " [DONE]: " + rest.slice(2);
+    return p + " [" + m + "]: " + rest.slice(2);
   return null;
 }
 
@@ -103,56 +112,118 @@ function titleOf(h) {
   return h.slice(i);
 }
 
-//  BE-040: close ONE key — flip the header, delist the bullet from the topic
-//  README AND the board README, emit one confirmation row (key + title).
-function doneOne(w, dir, row) {
-  if (todoView.shape(w) !== "key") miss(w, "TODONONE");
-  const file = todoView.pageFile(dir, w);
-  if (!file) miss(w, "TODONONE");
+//  Flip ONE existing page's header to [mark] + delist its README bullets.
+//  Extracted from doneOne (WORK-001) so the wt form shares the exact flip.
+function flipOne(w, file, mark, vname, row) {
   const text = readText(file);
-  if (text == null) miss(w, "TODONONE");
+  if (text == null) missV(vname, w, "TODONONE");
   const nl = text.indexOf("\n");
   const head = nl < 0 ? text : text.slice(0, nl);
-  if (head.indexOf("[DONE]") >= 0 || head.indexOf("[WONTFIX]") >= 0) {
+  if (head.indexOf("[DONE]") >= 0 || head.indexOf("[WONTFIX]") >= 0 ||
+      head.indexOf("[DONT]") >= 0) {
     row(titleOf(head) + " (already closed)");
     return;
   }
-  const flipped = flipHeader(w, head);
+  const flipped = flipHeader(w, head, mark);
   if (flipped === null) {
     //  BE-040 r2: the skip must be a VISIBLE row — a rowless run answered the
     //  pager's `:done KEY` with "no hunks" (io.log never reaches the pager).
-    io.log("done: " + w + ": odd header, skipped: " + head + "\n");
+    io.log(vname + ": " + w + ": odd header, skipped: " + head + "\n");
     row(w + " odd header, skipped: " + head);
     return;
   }
   writeText(file, nl < 0 ? flipped : flipped + text.slice(nl));
   //  BE-038 curated-open: closing must ALSO delist the key's bullet from the
   //  topic README and the board README (meta/todo "delist from parents").
-  const tR = readmeFile(join(dir, w.slice(0, w.indexOf("-"))));
+  const dir = boardDir();
+  const tR = dir ? readmeFile(join(dir, w.slice(0, w.indexOf("-")))) : null;
   if (tR) delist(tR, w);
-  const bR = readmeFile(dir);
+  const bR = dir ? readmeFile(dir) : null;
   if (bR) delist(bR, w);
   row(titleOf(flipped));
 }
 
+//  BE-040: close ONE key — flip the header, delist the bullet from the topic
+//  README AND the board README, emit one confirmation row (key + title).
+function doneOne(w, dir, row, mark, vname) {
+  if (todoView.shape(w) !== "key") missV(vname, w, "TODONONE");
+  const file = todoView.pageFile(dir, w);
+  if (!file) missV(vname, w, "TODONONE");
+  flipOne(w, file, mark, vname, row);
+}
+
+function exists(p) { try { io.lstat(p); return true; } catch (e) { return false; } }
+
+//  WORK-001: the WORKTREE form — `done .` (the O invite runs in the row's own
+//  `//KEY` context) or an explicit `//KEY`.  ONLY a direct work/ child ever
+//  moves; refusal is plain words.  R2: the discard root is `work/done/` (made
+//  on demand); a name collision bumps `.2`, `.3`, … — never clobbers.
+function wtOne(w, mark, vname, row) {
+  let wt = null;
+  if (w === "" || w === ".") {
+    let repo = (typeof be !== "undefined" && be.repo) || null;
+    if (!repo && typeof be !== "undefined" && be.treeAt) {
+      try { repo = be.treeAt(); } catch (e) { repo = null; }
+    }
+    wt = repo && repo.wt;
+  } else {
+    try { wt = be.wtdir(w); } catch (e) { wt = null; }
+  }
+  const workR = (typeof be !== "undefined" && be.workRoot) ? be.workRoot() : null;
+  const name = wt ? pathlib.basename(wt) : "";
+  if (!wt || !workR || name === "done" || wt !== join(workR, name)) {
+    io.log(vname + ": " + (wt || w || ".") + " is not a work/ worktree — nothing moved\n");
+    throw vname + ": not a work/ worktree";
+  }
+  const root = join(workR, "done");
+  try { io.mkdir(root); } catch (e) {}          // FILEMakeDirP: idempotent
+  let target = join(root, name);
+  for (let n = 2; exists(target); n++) target = join(root, name + "." + n);
+  try { io.rename(wt, target); }
+  catch (e) {
+    io.log(vname + ": cannot move " + wt + " to " + target + ": " + String(e) + "\n");
+    throw vname + ": move failed";
+  }
+  row("mov " + name + " -> " + target, "mov");
+  //  A TICKET-named wt also flips its page; a page-less / non-ticket wt just moves.
+  if (todoView.shape(name) === "key") {
+    const dir = boardDir();
+    const file = dir ? todoView.pageFile(dir, name) : null;
+    if (file) flipOne(name, file, mark, vname, row);
+  }
+}
+
 //  JAB-004: PLAIN verb (`.jab="args"`) loops its args reading `be`.  File edits
-//  ONLY — never a wtlog row, never a post; the user reviews and lands the tree.
-function done() {
+//  + the wt move ONLY — never a wtlog row, never a post; the user reviews and
+//  lands the tree.  Shared by done ([DONE]) and dont ([DONT]) via _run.
+function run(argv, mark, vname) {
   const _be = (typeof be !== "undefined") ? be : null;
   const sink = _be && _be.sink;
   const out = sink ? hunkrows(sink, null) : null;
   let opened = false;
   //  BE-040: rows open the `todo` banner LAZILY (a pure-miss run stays rowless);
   //  the banner is the board spell, so a pager click lands back on the board.
-  function row(text) {
-    if (out) { if (!opened) { opened = true; out.open("todo"); } out.row(text, "done", 0n); }
+  function row(text, verb) {
+    if (out) { if (!opened) { opened = true; out.open("todo"); } out.row(text, verb || "done", 0n); }
   }
-  const dir = boardDir();
-  if (!dir) miss("todo/", "TODONONE");
   try {
-    if (!arguments.length) miss("", "TODONONE");
-    for (let i = 0; i < arguments.length; i++) doneOne(String(arguments[i]), dir, row);
+    if (!argv.length) missV(vname, "", "TODONONE");
+    for (let i = 0; i < argv.length; i++) {
+      const w = String(argv[i] == null ? "" : argv[i]);
+      //  WORK-001: "."/""/"//KEY" = the wt form; a TICKET key = the page form.
+      if (w === "" || w === "." || w.slice(0, 2) === "//") {
+        wtOne(w, mark, vname, row);
+      } else {
+        const dir = boardDir();
+        if (!dir) missV(vname, "todo/", "TODONONE");
+        doneOne(w, dir, row, mark, vname);
+      }
+    }
   } finally { if (out) out.done(); }
 }
+
+function done() { return run(arguments, "DONE", "done"); }
 done.jab = "args";
 module.exports = done;
+//  WORK-001: dont.js rides the same machinery with the [DONT] mark.
+module.exports._run = run;
