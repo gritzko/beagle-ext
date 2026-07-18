@@ -27,7 +27,6 @@ const branchlib = require("../../shared/branch.js"); // DIS-061: the ONE branch 
 const decideM  = require("./fold-decide.js");
 const commitM  = require("./fold-commit.js");
 const conflict = require("../../shared/conflict.js");
-const classify = require("../../shared/classify.js"); // POST-030: dirty-target probe
 const dag      = require("../../shared/dag.js");
 const ulog     = require("../../shared/ulog.js");
 const uri      = require("../../shared/uri.js");   // JAB-005: total arg parse
@@ -351,8 +350,7 @@ function advanceBranch(reader, wtl, info, ctx, target, curBranch, parent,
 //  by hand.  `discover.wtdir`/`discover.treeAt` (the SAME canonical routines
 //  resolve_hash's own frame() calls) locate the target's on-disk anchor, only
 //  to WRITE the advance row — not to re-derive the resolution.
-function advanceWorktree(info, reader, ctx, targetUri, curTip, haveBaseline,
-                         bareTrack) {
+function advanceWorktree(info, reader, ctx, targetUri, curTip, haveBaseline) {
   if (!haveBaseline || !curTip)
     throw refuse("no cur tip to advance `" + targetUri + "` to",
                  "no cur tip to advance to");
@@ -383,29 +381,18 @@ function advanceWorktree(info, reader, ctx, targetUri, curTip, haveBaseline,
     throw refuse("`" + targetUri + "` can not be fast-forwarded" + ab,
                  "the target can not be fast-forwarded" + ab);
   }
-  //  POST-030 (gritzko 2026-07-17): a BARE-TRACK advance is a PURE FF — "not
-  //  merge-and-ff, just ff".  A CLEAN target gets cur checked out clean; a DIRTY
-  //  target REFUSES rather than weaves.  (The explicit `post //X` arg path keeps
-  //  the POST-026 weave below.)
+  //  2026-07-18 gritzko, wiki/POST.mkd item 1: the bare-track advance WEAVES the
+  //  target's uncommitted changes like the explicit `//X` arm — ff is the BASE
+  //  motion only.  The POST-030 dirty-refusal gate is overturned.
   const targetK = store.open(target.storePath, target.project);
-  if (bareTrack) {
-    let dirty = false;
-    try { dirty = classify.classify(target, wtlog.open(target), targetK, {})
-                          .rows.length > 0; } catch (e) {}
-    if (dirty)
-      throw refuse("`" + targetUri + "` has uncommitted changes",
-                   "the target has uncommitted changes");
-  }
   //  POST-026: a `//WT` post FIRST materialises the dirties into the target wt —
   //  the SAME get merge fan-out `be get ?#<curTip>` runs, so a DIRTY target is
   //  3-way weave-merged (not clobbered) and an un-mergeable overlay / a conflict
   //  REFUSES (GETOVRL / GETCONF) BEFORE the base advances.  Reuse the get merge
   //  path (RULE ZERO — no hand-rolled checkout/dag): rh.chash is the target's
   //  current base = the merge OLD side / 3-way base, curTip the tree to reach.
-  //  POST-030: bareTrack → force = a CLEAN checkout (the dirty case already refused).
   getverb.mergeWorktreeTo({ info: target, k: targetK, tip: curTip,
-                            oldTip: rh.chash, bePath: target.bePath,
-                            force: !!bareTrack });
+                            oldTip: rh.chash, bePath: target.bePath });
   //  FF: append the advance row into the TARGET's OWN wtlog (a local receive);
   //  the branch it already tracks (if any) is preserved, only the tip moves.
   const targetWtl = wtlog.open(target);
@@ -469,7 +456,7 @@ function advanceTrack(info, wtl, reader, ctx, curBranch, parent, haveBaseline) {
     //  self-refuse (`… is this worktree`).  Fall through to the sub's
     //  OWN branch (trunk) FF — worktree.mkd:53-54, the DIS-074 track advance.
     if (!selfWorktree(info, t))
-      return advanceWorktree(info, reader, ctx, t, parent, haveBaseline, true);
+      return advanceWorktree(info, reader, ctx, t, parent, haveBaseline);
   }
   return advanceBranch(reader, wtl, info, ctx, curBranch, curBranch, parent,
                        haveBaseline);
