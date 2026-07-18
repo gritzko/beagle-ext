@@ -272,10 +272,18 @@ function contextRepo(ctxUri) {
 
 function _statKind(p) { try { return io.stat(p).kind; } catch (e) { return undefined; } }
 
-//  BE-032: does a context string carry a `//` authority slot (however empty)?
-function _hasAuthority(s) {
-  try { return uri._parse(String(s || "")).authority !== undefined; }
-  catch (e) { return false; }
+//  WORK-002: does a context URI name the cwd's OWN tree — host == its navCwd
+//  naming OR its basename (the BRO-017 fallback)?  The safe cwd-fallback gate.
+function _isOwnCtx(ctxUri) {
+  let u; try { u = uri._parse(String(ctxUri || "")); } catch (e) { return false; }
+  if (u.authority === undefined) return false;
+  let repo; try { repo = be.treeAt(); } catch (e) { return false; }
+  if (!repo || !repo.wt) return false;
+  const host = u.host || "";
+  if (host === repo.wt.slice(repo.wt.lastIndexOf("/") + 1)) return true;
+  let own = "";
+  try { own = uri._parse(be.navCwd(repo.wt) || "").host || ""; } catch (e) {}
+  return own !== "" && host === own;
 }
 
 //  --- JSQUE-008: the canonical CLI entry (argv -> seed -> run -> flush) ---
@@ -435,11 +443,9 @@ function _cli(argv, opts2) {
       args.push(nav.path.slice(repo.wt.length));
   }
   else {
-    //  BE-032: a mutation's RELATIVE context (no `//` authority slot — a stale
-    //  tracked path like `sub/`) must refuse LOUDLY: the silent cwd fallback
-    //  posted in the WRONG repo.  An authority-formed miss keeps the fallback
-    //  (harness worktrees name trees the local SRC_ROOT cannot resolve).
-    if (opts2.context && _isMutation(verb) && !_hasAuthority(opts2.context))
+    //  WORK-002 (was BE-032, relative-only): a mutation's context that anchors NO
+    //  worktree refuses LOUDLY unless it names the cwd tree ITSELF (BRO-017 gap).
+    if (opts2.context && _isMutation(verb) && !_isOwnCtx(opts2.context))
       throw "NAVNONE: context " + opts2.context + " is no worktree";
     //  URI-016: a context-less REENTRY (slot-edit/click) hands args pre-merged
     //  ROOT-relative, so its context IS the tree root — stated as the URI, which

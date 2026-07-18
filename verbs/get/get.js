@@ -341,6 +341,15 @@ function dispatchRow(row, ctx) {
 //  cwd, tracking it at the rev it is on (resolve_hash step 5.5 = "the tree's
 //  own tip").  RULE ZERO: store/shard/chash all come from resolve_hash; an
 //  explicit `?query`/`#frag` on the operand rides through it too (steps 5.1-5.4).
+//  WORK-002: a nav-context run TARGETS the anchored tree (be.repo, BRO-025),
+//  never the launch cwd; anchored on cwd's own tree → io.cwd() (fresh clones).
+function targetWt() {
+  const w = io.cwd();
+  if (typeof be === "undefined" || !be.repo || !be.repo.wt) return w;
+  let cell = null; try { cell = discover.treeAt(w); } catch (e) {}
+  return cell && cell.wt === be.repo.wt ? w : be.repo.wt;
+}
+
 function handleWtSeed(uri, ctx) {
   const cu = discover.navCwd(discover.ctxDir());
   let r = resolveHash(cu, uri);
@@ -372,7 +381,7 @@ function handleWtSeed(uri, ctx) {
              k = store.open(t.storePath, t.project); }
     else k = store.open(r.store, r.shard);
   }
-  const wt = io.cwd();
+  const wt = targetWt();                       // WORK-002: the context tree
   const bePath = join(wt, ".be");
   const fresh = !exists(bePath);
   const u = new URI(uri);
@@ -439,7 +448,7 @@ function crossUpdate(ctx, uri, tip, cell, srcStore, srcProj, wtsrc) {
 //  (the D4 restore writes none either): tracking/base stay put, the picked
 //  file reads as a local edit for status/put/post.
 function cherryPick(ctx, uri, r) {
-  const wt = io.cwd();
+  const wt = targetWt();                       // WORK-002: the context tree
   let cell = null; try { cell = discover.treeAt(wt); } catch (e) {}
   if (!cell || cell.wt !== wt)
     throw "be get: GETPICK `" + uri + "` needs an established worktree to pick into";
