@@ -37,6 +37,7 @@ const gitmodules = require("../../shared/gitmodules.js");  // PUT-004: mount dec
 const branchlib  = require("../../shared/branch.js");      // SUBS-050: branch codec
 const store      = require("../../shared/store.js");       // keeper open + shardDir
 const dag        = require("../../shared/dag.js");         // ancestors/commitTs
+const graf       = require("../../shared/graf.js");        // GRAF-001: ahbeh cache
 const render     = require("../../view/render.js");        // dateCol (the 7-col form)
 const navlib     = require("../../shared/nav.js");         // URI-011: nav spells
 const todo       = require("../todo/todo.js");             // BE-038/043: ticket titles
@@ -99,7 +100,7 @@ function normStore(p) { return String(p || "").replace(/\/+$/, ""); }
 function shardKey(repo) { return normStore(repo.storePath) + "|" + (repo.project || ""); }
 
 function registry() {
-  const keepers = new Map(), ancs = new Map(), metas = new Map();
+  const keepers = new Map(), ancs = new Map(), metas = new Map(), grafs = new Map();
   function keeperFor(repo) {
     const key = shardKey(repo);
     if (keepers.has(key)) return keepers.get(key);
@@ -122,6 +123,19 @@ function registry() {
     ancs.set(key, s);
     return s;
   }
+  //  WORK-011: the shard's graf ahbeh cache (GRAF-001), opened ONCE per shard
+  //  beside the keeper — null when the shard has no keeper or graf.open throws.
+  function grafFor(repo) {
+    const key = shardKey(repo);
+    if (grafs.has(key)) return grafs.get(key);
+    let g = null;
+    if (keeperFor(repo)) {
+      try { g = graf.open(store.shardDir(repo.storePath, repo.project)); }
+      catch (e) { g = null; }
+    }
+    grafs.set(key, g);
+    return g;
+  }
   //  meta(repo, sha) → { ts, subject } off the commit ("" / 0n when unreadable).
   function meta(repo, sha) {
     const key = shardKey(repo) + "#" + sha;
@@ -136,10 +150,16 @@ function registry() {
     return m;
   }
   //  counts(repo, cur, tip) → { ahead, behind } | null (vs the TRACKED ref).
+  //  WORK-011: the counts come from the graf index (GRAF-001) — index-first,
+  //  self-extending; the keeper closure diff stays only as the fallback (an
+  //  absent/failed graf, which graf itself otherwise walks-and-caches).
   function counts(repo, cur, tip) {
     if (!wtlog.isFullSha(cur) || !wtlog.isFullSha(tip)) return null;
     if (cur === tip) return { ahead: 0, behind: 0 };
-    if (!keeperFor(repo)) return null;
+    const k = keeperFor(repo);
+    if (!k) return null;
+    const g = grafFor(repo);
+    if (g) { try { return g.aheadBehind(k, cur, tip); } catch (e) {} }
     const a = ancestorsOf(repo, cur), b = ancestorsOf(repo, tip);
     let ahead = 0, behind = 0;
     for (const s of a) if (!b.has(s)) ahead++;
@@ -750,3 +770,5 @@ module.exports = work;
 //  WORK-001: expose the internals for the repro test (the todo.js model).
 module.exports.workDir = workDir;
 module.exports.listWork = listWork;
+//  WORK-011: expose the shard registry for the graf-parity test.
+module.exports.registry = registry;
