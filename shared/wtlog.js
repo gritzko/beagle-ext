@@ -11,8 +11,8 @@
 //    repo()         → row-0 URI string (the store anchor) | undefined
 //    curTip()       → { branch, sha, ts }   latest get/post sha-tip
 //    baselineTip()  → { branch, sha, ts }   latest get/post/patch sha-row
-//    boundaries()   → { pd, patch }         pd = latest get/post ts;
-//                                           patch = latest get / commit-all post ts
+//    boundaries()   → { pd, patch }         both = latest get/post ts
+//                                           (STATUS-016: any post ends patch scope)
 //    has(ts)        → bool                  ron60 stamp-set membership
 //    patchTheirs()  → ["<40hex>", …]        in-scope patch rows' theirs shas
 //    eachPutDelete(floorTs, cb)             put/del rows with ts > floor, oldest-first
@@ -193,17 +193,6 @@ function open(be) {
              track: "", uriTrack: false, base: baseSha() };
   }
 
-  //  A `post` at index idx is commit-all iff no put/delete lies between
-  //  its pd boundary (most recent get/post strictly before it) and itself.
-  function postIsCommitAll(idx) {
-    for (let j = idx - 1; j >= 0; j--) {
-      const v = rows[j].verb;
-      if (v === PUT || v === DEL) return false;        // selective
-      if (v === GET || v === POST) return true;        // pd boundary, none seen
-    }
-    return true;                                       // nothing before → commit-all
-  }
-
   return {
     rows: rows,
 
@@ -231,19 +220,18 @@ function open(be) {
 
     //  pd boundary  = ts of the latest get/post row (SNIFFAtLastPostTs:
     //                 the floor for "put/delete since last post").
-    //  patch boundary = ts of the latest get OR commit-all post row
-    //                 (SNIFFAtPatchFloorTs).  null when none.
+    //  patch boundary = STATUS-016: the SAME latest get/post ts.  PATCH.mkd —
+    //                 the absorbed sha is recorded "for the next POST to
+    //                 consume", so ANY post (selective too) ends the patch
+    //                 scope; the old commit-all-only floor left a consumed
+    //                 patch lighting the quad patch column two posts on.
     boundaries: function () {
-      let pd = null, patch = null;
+      let ts = null;
       for (let i = rows.length - 1; i >= 0; i--) {
         const r = rows[i];
-        if (r.verb !== GET && r.verb !== POST) continue;
-        if (pd === null) pd = r.ts;
-        if (patch === null) {
-          if (r.verb === GET || postIsCommitAll(i)) { patch = r.ts; break; }
-        }
+        if (r.verb === GET || r.verb === POST) { ts = r.ts; break; }
       }
-      return { pd: pd, patch: patch };
+      return { pd: ts, patch: ts };
     },
 
     //  has(ts): ron60 stamp-set membership.  v1 = a JS Set of the row
@@ -260,9 +248,10 @@ function open(be) {
       return this._set.has(key);
     },
 
-    //  patchFloor(): the patch-scope floor ts — the latest get / commit-all
-    //  post ts (boundaries().patch).  A `patch` row with ts strictly greater is
-    //  in scope (its theirs tree is un-posted).  null when no floor (DIS-057).
+    //  patchFloor(): the patch-scope floor ts — the latest get/post ts
+    //  (boundaries().patch).  A `patch` row with ts strictly greater is in
+    //  scope (its theirs tree is un-posted); the NEXT post consumes it
+    //  (STATUS-016).  null when no floor (DIS-057).
     patchFloor: function () { return this.boundaries().patch; },
 
     //  patchTheirs(): the THEIRS commit shas of every IN-SCOPE patch row, oldest
