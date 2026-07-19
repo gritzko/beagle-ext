@@ -123,22 +123,37 @@ function pageTitle(file) {
   return s.slice(i);
 }
 
-//  The header MARK: an UPPERCASE `[…]` word right after the key, either side
-//  of the colon — `#   KEY [MARK]: title` or `#   KEY: [MARK] title` (both
-//  live on the board); "" when absent/malformed.
-function headerMark(key, title) {
-  if (title.indexOf(key) !== 0) return "";
+//  The header MARK's [ … ] span (the `[` and `]` char indices) — an UPPERCASE
+//  `[…]` word right after the key, either side of the colon (`KEY [MARK]:` or
+//  `KEY: [MARK] `); null when absent/malformed.  headerMark/stripMark share it.
+function markSpan(key, title) {
+  if (title.indexOf(key) !== 0) return null;
   let i = key.length;
   while (title[i] === " ") i++;
   if (title[i] === ":") { i++; while (title[i] === " ") i++; }
-  if (title[i] !== "[") return "";
+  if (title[i] !== "[") return null;
   let j = i + 1;
   while (j < title.length) {
     const c = title.charCodeAt(j);
     if (c >= 65 && c <= 90) j++;
     else break;
   }
-  return (j > i + 1 && title[j] === "]") ? title.slice(i + 1, j) : "";
+  return (j > i + 1 && title[j] === "]") ? { i: i, j: j } : null;
+}
+//  The header MARK text (`OPEN`/`HIGH`/… ); "" when absent (both placements).
+function headerMark(key, title) {
+  const s = markSpan(key, title);
+  return s ? title.slice(s.i + 1, s.j) : "";
+}
+//  WORK-008: the title with its [MARK] token stripped (both placements), colon
+//  spacing normalized to `KEY: title`; a markless title passes through as-is.
+function stripMark(key, title) {
+  const s = markSpan(key, title);
+  if (!s) return title;
+  const before = title.slice(0, s.i).replace(/\s+$/, "");
+  const after = title.slice(s.j + 1).replace(/^\s+/, "");
+  const sep = before[before.length - 1] === ":" && after && after[0] !== ":" ? " " : "";
+  return before + sep + after;
 }
 const CLOSED = { DONE: true, DONT: true, STALE: true };   // [/meta/todo] states
 const PRIO = { CRIT: 0, HIGH: 1, MED: 2, LOW: 3 };   // unmarked / unknown = 2
@@ -411,3 +426,5 @@ module.exports.pageFile = pageFile;
 //  BE-043: the work board reuses the board root + the page-title read.
 module.exports.boardDir = boardDir;
 module.exports.pageTitle = pageTitle;
+//  WORK-008: the work view strips the status mark from the minted post title.
+module.exports.stripMark = stripMark;

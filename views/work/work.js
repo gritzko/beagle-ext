@@ -413,7 +413,9 @@ function ticketTitle(key) {
   const board = todo.boardDir();
   if (!board) return "";
   const file = todo.pageFile(board.dir, key);
-  return file ? todo.pageTitle(file) : "";
+  //  WORK-008: strip the [OPEN]/[HIGH]/… status mark so the minted post message
+  //  is the bare `KEY: title` commit convention (the board keeps it via headerMark).
+  return file ? todo.stripMark(key, todo.pageTitle(file)) : "";
 }
 
 //  R2 fixed columns: the rails+name region pads to KEYW with a dotted leader;
