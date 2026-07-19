@@ -75,6 +75,21 @@ function shape(w) {
   }
   return "key";
 }
+//  WORK-010: the BASE ticket key a name CARRIES — its leading `TOPIC-NNN`,
+//  IGNORING any trailing suffix (a letter run or `-word`: `PIN-1b`, `URI-016-adv`,
+//  `STATUS-008-f21` all → their base key).  "" when the name does not OPEN with a
+//  key.  Same char rules as shape() (one parser), just tolerant of the tail.
+function ticketKey(w) {
+  if (!w.length) return "";
+  const c0 = w.charCodeAt(0);
+  if (c0 < 65 || c0 > 90) return "";                 // must open uppercase
+  const run = ucnumRun(w, 0);
+  if (run === w.length || w[run] !== "-") return "";
+  let j = run + 1;
+  if (j === w.length || w.charCodeAt(j) < 48 || w.charCodeAt(j) > 57) return "";
+  while (j < w.length && w.charCodeAt(j) >= 48 && w.charCodeAt(j) <= 57) j++;
+  return w.slice(0, j);                              // TOPIC-NNN, suffix dropped
+}
 function keyTopic(key) { return key.slice(0, key.indexOf("-")); }
 
 //  --- the board root --------------------------------------------------------
@@ -428,6 +443,8 @@ todo.jab = "args";
 module.exports = todo;
 //  BE-038: expose the internals for the repro test (the ls.js/log.js model).
 module.exports.shape = shape;
+//  WORK-010: the work view reads the BASE ticket key off a (maybe suffixed) wt name.
+module.exports.ticketKey = ticketKey;
 module.exports.listTopics = listTopics;
 module.exports.pageFile = pageFile;
 //  BE-043: the work board reuses the board root + the page-title read.

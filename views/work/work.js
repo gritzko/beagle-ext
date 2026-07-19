@@ -52,6 +52,8 @@ const TAG_U = tagCode("U"), TAG_S = tagCode("S"), TAG_O = tagCode("O");
 //  behind 'A' (the NEW salmon slot) — proper 256-colour slots in view/bro.js.
 const TAG_C = tagCode("C"), TAG_Y = tagCode("Y"), TAG_E = tagCode("E");
 const TAG_W = tagCode("W"), TAG_G = tagCode("G"), TAG_A = tagCode("A");
+//  WORK-010: the ticket-link `[?]` rides the cyan 'V' slot (view/bro.js THEME).
+const TAG_V = tagCode("V");
 
 //  --- fs probes ---------------------------------------------------------------
 function isDir(p) { try { return io.stat(p).kind === "dir"; } catch (e) { return false; } }
@@ -418,13 +420,30 @@ function ticketTitle(key) {
   return file ? todo.stripMark(key, todo.pageTitle(file)) : "";
 }
 
+//  WORK-010: the `[?]` click-spell for a wt named after a ticket.  RULING
+//  (gritzko 2026-07-19): an O-invite with EMPTY context, verb `todo`, the ticket
+//  key as ARGUMENT — `//: todo TKT-123` (no wt context welded; the key is the
+//  arg, not the context).  The name resolves through the SHARED todo parser:
+//  its BASE ticket key (suffix-tolerant, `PIN-1b`→`PIN-1`, a page must exist), or
+//  a bare TOPIC (the topic dir exists → `//: todo TOPIC`); "" for any other name.
+function ticketLink(name) {
+  const board = todo.boardDir();
+  if (!board) return "";
+  const key = todo.ticketKey(name);
+  if (key)
+    return todo.pageFile(board.dir, key) ? SPELL.mintOspell("//", "todo " + key) : "";
+  if (todo.shape(name) === "topic")
+    return isDir(join(board.dir, name)) ? SPELL.mintOspell("//", "todo " + name) : "";
+  return "";
+}
+
 //  R2 fixed columns: the rails+name region pads to KEYW with a dotted leader;
-//  the pager's button region is two FIXED slots ("[diff] " 7, "[post] " 7 —
-//  WORK-006: an absent button ┄-fills its slot; WORK-004 retired [get]), so
-//  ahbeh/time/hashlet/message land at the SAME offsets on every row.
+//  the pager's button region is FIXED slots (WORK-010: "[?] " 4 + "[±] " 4 +
+//  "[post] " 7; an absent button ┄-fills its slot), so ahbeh/time/hashlet/
+//  message land at the SAME offsets on every row.  WORK-010 compacted [diff]→[±].
 const KEYW = 32;                       // rails+name column width, test-pinned
-const SLOT_DIFF = 7, SLOT_POST = 7;
-const BTNW = SLOT_DIFF + SLOT_POST;
+const SLOT_HELP = 4, SLOT_DIFF = 4, SLOT_POST = 7;
+const BTNW = SLOT_HELP + SLOT_DIFF + SLOT_POST;
 //  WORK-004 ahbeh column: TEXT `+N`/`-N` right-aligns to 7 (plain + repo rows);
 //  the pager's WT buttons `[+99][-99]` (+1 lead) widen it to 11 so the shared
 //  #hashlet/message columns stay aligned across wt and repo rows.
@@ -491,8 +510,9 @@ function fadeHex(ts) {
   return "#" + h + h + h;
 }
 
-//  The wt row: `//KEY ┄┄┄  [diff] [post]  [+N][-N]  <time5> #<hashlet8>
+//  The wt row: `//KEY ┄┄┄  [?] [±] [post]  [+N][-N]  <time5> #<hashlet8>
 //  <subject≤30> [done] [dont]` — buttons pager-only, everything else content.
+//  WORK-010: [?] (`//: todo TKT` invite) + [±] (compact diff) lead the buttons.
 function wtSpans(parts, spans, off, rails, d, btns) {
   const ctx = "//" + d.key;
   //  WORK-005: pager-only leading fade marker; the plain path stays chrome-free.
@@ -500,7 +520,16 @@ function wtSpans(parts, spans, off, rails, d, btns) {
   off = prefixSpans(parts, spans, off, rails, ctx, TAG_S, "status " + ctx);
   off = span(parts, spans, off, " ", TAG_S);
   if (btns) {
-    off = span(parts, spans, off, "[diff]", TAG_E);
+    //  WORK-010 RULING: [?] then [±] LEAD the button run.  [?] is the O-invite
+    //  `//: todo TKT` (nav to the ticket page / topic list) on a ticket-/topic-
+    //  named wt, else the slot ┄-pads (WORK-006); [±] is the compact [diff] face.
+    const link = ticketLink(d.key);
+    if (link) {
+      off = span(parts, spans, off, "[?]", TAG_V);
+      off = span(parts, spans, off, link, TAG_O);
+      off = span(parts, spans, off, " ", TAG_S);
+    } else off = span(parts, spans, off, leader(SLOT_HELP), TAG_S);
+    off = span(parts, spans, off, "[±]", TAG_E);
     off = span(parts, spans, off, "diff " + ctx, TAG_U);
     off = span(parts, spans, off, " ", TAG_S);
     const title = ticketTitle(d.key);
