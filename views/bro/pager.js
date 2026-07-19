@@ -713,6 +713,8 @@ Pager.prototype._runSpell = function (spell, ctxOverride) {
     //  BE-032: the PREVIOUS context (the authority donor), captured pre-push.
     const prev = this._verbUri().uri ||
                  (typeof be !== "undefined" && be.navCwd ? be.navCwd() : "");
+    //  BE-053: the context in effect BEFORE this nav — a word-spell arg keeps it.
+    const ctx0 = this._context();
     //  BRO-025: an O click drives the spell IN its recorded context (ctxOverride);
     //  a plain follow (a U nav row) threads none — the target is a full address.
     const hunks = this.driveSpell ? this.driveSpell(s, ctxOverride || undefined) : null;
@@ -723,15 +725,24 @@ Pager.prototype._runSpell = function (spell, ctxOverride) {
     //  (`#L`, `?ref`) resolves against the address, not the whole word spell.
     const sp = this._splitSpell(s);
     this.view.verb = sp.verb;
-    //  BE-032: a click IS navigation — a root-relative target (launch-tree banners
-    //  omit the `//`) inherits the previous //authority, keeping the tracked
-    //  context scopeable; else the next `:post`/`:put` fell back to the LAUNCH repo.
-    this.view.uri  = this._fillAuth(sp.uri, prev);
     this.view.wrap = wrapFor(sp.verb);           // BRO-014: type default (W override)
-    //  BRO-024: the view RECORDS its invocation — back/refresh replay IT verbatim.
-    this.view.call = { verb: sp.verb, spell: s, context: "" };
-    //  BRO-024: a follow/click IS navigation — REDUCE the target to the context.
-    this.ctx = this._ctxFrom(this.view.uri);
+    //  BE-053: a bare relative arg (`todo BE-021`) is the VERB's argument, not a
+    //  nav address — the pager is arg-blind: keep the context, NEVER resolve the
+    //  arg as a relative URI (which fills //authority and climbs to `///KEY`).
+    if (sp.uri && !this._isNavAddr(sp.uri)) {
+      this.view.uri  = sp.uri;                   // the arg, verbatim (for display)
+      this.ctx       = ctx0;                     // BRO-024: context UNCHANGED
+      this.view.call = { verb: sp.verb, spell: s, context: ctx0 };
+    } else {
+      //  BE-032: a click IS navigation — a root-relative target (launch-tree banners
+      //  omit the `//`) inherits the previous //authority, keeping the tracked
+      //  context scopeable; else the next `:post`/`:put` fell back to the LAUNCH repo.
+      this.view.uri  = this._fillAuth(sp.uri, prev);
+      //  BRO-024: the view RECORDS its invocation — back/refresh replay IT verbatim.
+      this.view.call = { verb: sp.verb, spell: s, context: "" };
+      //  BRO-024: a follow/click IS navigation — REDUCE the target to the context.
+      this.ctx = this._ctxFrom(this.view.uri);
+    }
     this._updatePrevUri();                       // DIS-061: mirror the followed view
   } catch (e) { this.message = "err: " + String(e); }
 };
@@ -795,6 +806,15 @@ Pager.prototype._context = function () {
   const base = (v && v.uri) || this.context ||
                (typeof be !== "undefined" && be.navCwd ? be.navCwd() : "");
   return base ? this._ctxFrom(base) : "";
+};
+
+//  BE-053: is a spell's arg a NAVIGATION address (a scheme, an //authority, or
+//  an absolute `/path`) vs a bare relative verb-arg (`BE-021` — the verb's own,
+//  resolved by the verb, NOT a pager-composed URI)?  Only the former moves ctx.
+Pager.prototype._isNavAddr = function (uriStr) {
+  const u = this._parse(uriStr || "");
+  return u.scheme !== undefined || u.authority !== undefined ||
+         (u.path || "")[0] === "/";
 };
 
 //  BRO-024: REDUCE a navigated address to the `//WT/dir` context — worktree +
