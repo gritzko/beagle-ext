@@ -155,9 +155,16 @@ function readOnDisk(full) {
 //  deletion (a path in the OLD baseline tree, gone from the new) — an UNTRACKED
 //  path (in neither tree) is never touched.  `opts.oldTip` is the sub's prior
 //  pin (the baseline); absent oldTip = a fresh checkout (materialise all).
+//  PUT-012: best-effort restamp of a just-materialised file (get.js trySetMtime
+//  twin) — the sub-mount checkout stamps files to the track-row ts (GET-049).
+function trySetMtime(full, ts) { try { io.setMtime(full, BigInt(ts)); } catch (e) {} }
+
 function apply(keeper, tipSha, wtRoot, opts) {
   const force = !!(opts && opts.force);
   const oldTip = (opts && opts.oldTip) || "";
+  //  PUT-012: sub-mount hands the track-row ASSIGNED ts; restamp every file we
+  //  materialise to it so status/put/diff agree (symlinks: setMtime follows link).
+  const stampTs = (opts && opts.stampTs != null) ? opts.stampTs : null;
   const treeSha = keeper.commitTree(tipSha);
   if (!treeSha) throw "checkout: tip " + tipSha + " has no tree";
 
@@ -200,6 +207,9 @@ function apply(keeper, tipSha, wtRoot, opts) {
       if (!cleanVsOld) { rows.push({ verb: "mrg", path: rel }); return; }  // dirty → keep
     }
     materialise(wtRoot, rel, leaf, bytes);
+    //  PUT-012: stamp the materialised file to the track-row ts (get.js:1085
+    //  parity); a symlink stays unstamped (setMtime would follow the link).
+    if (stampTs != null && leaf.kind !== "l") trySetMtime(full, stampTs);
     rows.push({ verb: existed ? "upd" : "new", path: rel });
   });
 

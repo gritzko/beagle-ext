@@ -328,11 +328,14 @@ function mount(opts) {
         const oldPin = currentSubPin(anchorPath);
         try { io.mkdir(subWt); } catch (e) {}
         const redirect = URI.make("file", undefined, ls.storeBe + "/", "/" + ls.proj);
-        ulog.write(anchorPath, [{ verb: "get", uri: redirect },
-                                { verb: "get", uri: track }]);
+        //  PUT-012: capture the track row's ASSIGNED ts (row 1) to restamp the
+        //  checked-out files, GET-049 parity — else the sub mis-stamps dirty.
+        const asg = ulog.write(anchorPath, [{ verb: "get", uri: redirect },
+                                            { verb: "get", uri: track }]);
         const k = store.open(ls.storeRoot, ls.proj);
         //  GET-047: surface the prior pin + checkout delta for the get report.
-        const co = checkout.apply(k, pin, subWt, { force: ambient.force(), oldTip: oldPin });
+        const co = checkout.apply(k, pin, subWt,
+                     { force: ambient.force(), oldTip: oldPin, stampTs: asg[1] });
         return { storePath: ls.storeRoot, project: ls.proj, shard: k.shard,
                  tip: pin, k: k, oldPin: oldPin, rows: co.rows };
       }
@@ -374,8 +377,10 @@ function mount(opts) {
     //  `//WT/path/to/sub#<pin>` track row (DIS-072 pin-URI model).
     try { io.mkdir(subWt); } catch (e) {}
     const redirect = URI.make("file", undefined, beDir + "/", "/" + title);
-    ulog.write(anchorPath, [{ verb: "get", uri: redirect },
-                            { verb: "get", uri: track }]);
+    //  PUT-012: capture the track row's ASSIGNED ts (row 1) to restamp the
+    //  checked-out files, GET-049 parity — else the sub mis-stamps dirty.
+    const asg = ulog.write(anchorPath, [{ verb: "get", uri: redirect },
+                                        { verb: "get", uri: track }]);
 
     //  D3: check out the commit named by the parent gitlink into `<wt>/<path>/`.
     //  GET-040: the global force flag (`get!`) — uniform across the root and
@@ -383,7 +388,8 @@ function mount(opts) {
     //  Open against `beDir` (the store dir), per the havePin note above.
     const k = store.open(beDir, title);
     //  GET-047: surface the prior pin + checkout delta for the get report.
-    const co = checkout.apply(k, pin, subWt, { force: ambient.force(), oldTip: oldPin });
+    const co = checkout.apply(k, pin, subWt,
+                 { force: ambient.force(), oldTip: oldPin, stampTs: asg[1] });
 
     return { storePath: beDir, project: title, shard: shard, tip: pin, k: k,
              oldPin: oldPin, rows: co.rows };

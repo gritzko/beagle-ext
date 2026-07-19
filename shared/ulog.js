@@ -174,12 +174,16 @@ function write(path, rows) {
   try { io.unlink(tmp); } catch (e) {}
   try { io.unlink(idxPath(tmp)); } catch (e) {}
   const h = abc._ulog_open(tmp);
+  //  PUT-012: return each row's ASSIGNED ts (in order) so a restamping caller
+  //  (submount.mount) stamps files to the exact track-row stamp, never re-parses.
+  const assigned = [];
   try {
     let ts = 0n;                              // 0 = no row yet (honour small ts)
     for (const r of rows) {
       let use = (r.ts != null) ? BigInt(r.ts) : (ts > 0n ? ts : nowAfter(0n));
       if (use <= ts) use = ts + 1n;           // strictly increasing (native guard)
       abc._ulog_append(h, use, r.verb, _uri(r.uri));
+      assigned.push(use);
       ts = use;
     }
   } catch (e) {
@@ -192,6 +196,7 @@ function write(path, rows) {
   io.rename(tmp, path);
   try { io.unlink(idxPath(tmp)); } catch (e) {}
   try { io.unlink(idxPath(path)); } catch (e) {}
+  return assigned;
 }
 
 //  Append `rows` to the ULOG at `path` IN PLACE (native booked append): open,
