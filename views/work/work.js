@@ -404,8 +404,10 @@ function fadeHex(ts) {
     try { days = Math.floor((render.ronToMs(now) - render.ronToMs(ts)) / 86400000); }
     catch (e) { days = 0; }
   }
-  const ch = Math.max(0, Math.min(days, 8)) * 0x11;
-  const h = ch.toString(16).padStart(2, "0");
+  //  Perceptual ramp: #000/#111/#222 are indistinguishable fg shades, so day 1
+  //  jumps straight to #222 and each further day adds #111, capping at #888.
+  const lvl = days <= 0 ? 0 : Math.min(days + 1, 8);
+  const h = (lvl * 0x11).toString(16).padStart(2, "0");
   return "#" + h + h + h;
 }
 
