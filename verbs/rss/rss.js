@@ -48,36 +48,10 @@ function pubDate(srcPath) {
   catch (e) { return new Date(ronToMs(ron.now())).toUTCString(); }
 }
 
-//  Title = the H1 opener text; intro = the first prose paragraph, StrictMark
-//  markup stripped to plain text (image-only and reference-def lines skipped).
-function metaOf(src, fallback) {
-  const lines = src.split(/\r?\n/);
-  let title = fallback, i = 0;
-  for (; i < lines.length; i++) {
-    const m = /^#\s+(.*\S)\s*$/.exec(lines[i]);
-    if (m) { title = plain(m[1]); i++; break; }
-  }
-  let intro = "";
-  for (; i < lines.length; i++) {
-    const ln = lines[i];
-    if (/^\s*$/.test(ln)) { if (intro) break; else continue; }
-    if (/^!\[/.test(ln)) continue;                // image-only line
-    if (/^\s*\[[^\]]+\]:\s/.test(ln)) continue;   // reference definition
-    intro += (intro ? " " : "") + ln.trim();
-  }
-  return { title: title, intro: plain(intro) };
-}
-
-//  Strip inline StrictMark to plain text for the feed description/title.
-function plain(s) {
-  return s
-    .replace(/!\[[^\]]*\](\[[^\]]*\]|\([^)]*\))?/g, "")   // images
-    .replace(/\[([^\]]+)\](\[[^\]]*\]|\([^)]*\))/g, "$1")  // [text][l] / [text](url)
-    .replace(/\[([^\]]+)\]/g, "$1")                        // shortcut [Page]
-    .replace(/~~([^~]+)~~/g, "$1")
-    .replace(/[*_`]/g, "")
-    .replace(/\s+/g, " ").trim();
-}
+//  Title/intro/first-image come from render.pageMeta — the ONE shared extractor
+//  (MARK-011).  It accepts `#`..`######` openers (the old local `metaOf` matched
+//  only H1, so a `##` post lost BOTH its feed title and its <description>) and
+//  extracts the intro independently of a matched heading.
 
 //  Site base URL, e.g. https://replicated.live — from html/CNAME, else "".
 function siteBase(base) {
@@ -134,8 +108,12 @@ function syndicate(arg) {
     root: root,
     exists: function (r) { try { return !!io.stat(root + "/" + r); } catch (e) { return false; } },
   };
-  const html = render.renderDoc(src, stemOf(baseName(rel)), opts);
+  //  MARK-011: heading <title> + OG card in the page head, and the SAME meta
+  //  drives the feed item below — one extractor, one head, both verbs.
   const outRel = rel.replace(/\.(mkd|md)$/, ".html");
+  const meta = render.pageMeta(src, stemOf(baseName(rel)));
+  opts.meta = render.headMeta(meta, siteBase(base), outRel);
+  const html = render.renderDoc(src, stemOf(baseName(rel)), opts);
   writeFile(base + "/" + outRel, html);
   io.log("rss: wrote html/" + outRel + "\n");
 
@@ -148,7 +126,6 @@ function syndicate(arg) {
     feed = emptyFeed(base);
   }
 
-  const meta = metaOf(src, stemOf(baseName(rel)));
   const link = (siteBase(base) || "") + "/" + outRel;
   const guid = link || outRel;
   const item =

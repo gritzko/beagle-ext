@@ -234,8 +234,88 @@ Renderer.prototype.inline = function (text) {
   }
 };
 
+//  ---- page metadata (MARK-011: OG cards) --------------------------------
+//  Strip inline StrictMark to plain text for a <title>/description/og value.
+function plain(s) {
+  return s
+    .replace(/!\[[^\]]*\](\[[^\]]*\]|\([^)]*\))?/g, "")    // images
+    .replace(/\[([^\]]+)\](\[[^\]]*\]|\([^)]*\))/g, "$1")  // [text][l] / [text](url)
+    .replace(/\[([^\]]+)\]/g, "$1")                        // shortcut [Page]
+    .replace(/~~([^~]+)~~/g, "$1")
+    .replace(/[*_`]/g, "")
+    .replace(/\s+/g, " ").trim();
+}
+
+//  pageMeta(src, fallback) -> { title, intro, image } — the ONE extractor both
+//  `mark` and `rss` share.  title = the FIRST heading opener (`#`..`######`),
+//  markup stripped (fallback when there is none); intro = the first prose
+//  paragraph (blank/heading/image-only/reference-def lines skipped), stripped;
+//  image = the first post image's url — reference-style labels resolved through
+//  the same `[key]: url` definitions, the layout `#fragment` stripped, still
+//  page-relative ("" when the post carries no image).  No fs, no absolute url:
+//  the caller turns `image` absolute via siteBase + absImage.
+function pageMeta(src, fallback) {
+  var lines = src.split(/\r?\n/);
+  //  reference definitions ([key]: url), same scan as collectRefs.
+  var refs = {};
+  for (var i = 0; i < lines.length; i++) {
+    var rm = /^ *\[([^\]]+)\]:[ \t]*([^ \t"\r]+)/.exec(lines[i]);
+    if (rm && !(rm[1] in refs)) refs[rm[1]] = rm[2];
+  }
+  //  title: the first heading opener at any level (`#` through `######`).
+  var title = fallback || "";
+  for (i = 0; i < lines.length; i++) {
+    var hm = /^#{1,6}\s+(.*\S)\s*$/.exec(lines[i]);
+    if (hm) { title = plain(hm[1]); break; }
+  }
+  //  intro: the first prose paragraph — independent of whether a heading was
+  //  found (the old rss `metaOf` started its scan at the title loop's index,
+  //  so a missed `##` opener ran it to EOF and collected nothing).
+  var intro = "";
+  for (i = 0; i < lines.length; i++) {
+    var ln = lines[i];
+    if (/^\s*$/.test(ln)) { if (intro) break; else continue; }
+    if (/^#{1,6}\s/.test(ln)) continue;              // heading
+    if (/^\s*!\[/.test(ln)) continue;                // image-only line
+    if (/^\s*\[[^\]]+\]:\s/.test(ln)) continue;      // reference definition
+    intro += (intro ? " " : "") + ln.trim();
+  }
+  //  first image: reference `![alt][label]` or inline `![alt](url)`.
+  var image = "";
+  var im = /!\[[^\]\n]*\](?:\[([0-9A-Za-z])\]|\(([^)\s]+)[^)]*\))/.exec(src);
+  if (im) {
+    var url = im[1] !== undefined ? refs[im[1]] : im[2];
+    if (url) image = url.split("#")[0];              // drop the layout #fragment
+  }
+  return { title: title, intro: plain(intro), image: image };
+}
+
+//  absImage(site, pageRel, rel) -> an ABSOLUTE image url, or "" when there is
+//  no site base or no image.  `rel` is resolved against the page's directory
+//  (a leading-`/` rel is already root-absolute); OG scrapers require absolute.
+function absImage(site, pageRel, rel) {
+  if (!site || !rel) return "";
+  if (rel[0] === "/") return site + normPath(rel);
+  var i = pageRel.lastIndexOf("/");
+  var dir = i < 0 ? "" : pageRel.slice(0, i);
+  return site + "/" + normPath((dir ? dir + "/" : "") + rel);
+}
+
+//  headMeta(meta, site, outRel) -> the head annotation values renderDoc emits.
+//  `site` is siteBase(html) ("" when html/CNAME is absent — then og:url and
+//  og:image are dropped, but title/og:title/og:description still ship).
+function headMeta(meta, site, outRel) {
+  return {
+    title: meta.title,
+    intro: meta.intro,
+    url:   site ? site + "/" + outRel : "",
+    image: absImage(site, outRel, meta.image),
+  };
+}
+
 module.exports = { renderDoc: renderDoc, esc: esc, scanInline: scanInline,
-                   Renderer: Renderer };
+                   Renderer: Renderer, pageMeta: pageMeta, plain: plain,
+                   absImage: absImage, headMeta: headMeta };
 
 //  ---- block classification (MKDTBlock) ----
 //  line: one source line WITHOUT its trailing '\n'.
@@ -425,12 +505,26 @@ function renderBlocks(rd, src) {
 //  ---- document (MARKRenderDoc) ----
 function renderDoc(src, title, opts) {
   var rd = new Renderer(opts);
+  //  MARK-011: the head <title> and the OG card come from opts.meta (headMeta);
+  //  `title` is the filename-stem fallback for a post with no heading.
+  var meta = (opts && opts.meta) || {};
+  var docTitle = (meta.title && meta.title.length) ? meta.title
+               : (title && title.length ? title : "wiki");
   rd.lit('<!DOCTYPE html>\n<html lang="en">\n<head>\n');
   rd.lit('<meta charset="utf-8">\n');
   rd.lit('<meta name="viewport" content="width=device-width,initial-scale=1">\n');
   rd.lit("<title>");
-  rd.escf(title && title.length ? title : "wiki");
+  rd.escf(docTitle);
   rd.lit("</title>\n");
+  //  Open Graph annotation block (Bluesky/Slack/Mastodon link cards).  og:url
+  //  and og:image need an ABSOLUTE base — omitted when html/CNAME is absent.
+  rd.lit('<meta property="og:title" content="'); rd.escf(docTitle); rd.lit('">\n');
+  if (meta.intro && meta.intro.length) {
+    rd.lit('<meta property="og:description" content="'); rd.escf(meta.intro); rd.lit('">\n');
+  }
+  rd.lit('<meta property="og:type" content="article">\n');
+  if (meta.url) { rd.lit('<meta property="og:url" content="'); rd.escf(meta.url); rd.lit('">\n'); }
+  if (meta.image) { rd.lit('<meta property="og:image" content="'); rd.escf(meta.image); rd.lit('">\n'); }
   if (opts && opts.head) rd.lit(opts.head);
   rd.lit("</head>\n<body>\n");
   if (opts && opts.body) rd.lit(opts.body);

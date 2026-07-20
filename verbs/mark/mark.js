@@ -22,6 +22,12 @@ function baseName(s) { const i = s.lastIndexOf("/"); return i < 0 ? s : s.slice(
 function dirName(s) { const i = s.lastIndexOf("/"); return i <= 0 ? "" : s.slice(0, i); }
 function stemOf(s) { const m = /^(.*)\.(mkd|md)$/.exec(s); return m ? m[1] : s; }
 
+//  Site base URL, e.g. https://replicated.live — from html/CNAME, else "".
+function siteBase(base) {
+  const cname = tryRead(base + "/CNAME").trim().split(/\s+/)[0];
+  return cname ? "https://" + cname : "";
+}
+
 function writeFile(p, text) {
   const dir = dirName(p);
   if (dir) io.mkdir(dir);                       // FILEMakeDirP: parents, idempotent
@@ -71,9 +77,13 @@ function renderOne(arg) {
     root: root,
     exists: function (r) { try { return !!io.stat(root + "/" + r); } catch (e) { return false; } },
   };
+  //  MARK-011: heading <title> + OG card.  ONE extractor (render.pageMeta),
+  //  the absolute image/url anchored to html/CNAME (siteBase).
+  const outRel = rel.replace(/\.(mkd|md)$/, ".html");
+  const meta = render.pageMeta(src, stemOf(baseName(rel)));
+  opts.meta = render.headMeta(meta, siteBase(base), outRel);
   const html = render.renderDoc(src, stemOf(baseName(rel)), opts);
 
-  const outRel = rel.replace(/\.(mkd|md)$/, ".html");
   writeFile(base + "/" + outRel, html);
   io.log("mark: wrote html/" + outRel + "\n");
   checkAssets(html, base);
