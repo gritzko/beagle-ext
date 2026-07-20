@@ -459,10 +459,10 @@ const BTNW = SLOT_HELP + SLOT_DIFF + SLOT_POST;
 //  #hashlet/message columns stay aligned across wt and repo rows.
 const AHBEHW_TXT = 7, AHBEHW_BTN = 11;
 
-//  WORK-006: a fixed-width dotted leader (the prefixSpans idiom — a breathing
-//  space then a `┄` run) that closes up an absent button slot / a short subject
-//  tail; n<2 degrades to a lone space so the grid never abuts.
-function leader(n) { return n >= 2 ? " " + "┄".repeat(n - 1) : (n > 0 ? " " : ""); }
+//  WORK-016: a leader is `┄` FILL ONLY — the ROW owns the single space of
+//  breathing where a cell (button/text) abuts, so two adjacent fills join into
+//  one uninterrupted run instead of showing a blank seam.
+function leader(n) { return n > 0 ? "┄".repeat(n) : ""; }
 
 //  The rails+name column: label (+ its hidden nav), then the dotted leader
 //  (` ┄┄┄`) out to KEYW; an over-long row degrades to one space (shifts right).
@@ -486,7 +486,10 @@ function ahbehSpans(parts, spans, off, counts, btns, ctx) {
   const bv = counts && counts.behind ? Math.min(counts.behind, 99) : 0;
   if (btns && ctx) {
     const aw = av ? 3 + String(av).length : 0, bw = bv ? 3 + String(bv).length : 0;
-    off = span(parts, spans, off, leader(Math.max(1, AHBEHW_BTN - aw - bw)), TAG_S);
+    //  WORK-016: the fill runs to the counts with ONE space; a countless cell
+    //  is all `┄` so it joins the neighbouring runs.
+    const fill = Math.max(1, AHBEHW_BTN - aw - bw);
+    off = span(parts, spans, off, leader(fill - 1) + (av || bv ? " " : "┄"), TAG_S);
     if (av) { off = span(parts, spans, off, "[+" + av + "]", TAG_G);
               off = span(parts, spans, off, SPELL.mintOspell(ctx, "post"), TAG_O); }
     if (bv) { off = span(parts, spans, off, "[-" + bv + "]", TAG_A);
@@ -496,7 +499,8 @@ function ahbehSpans(parts, spans, off, counts, btns, ctx) {
   const a = av ? "+" + av : "", b = bv ? "-" + bv : "";
   const w = btns ? AHBEHW_BTN : AHBEHW_TXT;
   const padw = Math.max(1, w - a.length - b.length);
-  off = span(parts, spans, off, btns ? leader(padw) : " ".repeat(padw), TAG_S);
+  off = span(parts, spans, off, btns ? leader(padw - 1) + (a || b ? " " : "┄")
+                                     : " ".repeat(padw), TAG_S);
   if (a) off = span(parts, spans, off, a, TAG_G);
   if (b) off = span(parts, spans, off, b, TAG_A);
   return off;
@@ -528,17 +532,19 @@ function wtSpans(parts, spans, off, rails, d, btns) {
   //  WORK-005: pager-only leading fade marker; the plain path stays chrome-free.
   if (btns) off = span(parts, spans, off, fadeHex(d.ts), TAG_O);
   off = prefixSpans(parts, spans, off, rails, ctx, TAG_S, "status " + ctx);
-  off = span(parts, spans, off, " ", TAG_S);
+  const link = btns ? ticketLink(d.key) : "";
+  //  WORK-016: the space before [?] is the BUTTON's breathing; absent, the
+  //  prefix fill runs on through the slot and only [±] gets its one space.
+  off = span(parts, spans, off, btns && !link ? leader(SLOT_HELP) + " " : " ", TAG_S);
   if (btns) {
     //  WORK-010 RULING: [?] then [±] LEAD the button run.  [?] is the O-invite
     //  `//: todo TKT` (nav to the ticket page / topic list) on a ticket-/topic-
     //  named wt, else the slot ┄-pads (WORK-006); [±] is the compact [diff] face.
-    const link = ticketLink(d.key);
     if (link) {
       off = span(parts, spans, off, "[?]", TAG_V);
       off = span(parts, spans, off, link, TAG_O);
       off = span(parts, spans, off, " ", TAG_S);
-    } else off = span(parts, spans, off, leader(SLOT_HELP), TAG_S);
+    }
     off = span(parts, spans, off, "[±]", TAG_E);
     off = span(parts, spans, off, "diff " + ctx, TAG_U);
     off = span(parts, spans, off, " ", TAG_S);
@@ -558,7 +564,10 @@ function wtSpans(parts, spans, off, rails, d, btns) {
     //  [done]/[dont] land at ONE column on every wt row (breathing-space idiom).
     off = span(parts, spans, off, " " + subj, TAG_S);
     const pad = 30 - chars(subj);
-    if (pad > 0) off = span(parts, spans, off, leader(pad), TAG_S);
+    //  WORK-016: one space only where the subject TEXT abuts; a subject-less
+    //  row fills the whole tail so the #hashlet's leader stays one run.
+    if (pad > 0)
+      off = span(parts, spans, off, (subj ? " " : "┄") + leader(pad - 1), TAG_S);
     off = span(parts, spans, off, " ", TAG_S);
     off = span(parts, spans, off, "[done]", TAG_Y);
     off = span(parts, spans, off, SPELL.mintOspell(ctx, "done ."), TAG_O);
@@ -578,11 +587,11 @@ function emitRows(sink, rows, btns) {
     if (r.wt) {
       off = wtSpans(parts, spans, off, r.rails, r.wt, btns);
     } else if (r.tail && r.tail.sha !== undefined) {
-      //  A repo row: the NAME alone bold (r2); the button region pads blank so
-      //  its ahbeh/time/hashlet/message share the wt rows' offsets exactly.
+      //  A repo row: the NAME alone bold (r2); the button region ┄-FILLS
+      //  (WORK-016) so its ahbeh/time/hashlet/message share the wt rows' offsets.
       off = prefixSpans(parts, spans, off, r.rails, r.label,
                         r.bold ? TAG_C : TAG_S, r.nav);
-      off = span(parts, spans, off, btns ? " " + " ".repeat(BTNW) : " ", TAG_S);
+      off = span(parts, spans, off, btns ? leader(1 + BTNW) : " ", TAG_S);
       off = ahbehSpans(parts, spans, off, r.counts, btns, null);
       const t = r.tail;
       let rest = render.dateCol(t.ts || 0n) +
