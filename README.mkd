@@ -1,22 +1,27 @@
 #   Beagle SCM
 
 Beagle is a 100% git-compatible source code management system for the LLM era.
-`git` the protocol is timeless; `git` the CLI was created for a different world.
-Beagle uses git's storage model and sync protocol. 
+Beagle uses git's storage model and sync protocol as-is. 
 It reworks everything else for the world where effort is cheap and attention is precious.
 Beagle lets you run many sessions in parallel, track hundreds of worktrees and tickets.
-Beagle is another-level: not a worktree, not a set of branches, but a *wave of evolution*.
+
+Beagle accepts the fact that LLMs are [not compilers][f] and focuses on taming their 
+non-determinism in two ways:
+
+ 1. everything repeatable must be automated,
+ 2. building a selection funnel for the LLM-authored code.
+
+The next-level abstraction is not a worktree, nor a set of branches, but a *wave of evolution*.
 Let them evolve and speciate, then select, mix, repeat.
-Use the power of nature!
-<img align="right" width="40%" src="blob/status.png" alt="be status">
+<p align="right"><br/><img width="40%" src="blob/status.png" alt="be status"></p>
 
 ##  Beagle use
 
-Beagle basic verb vocabulary is HTTP-based and all addressing is URI-based.
+Beagle's basic verb vocabulary is HTTP-like and all addressing is URI-based.
 
   - `get <uri>` is clone/pull/checkout;
   - `post <uri>` is commit/fast-forward/push;
-  - `patch <uri>` is merge/rebase/etc;
+  - `patch <uri>` is merge/rebase/cherry-pick;
   - `put <file>` is stage (also set ref);
   - `delete <file>` is stage deletion (also drop ref);
 
@@ -37,10 +42,11 @@ All Beagle commands start the pager/TUI by default.
 
 ##  Build and Installation
 
-The only dependency is [JAB][j] the minimalistic JavaScript runtime with revision control specific bindings and APIs.
+The only dependency is [JAB][j] the anti-bloat JavaScript runtime.
+JAB packs a lot of revision-control-specific bindings and APIs.
 
- 1. Build it (cmake) or [download][r] it from GitHub, install it in your `$PATH`. 
- 2. You may also want to install a symlink, like `be -> jab`.
+ 1. Build JAB (cmake) or [download][r] it from GitHub, install it in your `$PATH`. 
+ 2. You may also want to install a symlink, like `be -> jab` to use the `be` command.
  3. Clone the Beagle repo [itself][i].
  4. JAB picks the sources from `jsrc/` dirs in `$PWD` and up the parent chain (not `node_modules`).
     See the `jsrc` self-link in this repo; it lets Beagle revision-control itself.
@@ -51,26 +57,31 @@ The only dependency is [JAB][j] the minimalistic JavaScript runtime with revisio
 ##  Customization and Speciation
 
 Any user-facing behavior is implemented in JavaScript and customizable.
-Users are 100% expected to develop their custom verb/view sets. 
-Any established workflow should be taken from LLM's probabilistic hands and [automated][a].
+Users are expected to develop their custom verb/view sets. 
+Any established workflow should be taken from the LLM's probabilistic hands and [automated][a].
 Just put your `jsrc/` on a different level than Beagle's if you want to build on top of it.
 Creating your own set of commands from scratch is also OK, it just takes longer.
 All the revision-control heavy-lifting, source code tokenization and suchlike is all done by [libdog][d] through JAB bindings.
 
+##  Contribution
+
+Beagle is very experimental. All contributions and (especially) feedback are appreciated.
+
 <p align="center">
   <img src="blob/smith.png" alt="Agent Smith seated across from his machine twin, copies lining the walls">
   <br>
-  <em>We no longer coded, Mr.Smith. We are grown. Like them. </em>
+  <em>We no longer coded, Mr. Smith. We are grown. Like them. </em>
   <br>
   <em>Fate, it seems, is not without a sense of irony.</em>
 </p>
 
+[f]: https://replicated.live/blog/follow-up
 [r]: https://github.com/gritzko/jab/releases
 [j]: https://github.com/gritzko/jab/
 [i]: https://github.com/gritzko/beagle-ext
-[u]: https://replicated.wiki/meta/work
-[w]: https://replicated.wiki/blog/worktree
-[a]: https://replicated.wiki/blog/away
-[s]: https://replicated.wiki/blog/status
-[v]: https://replicated.wiki/wiki/Verbs
+[u]: https://replicated.live/meta/work
+[w]: https://replicated.live/blog/worktree
+[a]: https://replicated.live/blog/away
+[s]: https://replicated.live/blog/status
+[v]: https://replicated.live/wiki/Verbs
 [d]: https://github.com/gritzko/libdog
