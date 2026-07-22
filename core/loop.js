@@ -250,16 +250,20 @@ function authorityRepo(args, limit, bare) {
 //  does for an explicit operand, but read from the CONTEXT (never an arg) and NON-FATAL
 //  on a miss (an ambient scope → fall back to cwd).  The context has NO arg path baked
 //  in, so treeAt lands on the tree TOP (or nav'd sub); each RAW arg descends a mount ITSELF.
+//  WORK-009: the last contextRepo miss reason — the refusal names the failing
+//  step (parse / wtdir / treeAt) instead of a blanket "is no worktree".
+let _ctxMiss = "";
 function contextRepo(ctxUri) {
-  let u; try { u = uri._parse(ctxUri || ""); } catch (e) { return null; }
-  if (u.authority === undefined) return null;            // not a `//` nav scope
-  if (u.scheme && TRANSPORT[u.scheme]) return null;      // a transport, not nav
+  _ctxMiss = "";
+  let u; try { u = uri._parse(ctxUri || ""); } catch (e) { _ctxMiss = "is not a parseable URI"; return null; }
+  if (u.authority === undefined) { _ctxMiss = "is not a //worktree scope"; return null; }
+  if (u.scheme && TRANSPORT[u.scheme]) { _ctxMiss = "is a transport URI, not a local worktree"; return null; }
   const host = u.host || "";
   const navStr = uri._make(undefined, u.authority, u.path, undefined, undefined) || ("//" + host);
-  let dir; try { dir = be.wtdir(navStr); } catch (e) { return null; }   // NAVESCAPE → miss
-  if (!dir) return null;
-  let repo; try { repo = be.treeAt(dir); } catch (e) { return null; }
-  if (!repo) return null;
+  let dir; try { dir = be.wtdir(navStr); } catch (e) { _ctxMiss = "does not resolve (" + e + ")"; return null; }
+  if (!dir) { _ctxMiss = "names no worktree under " + be.workRoot(); return null; }
+  let repo; try { repo = be.treeAt(dir); } catch (e) { _ctxMiss = "has no repo tree at " + dir + " (" + e + ")"; return null; }
+  if (!repo) { _ctxMiss = "has no .be tree anchored at " + dir; return null; }
   //  BE-032: treeAt() climbed to the anchor, but the context's PLAIN sub-dir must
   //  survive as the arg-resolution base — that is discover.ctxDir()'s job now, off
   //  the SAME context URI; `dir` here only feeds the BE-048 no-arg fold below.
@@ -446,7 +450,8 @@ function _cli(argv, opts2) {
     //  WORK-002 (was BE-032, relative-only): a mutation's context that anchors NO
     //  worktree refuses LOUDLY unless it names the cwd tree ITSELF (BRO-017 gap).
     if (opts2.context && _isMutation(verb) && !_isOwnCtx(opts2.context))
-      throw "NAVNONE: context " + opts2.context + " is no worktree";
+      throw "NAVNONE: cannot run " + verb + " here — context " + opts2.context +
+            " " + (_ctxMiss || "is no worktree");
     //  URI-016: a context-less REENTRY (slot-edit/click) hands args pre-merged
     //  ROOT-relative, so its context IS the tree root — stated as the URI, which
     //  ctxDir() maps back to repo.wt.  A plain CLI run navs nowhere: "" → cwd.

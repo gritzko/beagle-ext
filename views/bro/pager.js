@@ -35,7 +35,7 @@ const TICKET = require("shared/ticket.js");
 //  `help:` view (views/help/help.js) imports this so its SHORTCUTS section can
 //  never silently drift from `_keyScroll`.  KEEP IN SYNC with `_keyScroll`.
 const SHORTCUTS = [
-  ["q", "quit the pager"],
+  ["q  :quit", "quit the pager"],
   ["j / k", "scroll down / up one line"],
   ["space / b", "page down / up"],
   ["g / G", "jump to top / bottom"],
@@ -1001,6 +1001,9 @@ Pager.prototype._globSpell = function (s) {
 Pager.prototype._applySpell = function (cmd) {
   const s = (cmd || "").trim();
   if (!s) return;
+  //  `:quit` / `:q` is a pager-local action — leave the TUI, like the `q` key;
+  //  never a repo verb (a spell produces hunks, it cannot stop the loop).
+  if (s === "quit" || s === "q") { this.quit = true; return; }
   //  BE-036: expand glob ARG words (*, ?, [...]) to their wt-confined matches
   //  BEFORE composing, so `put *.c` stages each file; failglob (null) → no dispatch.
   const g = this._globSpell(s);
