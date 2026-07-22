@@ -31,18 +31,22 @@ All Beagle commands start the pager/TUI by default.
  1. This implementation is [TUI-centric][s], any command opens a pager.
  2. The TUI is browser-like, all things that can be clickable are clickable.
  3. Both external (e.g. GitHub) and internal (e.g. worktrees) addressing is URI-based.
- 4. Beagle expects [*lots* of worktrees][w1] and many agentic sessions to run in parallel.
- 5. Worktrees get organized into a parent-fork tree, just to keep track of them.
+ 4. Beagle expects [*lots* of worktrees][w] and many agentic sessions to run in parallel.
+ 5. Worktrees in turn get organized into a tree-of-life through upstream-fork links.
+    That is essential to keep track of them and propagate the changes.
 
 ##  Build and Installation
 
 The only dependency is [JAB][j] the minimalistic JavaScript runtime with revision control specific bindings and APIs.
-Build it or download it from GitHub, install it in your `$PATH`. 
-You may also want to install a symlink, like `be -> jab`.
-JAB picks the sources from `jsrc/` dirs in `$PWD` and up the parent chain (not `node_modules`).
-For example `jab hello` would look for `.../jsrc/views/hello/hello.js` or `.../jsrc/verbs/hello/hello.js`.
-See the `jsrc` self-link in this repo; it lets a Beagle repo revision-control itself.
-A bad change may have difficulty being committed in the first place :)
+
+ 1. Build it (cmake) or [download][r] it from GitHub, install it in your `$PATH`. 
+ 2. You may also want to install a symlink, like `be -> jab`.
+ 3. Clone the Beagle repo [itself][i].
+ 4. JAB picks the sources from `jsrc/` dirs in `$PWD` and up the parent chain (not `node_modules`).
+    See the `jsrc` self-link in this repo; it lets Beagle revision-control itself.
+ 5. `cd beagle-ext`
+ 6. `be status`
+ 7. You may submodule beagle-ext into your project as `jsrc/` or make `$HOME/jsrc` symlink.
 
 ##  Customization and Speciation
 
@@ -56,13 +60,17 @@ All the revision-control heavy-lifting, source code tokenization and suchlike is
 <p align="center">
   <img src="blob/smith.png" alt="Agent Smith seated across from his machine twin, copies lining the walls">
   <br>
-  <em>We no longer coded, Mr.Smith. We are grown. Like them. Fate, it seems, is not without a sense of irony.</em>
+  <em>We no longer coded, Mr.Smith. We are grown. Like them. </em>
+  <br>
+  <em>Fate, it seems, is not without a sense of irony.</em>
 </p>
 
+[r]: https://github.com/gritzko/jab/releases
 [j]: https://github.com/gritzko/jab/
+[i]: https://github.com/gritzko/beagle-ext
 [u]: https://replicated.wiki/meta/work
-[w]: https://replicated.wiki/meta/worktree
-[a]: https://replicated.wiki/meta/away
-[s]: https://replicated.wiki/meta/status
+[w]: https://replicated.wiki/blog/worktree
+[a]: https://replicated.wiki/blog/away
+[s]: https://replicated.wiki/blog/status
 [v]: https://replicated.wiki/wiki/Verbs
 [d]: https://github.com/gritzko/libdog
